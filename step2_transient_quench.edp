@@ -1,24 +1,69 @@
 // ============================================================
-// step2_transient_quench.edp
-// Full transient coupled electro-thermal model:
-//   - per-x current-sharing solve (5 conducting layers, equipotential
-//     across thickness) using the REAL sigma(E,T) formulas
-//   - implicit-Euler transient heat equation on the full 7-layer 2D mesh,
-//     with semi-implicit (Picard-lagged) nonlinear k(T), rho*cp(T)
-//   - a transient local heat pulse (not a static hot spot) triggers
-//     the disturbance; operating current fixed at 0.7*Ic(77K)
+// step2_transient_quench.edp  (v2 -- ramped current + surface spot heater)
+//
+// Scenario:
+//   1) Transport current ramps LINEARLY from ~0 to 0.7*Ic(77K) over Tramp,
+//      then holds constant (a function of absolute time t, I(t)).
+//   2) Short settle window to confirm baseline steady state before the
+//      disturbance (per the mesh/regularization fixes, this should hold
+//      at exactly 77K).
+//   3) A 2mm x 2mm spot heater on the TOP Cu surface (label 2), modeled as
+//      a Neumann (imposed flux) boundary condition, delivers 13W for
+//      0.01s: q = 13W / (0.002m*0.002m) = 3.25e6 W/m^2.
+//   4) Recovery window afterward to see whether the disturbance decays or
+//      grows.
+//
+// Time-stepping uses a phase-dependent dt (coarse during the ramp, fine
+// during/after the pulse), automatically capped so it never overshoots a
+// phase boundary (so the pulse start/end land exactly on a step).
 // ============================================================
 
 include "hts_mesh_module.idp"
 include "hts_materials.idp"
 
-real width = 0.012;           // tape width [m] (from comsol_params.csv)
+real width = 0.012;           // tape width [m]
 real Tcold = 77.0;            // K, LN2 bath at the two end contacts (label 3,4)
 
-real Ic77w = JcT(77.0)*tSc;   // critical current per unit width at 77K [A/m]
-real I0w   = 0.7*Ic77w;       // operating current per unit width (below Ic)
+real Ic77w   = JcT(77.0)*tSc;      // critical current per unit width at 77K [A/m]
+real I0wTarg = 0.7*Ic77w;          // target operating current per unit width
 cout << "Ic(77K) per unit width = " << Ic77w << " A/m  (total Ic = " << Ic77w*width << " A)" << endl;
-cout << "Operating current I0   = " << I0w   << " A/m  (total I0 = " << I0w*width   << " A)" << endl;
+cout << "Target I0 = " << I0wTarg << " A/m  (total I0 = " << I0wTarg*width << " A)" << endl;
+
+// ---- timeline ----
+real Tramp      = 0.5;     // s, linear current ramp duration
+real tSettleEnd = 0.55;    // s, end of post-ramp settle window
+real tPulseStart= 0.55;    // s, heater pulse starts
+real tPulseDur  = 0.01;    // s, heater pulse duration (10 ms)
+real tPulseEnd  = tPulseStart + tPulseDur;
+real tEnd       = tPulseEnd + 0.05;   // s, recovery window (shortened -- long-term
+                                       // stability already confirmed in the prior run;
+                                       // this pass is about the current-redistribution
+                                       // dynamics during/just after the pulse)
+
+func real I0ofT(real tt){
+  if (tt < Tramp) return I0wTarg*(tt/Tramp);
+  return I0wTarg;
+}
+
+// ---- heater: 2mm x 2mm spot on the top Cu surface, boundary label 2 ----
+real xHeatLo = Lx*0.5 - 1e-3, xHeatHi = Lx*0.5 + 1e-3;  // 2mm window at mid-length
+real heaterArea = 2e-3*2e-3;               // 4mm^2 (matches physical spot size)
+real heaterPower = 13.0;                   // W
+real qHeater = heaterPower/heaterArea;     // W/m^2 = 3.25e6
+
+// ---- phase-dependent timestep, capped so it never overshoots a boundary ----
+real[int] phaseBounds = [Tramp, tSettleEnd, tPulseStart, tPulseEnd, tEnd];
+func real dtRaw(real tt){
+  if (tt < Tramp)       return 0.02;   // ramp: coarse, current changes slowly
+  if (tt < tSettleEnd)  return 0.01;   // settle: confirm baseline
+  if (tt < tPulseEnd)   return 0.001;  // pulse: resolve the 10ms window finely
+  return 0.003;                        // recovery: moderate resolution
+}
+func real dtCapped(real tt){
+  real d = dtRaw(tt);
+  for (int i=0;i<5;i++) if (tt < phaseBounds[i] && tt+d > phaseBounds[i]) d = phaseBounds[i]-tt;
+  return d;
+}
 
 // ---- region -> material property dispatch ----
 func real kOf(int rg, real Tl){
@@ -44,7 +89,8 @@ func real Itot(real E, real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl
        + tAgT*(E/rhoAg(TagTl)) + tCuT*(E/rhoCu(TcuTl));
 }
 func real solveE(real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl, real Itarget){
-  real Elo = 0.0, Ehi = 4.0;   // 4 V/m comfortably brackets full-normal-state operation
+  if (Itarget <= 0.0) return 0.0;
+  real Elo = 0.0, Ehi = 4.0;
   int guard = 0;
   while (Itot(Ehi,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget && guard<40){ Ehi *= 2.0; guard++; }
   for (int it=0; it<28; it++){
@@ -54,10 +100,9 @@ func real solveE(real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl, real
   return 0.5*(Elo+Ehi);
 }
 
-// non-uniform x-sampling: dense around the disturbance (where current-sharing
-// physics actually happens), sparse elsewhere (stays near-uniform 77K/SC there)
-real xPulseLo = Lx*0.5 - 1e-3, xPulseHi = Lx*0.5 + 1e-3;  // 2mm pulse window at mid-length
-real padLo = xPulseLo - 0.02, padHi = xPulseHi + 0.02;    // dense region +/-2cm around it
+// non-uniform x-sampling: dense around the heater (where current-sharing
+// physics might actually happen), sparse elsewhere
+real padLo = xHeatLo - 0.02, padHi = xHeatHi + 0.02;
 
 int nSparseL = 10, nDense = 60, nSparseR = 10;
 int nxs = nSparseL + nDense + nSparseR;
@@ -68,8 +113,6 @@ real[int] xSample(nxs+1), Earr(nxs+1);
   for (int i=1;i<=nDense;i++)   xSample[idx++] = padLo + (padHi-padLo)*i/nDense;
   for (int i=1;i<=nSparseR;i++) xSample[idx++] = padHi + (Lx-padHi)*i/nSparseR;
 }
-int nxsTotal = nxs; // number of intervals; nxs+1 points total (fixed indices below use nxsTotal+1)
-
 func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
 
 fespace Ph(Th, P0);
@@ -77,7 +120,7 @@ fespace Vh(Th, P1);
 Ph reg = region;
 
 Vh T;
-Vh Told, pulse, w;
+Vh Told, w;
 Ph source, kfun, rhocpfun;
 
 real tStart = 0.0;
@@ -88,58 +131,80 @@ real tStart = 0.0;
   cout << "Resumed from checkpoint at t=" << tStart << "s, Tmax=" << T[].max << "K" << endl;
 }
 
-// representative y-midpoints of each conducting layer for layer-avg T sampling
-real yCuBmid = 0.5*(yB0+yB1), yAgBmid = 0.5*(yB1+yB2),
-     yScmid  = 0.5*(yB4+yB5), yAgTmid = 0.5*(yB5+yB6), yCuTmid = 0.5*(yB6+yB7);
-
-// ---- transient disturbance (localized pulse in REBCO, short duration) ----
-real tauPulse = 2e-3;            // s, pulse duration
-real Qpulse0  = 0.0;   // disabled: pure steady-state verification, no disturbance            // W/m^3, pulse power density in REBCO (calibrating)
-
-real dt = 1e-3;      // s, time step
-int  nSteps = 8;    // small test run first
+// layer y-midpoints (all 7, for full through-thickness diagnostics at the heater)
+real yCuBmid=0.5*(yB0+yB1), yAgBmid=0.5*(yB1+yB2), yHastmid=0.5*(yB2+yB3),
+     yBufmid=0.5*(yB3+yB4), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6), yCuTmid=0.5*(yB6+yB7);
+real xHeatCenter = Lx*0.5;
 
 real t = tStart;
 {
   ofstream fout("/scratch/rosep8/local-FreeFEM/transient_log.csv", append);
-  if (tStart == 0.0) fout << "t,Tmax,Tmax_x,Vtot\n";
+  if (tStart == 0.0)
+    fout << "t,I0,Tmax,Vtot,T_CuB,T_AgB,T_Hast,T_Buf,T_REBCO,T_AgT,T_CuT,"
+         << "IcuB,IagB,Isc,IagT,IcuT,E_heater\n";
 
-  for (int step=0; step<=nSteps; step++){
+  int step = 0;
+  int maxStepsThisRun = 8;   // cap per invocation; rerun the script to continue
+  while (t < tEnd - 1e-12 && step < maxStepsThisRun){
 
-    // 1) per-x electrical solve using CURRENT temperature field
+    real I0w = I0ofT(t);
+
+    // 1) per-x electrical solve using CURRENT temperature field and CURRENT I0(t)
     for (int i=0;i<=nxs;i++){
       real xx = xSample[i];
-      real TcuBl = T(xx,yCuBmid), TagBl = T(xx,yAgBmid), Tscl = T(xx,yScmid),
-           TagTl = T(xx,yAgTmid), TcuTl = T(xx,yCuTmid);
+      real TcuBl=T(xx,yCuBmid), TagBl=T(xx,yAgBmid), Tscl=T(xx,yScmid),
+           TagTl=T(xx,yAgTmid), TcuTl=T(xx,yCuTmid);
       Earr[i] = solveE(TcuBl,TagBl,Tscl,TagTl,TcuTl, I0w);
     }
     real Vtot = 0.0;
     for (int i=0;i<nxs;i++) Vtot += 0.5*(Earr[i]+Earr[i+1])*(xSample[i+1]-xSample[i]);
 
-    cout << "t="<<t<<"s  Tmax="<<T[].max<<"K  Vtot="<<Vtot<<"V" << endl;
-    fout << t << "," << T[].max << "," << 0 << "," << Vtot << "\n";
+    cout << "t="<<t<<"s  I0="<<I0w<<"A/m  Tmax="<<T[].max<<"K  Vtot="<<Vtot<<"V" << endl;
 
-    if (step==nSteps) break;
+    // per-layer current breakdown AT THE HEATER LOCATION (independent explicit
+    // solve at x=xHeatCenter, not reused from the xSample array, for clarity)
+    real TcuBh=T(xHeatCenter,yCuBmid), TagBh=T(xHeatCenter,yAgBmid), Tsch=T(xHeatCenter,yScmid),
+         TagTh=T(xHeatCenter,yAgTmid), TcuTh=T(xHeatCenter,yCuTmid);
+    real Eheater = solveE(TcuBh,TagBh,Tsch,TagTh,TcuTh, I0w);
+    real IcuB = tCuB*(Eheater/rhoCu(TcuBh));
+    real IagB = tAgB*(Eheater/rhoAg(TagBh));
+    real Isc  = tSc*sigmaSc(Eheater,Tsch)*Eheater;
+    real IagT = tAgT*(Eheater/rhoAg(TagTh));
+    real IcuT = tCuT*(Eheater/rhoCu(TcuTh));
+
+    fout << t << "," << I0w << "," << T[].max << "," << Vtot << ","
+         << T(xHeatCenter,yCuBmid) << "," << T(xHeatCenter,yAgBmid) << ","
+         << T(xHeatCenter,yHastmid) << "," << T(xHeatCenter,yBufmid) << ","
+         << T(xHeatCenter,yScmid) << "," << T(xHeatCenter,yAgTmid) << ","
+         << T(xHeatCenter,yCuTmid) << ","
+         << IcuB << "," << IagB << "," << Isc << "," << IagT << "," << IcuT << ","
+         << Eheater << "\n";
+
+    real dt = dtCapped(t);
+    if (dt <= 1e-9) break;
 
     // 2) Joule heat source from the current-sharing solution
     source = (reg==1)*(Efun(x)^2/rhoCu(T)) + (reg==7)*(Efun(x)^2/rhoCu(T))
            + (reg==2)*(Efun(x)^2/rhoAg(T)) + (reg==6)*(Efun(x)^2/rhoAg(T))
            + (reg==5)*(sigmaSc(Efun(x),T)*Efun(x)^2);
 
-    // transient disturbance pulse, active only for t < tauPulse
-    pulse = (t < tauPulse) * (reg==5) * (x>xPulseLo) * (x<xPulseHi) * Qpulse0;
+    // 3) heater flux, active only during the pulse window
+    real qHeaterNow = 0.0;
+    if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
 
-    // 3) implicit Euler thermal step, semi-implicit (lagged) nonlinear coefficients
+    // 4) implicit Euler thermal step, semi-implicit (lagged) nonlinear coefficients
     Told = T;
     kfun     = kOf(region, Told);
     rhocpfun = rhoCpOf(region, Told);
 
     solve heatStep(T, w) =
         int2d(Th)( rhocpfun*T*w/dt + kfun*(dx(T)*dx(w) + dy(T)*dy(w)) )
-      - int2d(Th)( rhocpfun*Told*w/dt + (source+pulse)*w )
+      - int2d(Th)( rhocpfun*Told*w/dt + source*w )
+      - int1d(Th, 2)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*w )
       + on(3, 4, T=Tcold);
 
     t += dt;
+    step++;
   }
 }
 cout << "Wrote /scratch/rosep8/local-FreeFEM/transient_log.csv" << endl;
