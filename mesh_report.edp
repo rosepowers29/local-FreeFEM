@@ -1,0 +1,110 @@
+// ============================================================
+// mesh_report.edp
+// Human-readable entry point for the tape mesh: prints geometry/region
+// statistics to the console AND to mesh_report.txt, and exports the raw
+// vertex/triangle/region data (mesh_vertices.csv, mesh_triangles.csv) so
+// it can be plotted externally (see plot_mesh.py).
+//
+// Run this FIRST when picking the project back up -- it's the fastest way
+// to sanity-check that the geometry/mesh is what you think it is before
+// trusting any physics results built on top of it.
+// ============================================================
+
+include "hts_mesh_module.idp"
+
+fespace Ph(Th, P0);
+Ph reg = region;
+
+string[int] layerName(7);
+layerName[0]="Cu (bottom)"; layerName[1]="Ag (bottom)"; layerName[2]="Hastelloy";
+layerName[3]="Buffer";      layerName[4]="REBCO";       layerName[5]="Ag (top)";
+layerName[6]="Cu (top)";
+real[int] layerThick(7);
+layerThick[0]=tCuB; layerThick[1]=tAgB; layerThick[2]=tSub; layerThick[3]=tBuf;
+layerThick[4]=tSc;  layerThick[5]=tAgT; layerThick[6]=tCuT;
+real[int] layerYlo(7), layerYhi(7);
+layerYlo[0]=yB0; layerYhi[0]=yB1;
+layerYlo[1]=yB1; layerYhi[1]=yB2;
+layerYlo[2]=yB2; layerYhi[2]=yB3;
+layerYlo[3]=yB3; layerYhi[3]=yB4;
+layerYlo[4]=yB4; layerYhi[4]=yB5;
+layerYlo[5]=yB5; layerYhi[5]=yB6;
+layerYlo[6]=yB6; layerYhi[6]=yB7;
+
+{
+ofstream rpt("/scratch/rosep8/local-FreeFEM/mesh_report.txt");
+
+rpt << "============================================================\n";
+rpt << "HTS TAPE MESH REPORT\n";
+rpt << "============================================================\n\n";
+
+rpt << "Overall geometry:\n";
+rpt << "  Length (Lx)        = " << Lx << " m  (" << Lx*1000 << " mm)\n";
+rpt << "  Total thickness    = " << yB7 << " m  (" << yB7*1e6 << " um)\n";
+rpt << "  Aspect ratio (L/t) = " << Lx/yB7 << ":1\n\n";
+
+rpt << "Mesh size:\n";
+rpt << "  Vertices  = " << Th.nv << "\n";
+rpt << "  Triangles = " << Th.nt << "\n";
+rpt << "  x-divisions (nx)   = " << nx << "  -> dx = " << Lx/nx*1000 << " mm\n\n";
+
+rpt << "Layer-by-layer breakdown (bottom to top):\n";
+rpt << "  #  Layer          Thickness[um]  y-range[um]         Region  y-divs  Area(computed)[m^2]  Area(expected)[m^2]  Error\n";
+
+int[int] layerDivs(7);
+layerDivs[0]=nCuB; layerDivs[1]=nAgB; layerDivs[2]=nSub; layerDivs[3]=nBuf;
+layerDivs[4]=nSc;  layerDivs[5]=nAgT; layerDivs[6]=nCuT;
+
+real totalAreaComputed = 0;
+for (int i=0;i<7;i++){
+  Ph isLayer = (reg==(i+1));
+  real areaComputed = int2d(Th)(isLayer);
+  real areaExpected = layerThick[i]*Lx;
+  real err = 100.0*(areaComputed-areaExpected)/areaExpected;
+  totalAreaComputed += areaComputed;
+  rpt << "  " << i+1 << "  " << layerName[i] << "   " << layerThick[i]*1e6
+      << "   [" << layerYlo[i]*1e6 << ", " << layerYhi[i]*1e6 << "]   region=" << i+1
+      << "   ndiv=" << layerDivs[i]
+      << "   " << areaComputed << "   " << areaExpected << "   " << err << "%\n";
+}
+rpt << "\n  Total area (computed) = " << totalAreaComputed << " m^2\n";
+rpt << "  Total area (expected) = " << yB7*Lx << " m^2\n\n";
+
+rpt << "Mesh conformity check (this mesh is built as ONE connected mesh via\n";
+rpt << "movemesh, so interface duplication is structurally impossible -- but\n";
+rpt << "verifying vertex counts at each interface anyway, as a standing check):\n";
+real[int] interfaceY(6);
+interfaceY[0]=yB1; interfaceY[1]=yB2; interfaceY[2]=yB3;
+interfaceY[3]=yB4; interfaceY[4]=yB5; interfaceY[5]=yB6;
+for (int k=0;k<6;k++){
+  int count=0;
+  for (int i=0;i<Th.nv;i++) if (abs(Th(i).y - interfaceY[k]) < 1e-12) count++;
+  rpt << "  interface at y=" << interfaceY[k]*1e6 << "um: " << count
+      << " vertices (expect exactly " << nx+1 << ")\n";
+}
+
+rpt << "\nMesh quality (min/max edge length per region, as a sanity check on\n";
+rpt << "aspect ratio -- these layers are INTENTIONALLY highly anisotropic,\n";
+rpt << "since resolving mm-cm quench physics along x needs dx>>dy):\n";
+for (int i=0;i<7;i++){
+  rpt << "  " << layerName[i] << ": dx~" << Lx/nx*1e6 << "um, dy~"
+      << layerThick[i]/layerDivs[i]*1e6 << "um  (aspect ratio ~"
+      << (Lx/nx)/(layerThick[i]/layerDivs[i]) << ":1)\n";
+}
+}
+cout << "Wrote mesh_report.txt" << endl;
+
+// ---- export raw mesh data for external plotting ----
+{
+  ofstream fv("/scratch/rosep8/local-FreeFEM/mesh_vertices.csv");
+  fv << "x,y\n";
+  for (int i=0;i<Th.nv;i++) fv << Th(i).x << "," << Th(i).y << "\n";
+}
+{
+  ofstream ft("/scratch/rosep8/local-FreeFEM/mesh_triangles.csv");
+  ft << "v0,v1,v2,region\n";
+  for (int i=0;i<Th.nt;i++){
+    ft << Th[i][0] << "," << Th[i][1] << "," << Th[i][2] << "," << Th[i].region << "\n";
+  }
+}
+cout << "Wrote mesh_vertices.csv and mesh_triangles.csv" << endl;

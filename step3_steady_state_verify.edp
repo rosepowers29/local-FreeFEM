@@ -1,0 +1,112 @@
+// ============================================================
+// step3_steady_state_verify.edp
+// Pure steady-state check: I = 0.7*Ic(77K), NO disturbance pulse.
+// Solves the coupled electro-thermal fixed point directly via Picard
+// iteration (no time-stepping): given T, solve per-x current sharing for
+// E(x) and the Joule source; given that source, solve the STEADY heat
+// equation for a new T; repeat to convergence.
+// Expectation: should converge to (very nearly) T=77K everywhere, with
+// ~100% of the transport current carried by REBCO and negligible Vtot.
+// If it doesn't, something is wrong with the model, not the tape.
+// ============================================================
+
+include "hts_mesh_module.idp"
+include "hts_materials.idp"
+
+real width = 0.012;
+real Tcold = 77.0;
+
+real Ic77w = JcT(77.0)*tSc;
+real I0w   = 0.7*Ic77w;
+cout << "Ic(77K) per unit width = " << Ic77w << " A/m  (total Ic = " << Ic77w*width << " A)" << endl;
+cout << "Operating current I0   = " << I0w   << " A/m  (total I0 = " << I0w*width   << " A)" << endl;
+
+func real kOf(int rg, real Tl){
+  if (rg==1 || rg==7) return kCu(Tl);
+  if (rg==2 || rg==6) return kAg(Tl);
+  if (rg==3) return kHast(Tl);
+  if (rg==4) return kBuf(Tl);
+  if (rg==5) return kSc(Tl);
+  return 1.0;
+}
+
+func real Itot(real E, real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl){
+  return tCuB*(E/rhoCu(TcuBl)) + tAgB*(E/rhoAg(TagBl)) + tSc*sigmaSc(E,Tscl)*E
+       + tAgT*(E/rhoAg(TagTl)) + tCuT*(E/rhoCu(TcuTl));
+}
+func real solveE(real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl, real Itarget){
+  real Elo = 0.0, Ehi = 4.0;
+  int guard = 0;
+  while (Itot(Ehi,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget && guard<40){ Ehi *= 2.0; guard++; }
+  for (int it=0; it<40; it++){
+    real Emid = 0.5*(Elo+Ehi);
+    if (Itot(Emid,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget) Elo = Emid; else Ehi = Emid;
+  }
+  return 0.5*(Elo+Ehi);
+}
+
+// uniform x-sampling is fine here -- no localized disturbance to miss
+int nxs = 60;
+real[int] xSample(nxs+1), Earr(nxs+1);
+for (int i=0;i<=nxs;i++) xSample[i] = Lx*i/nxs;
+func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
+
+fespace Ph(Th, P0);
+fespace Vh(Th, P1);
+Ph reg = region;
+
+Vh T = Tcold, Told, Tnew, w;
+Ph source, kfun;
+
+real yCuBmid = 0.5*(yB0+yB1), yAgBmid = 0.5*(yB1+yB2),
+     yScmid  = 0.5*(yB4+yB5), yAgTmid = 0.5*(yB5+yB6), yCuTmid = 0.5*(yB6+yB7);
+
+real relax = 0.2;   // under-relaxation for Picard iteration
+int nPicard = 30;
+for (int iter=0; iter<nPicard; iter++){
+
+  // 1) per-x electrical solve
+  for (int i=0;i<=nxs;i++){
+    real xx = xSample[i];
+    real TcuBl = T(xx,yCuBmid), TagBl = T(xx,yAgBmid), Tscl = T(xx,yScmid),
+         TagTl = T(xx,yAgTmid), TcuTl = T(xx,yCuTmid);
+    Earr[i] = solveE(TcuBl,TagBl,Tscl,TagTl,TcuTl, I0w);
+  }
+  real Vtot = 0.0;
+  for (int i=0;i<nxs;i++) Vtot += 0.5*(Earr[i]+Earr[i+1])*(xSample[i+1]-xSample[i]);
+
+  // fraction of current carried by REBCO at mid-length (diagnostic)
+  real xmid = Lx/2;
+  real Emid = Efun(xmid);
+  real Tscmid = T(xmid,yScmid);
+  real JscMid = sigmaSc(Emid,Tscmid)*Emid;
+  real fracSc = (tSc*JscMid)/I0w;
+
+  cout << "Picard iter "<<iter<<": Tmax="<<T[].max<<"K  Tmin="<<T[].min
+       <<"K  Vtot="<<Vtot<<"V  frac_current_in_REBCO(midlength)="<<fracSc << endl;
+
+  // 2) Joule heat source (steady)
+  source = (reg==1)*(Efun(x)^2/rhoCu(T)) + (reg==7)*(Efun(x)^2/rhoCu(T))
+         + (reg==2)*(Efun(x)^2/rhoAg(T)) + (reg==6)*(Efun(x)^2/rhoAg(T))
+         + (reg==5)*(sigmaSc(Efun(x),T)*Efun(x)^2);
+
+  // 3) steady heat equation, lagged k(T)
+  kfun = kOf(region, T);
+  solve steadyHeat(Tnew, w) =
+      int2d(Th)( kfun*(dx(Tnew)*dx(w) + dy(Tnew)*dy(w)) )
+    - int2d(Th)( source*w )
+    + on(3, 4, Tnew=Tcold);
+
+  T = T + relax*(Tnew - T);   // under-relaxed update
+}
+
+{
+  ofstream fout("/scratch/rosep8/local-FreeFEM/steady_verify.csv");
+  fout << "x,T_rebco,T_cu_top,T_cu_bottom,E\n";
+  for (int i=0;i<=nxs;i++){
+    real xx = xSample[i];
+    fout << xx << "," << T(xx,yScmid) << "," << T(xx,yB7-1e-9) << ","
+         << T(xx,yB0+1e-9) << "," << Earr[i] << "\n";
+  }
+}
+cout << "Wrote /scratch/rosep8/local-FreeFEM/steady_verify.csv" << endl;

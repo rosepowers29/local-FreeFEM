@@ -71,9 +71,12 @@ real Jc0       = 8.0e10;   // A/m^2
 real Tc        = 90.0;     // K
 real n0        = 20.0;     // n-value reference
 real E0        = 1.0e-4;   // V/m  (1 uV/cm criterion)
-real Einit     = 1.0e-4;   // V/m  (E-field floor, avoids E=0 singularity)
+real Einit     = 1.0e-10;  // V/m  (numerical floor ONLY, to avoid literal E=0 singularity --
+                            // NOT the critical-field criterion. Was mistakenly set equal to
+                            // E0 (1e-4), which clamped the entire below-Ic operating regime
+                            // into an artificially resistive state. See discussion.)
 real sigmaRebco= 1.0e6;    // S/m  (REBCO normal-state floor conductivity)
-real sigmaMax  = 1.0e16;   // S/m  (numerical cap)
+real sigmaMax  = 1.0e20;   // raised: 1e16 was binding at the nominal 0.7Ic/77K operating point   // S/m  (numerical cap)
 real sigmaBuf  = 1.0e-10;  // S/m  (buffer, effectively insulating)
 
 func real JcT(real T){
