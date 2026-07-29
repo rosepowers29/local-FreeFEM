@@ -1,0 +1,10 @@
+include "hts_mesh_module.idp"
+fespace Vh(Th, P1);
+Vh T = 77.0;
+{
+  ofstream fchkOut("/home/claude/hts/checkpoint.txt");
+  fchkOut.precision(12);
+  fchkOut << 0.0 << "\n";
+  for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+}
+cout << "Initialized checkpoint, T.n=" << T.n << endl;

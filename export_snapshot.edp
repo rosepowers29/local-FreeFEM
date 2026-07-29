@@ -1,0 +1,25 @@
+include "hts_mesh_module.idp"
+fespace Vh(Th, P1);
+Vh T;
+real tSnap;
+{
+  ifstream fchk("/home/claude/hts/checkpoint.txt");
+  fchk >> tSnap;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+}
+cout << "Loaded checkpoint at t=" << tSnap << "s" << endl;
+
+// 1) full field dump: x, y, region, T  at every mesh vertex
+{
+  ofstream fout("/home/claude/hts/field_snapshot.csv");
+  fout << "x,y,region,T\n";
+  fespace Ph0(Th, P0);
+  Ph0 reg = region;
+  for (int i=0;i<Th.nv;i++){
+    real xx = Th(i).x, yy = Th(i).y;
+    int rg = reg(xx,yy);
+    fout << xx << "," << yy << "," << rg << "," << T(xx,yy) << "\n";
+  }
+}
+
+cout << "Wrote field_snapshot.csv at t=" << tSnap << "s" << endl;

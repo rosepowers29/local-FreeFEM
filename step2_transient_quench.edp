@@ -1,0 +1,152 @@
+// ============================================================
+// step2_transient_quench.edp
+// Full transient coupled electro-thermal model:
+//   - per-x current-sharing solve (5 conducting layers, equipotential
+//     across thickness) using the REAL sigma(E,T) formulas
+//   - implicit-Euler transient heat equation on the full 7-layer 2D mesh,
+//     with semi-implicit (Picard-lagged) nonlinear k(T), rho*cp(T)
+//   - a transient local heat pulse (not a static hot spot) triggers
+//     the disturbance; operating current fixed at 0.7*Ic(77K)
+// ============================================================
+
+include "hts_mesh_module.idp"
+include "hts_materials.idp"
+
+real width = 0.012;           // tape width [m] (from comsol_params.csv)
+real Tcold = 77.0;            // K, LN2 bath at the two end contacts (label 3,4)
+
+real Ic77w = JcT(77.0)*tSc;   // critical current per unit width at 77K [A/m]
+real I0w   = 0.7*Ic77w;       // operating current per unit width (below Ic)
+cout << "Ic(77K) per unit width = " << Ic77w << " A/m  (total Ic = " << Ic77w*width << " A)" << endl;
+cout << "Operating current I0   = " << I0w   << " A/m  (total I0 = " << I0w*width   << " A)" << endl;
+
+// ---- region -> material property dispatch ----
+func real kOf(int rg, real Tl){
+  if (rg==1 || rg==7) return kCu(Tl);
+  if (rg==2 || rg==6) return kAg(Tl);
+  if (rg==3) return kHast(Tl);
+  if (rg==4) return kBuf(Tl);
+  if (rg==5) return kSc(Tl);
+  return 1.0;
+}
+func real rhoCpOf(int rg, real Tl){
+  if (rg==1 || rg==7) return rhomCu*cpCu(Tl);
+  if (rg==2 || rg==6) return rhomAg*cpAg(Tl);
+  if (rg==3) return rhomHast*cpHast(Tl);
+  if (rg==4) return rhomBuf*cpBuf(Tl);
+  if (rg==5) return rhomSc*cpSc(Tl);
+  return 1.0;
+}
+
+// ---- per-x current-sharing model over the 5 conducting layers ----
+func real Itot(real E, real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl){
+  return tCuB*(E/rhoCu(TcuBl)) + tAgB*(E/rhoAg(TagBl)) + tSc*sigmaSc(E,Tscl)*E
+       + tAgT*(E/rhoAg(TagTl)) + tCuT*(E/rhoCu(TcuTl));
+}
+func real solveE(real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl, real Itarget){
+  real Elo = 0.0, Ehi = 4.0;   // 4 V/m comfortably brackets full-normal-state operation
+  int guard = 0;
+  while (Itot(Ehi,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget && guard<40){ Ehi *= 2.0; guard++; }
+  for (int it=0; it<28; it++){
+    real Emid = 0.5*(Elo+Ehi);
+    if (Itot(Emid,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget) Elo = Emid; else Ehi = Emid;
+  }
+  return 0.5*(Elo+Ehi);
+}
+
+// non-uniform x-sampling: dense around the disturbance (where current-sharing
+// physics actually happens), sparse elsewhere (stays near-uniform 77K/SC there)
+real xPulseLo = Lx*0.5 - 1e-3, xPulseHi = Lx*0.5 + 1e-3;  // 2mm pulse window at mid-length
+real padLo = xPulseLo - 0.02, padHi = xPulseHi + 0.02;    // dense region +/-2cm around it
+
+int nSparseL = 10, nDense = 60, nSparseR = 10;
+int nxs = nSparseL + nDense + nSparseR;
+real[int] xSample(nxs+1), Earr(nxs+1);
+{
+  int idx = 0;
+  for (int i=0;i<=nSparseL;i++) xSample[idx++] = padLo*i/nSparseL;
+  for (int i=1;i<=nDense;i++)   xSample[idx++] = padLo + (padHi-padLo)*i/nDense;
+  for (int i=1;i<=nSparseR;i++) xSample[idx++] = padHi + (Lx-padHi)*i/nSparseR;
+}
+int nxsTotal = nxs; // number of intervals; nxs+1 points total (fixed indices below use nxsTotal+1)
+
+func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
+
+fespace Ph(Th, P0);
+fespace Vh(Th, P1);
+Ph reg = region;
+
+Vh T;
+Vh Told, source, kfun, rhocpfun, pulse, w;
+
+real tStart = 0.0;
+{
+  ifstream fchk("/home/claude/hts/checkpoint.txt");
+  fchk >> tStart;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+  cout << "Resumed from checkpoint at t=" << tStart << "s, Tmax=" << T[].max << "K" << endl;
+}
+
+// representative y-midpoints of each conducting layer for layer-avg T sampling
+real yCuBmid = 0.5*(yB0+yB1), yAgBmid = 0.5*(yB1+yB2),
+     yScmid  = 0.5*(yB4+yB5), yAgTmid = 0.5*(yB5+yB6), yCuTmid = 0.5*(yB6+yB7);
+
+// ---- transient disturbance (localized pulse in REBCO, short duration) ----
+real tauPulse = 2e-3;            // s, pulse duration
+real Qpulse0  = 3e12;            // W/m^3, pulse power density in REBCO (calibrating)
+
+real dt = 1e-3;      // s, time step
+int  nSteps = 5;    // small test run first
+
+real t = tStart;
+{
+  ofstream fout("/home/claude/hts/transient_log.csv", append);
+  if (tStart == 0.0) fout << "t,Tmax,Tmax_x,Vtot\n";
+
+  for (int step=0; step<=nSteps; step++){
+
+    // 1) per-x electrical solve using CURRENT temperature field
+    for (int i=0;i<=nxs;i++){
+      real xx = xSample[i];
+      real TcuBl = T(xx,yCuBmid), TagBl = T(xx,yAgBmid), Tscl = T(xx,yScmid),
+           TagTl = T(xx,yAgTmid), TcuTl = T(xx,yCuTmid);
+      Earr[i] = solveE(TcuBl,TagBl,Tscl,TagTl,TcuTl, I0w);
+    }
+    real Vtot = 0.0;
+    for (int i=0;i<nxs;i++) Vtot += 0.5*(Earr[i]+Earr[i+1])*(xSample[i+1]-xSample[i]);
+
+    cout << "t="<<t<<"s  Tmax="<<T[].max<<"K  Vtot="<<Vtot<<"V" << endl;
+    fout << t << "," << T[].max << "," << 0 << "," << Vtot << "\n";
+
+    if (step==nSteps) break;
+
+    // 2) Joule heat source from the current-sharing solution
+    source = (reg==1)*(Efun(x)^2/rhoCu(T)) + (reg==7)*(Efun(x)^2/rhoCu(T))
+           + (reg==2)*(Efun(x)^2/rhoAg(T)) + (reg==6)*(Efun(x)^2/rhoAg(T))
+           + (reg==5)*(sigmaSc(Efun(x),T)*Efun(x)^2);
+
+    // transient disturbance pulse, active only for t < tauPulse
+    pulse = (t < tauPulse) * (reg==5) * (x>xPulseLo) * (x<xPulseHi) * Qpulse0;
+
+    // 3) implicit Euler thermal step, semi-implicit (lagged) nonlinear coefficients
+    Told = T;
+    kfun     = kOf(region, Told);
+    rhocpfun = rhoCpOf(region, Told);
+
+    solve heatStep(T, w) =
+        int2d(Th)( rhocpfun*T*w/dt + kfun*(dx(T)*dx(w) + dy(T)*dy(w)) )
+      - int2d(Th)( rhocpfun*Told*w/dt + (source+pulse)*w )
+      + on(3, 4, T=Tcold);
+
+    t += dt;
+  }
+}
+cout << "Wrote /home/claude/hts/transient_log.csv" << endl;
+
+{
+  ofstream fchkOut("/home/claude/hts/checkpoint.txt");
+  fchkOut.precision(12);
+  fchkOut << t << "\n";
+  for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+}
+cout << "Saved checkpoint at t=" << t << "s" << endl;

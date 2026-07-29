@@ -1,0 +1,110 @@
+// ============================================================
+// hts_mesh_module.idp
+// Builds a 2D (length x thickness) mesh of the real 7-layer REBCO tape.
+//
+// Stack (top -> bottom, as given by the tape spec):
+//   Cu stabilizer   20   um   (top)
+//   Ag               2   um
+//   REBCO            1   um
+//   Buffer         0.2   um
+//   Hastelloy       50   um
+//   Ag             1.8   um
+//   Cu stabilizer   20   um   (bottom)
+//   ---------------------------
+//   total           95   um
+//
+// Region numbering (bottom -> top, since mesh is built bottom-up in y):
+//   1 = Cu (bottom, 20um)      5 = REBCO       (1um)
+//   2 = Ag (bottom, 1.8um)     6 = Ag (top, 2um)
+//   3 = Hastelloy (50um)       7 = Cu (top, 20um)
+//   4 = Buffer (0.2um)
+//
+// Labels: 1=bottom outer face  2=top outer face
+//         3=left end (cold)    4=right end (cold)
+//         11..16 = internal interfaces (informational only, not used for BC)
+// ============================================================
+
+real Lx    = 0.20;      // tape length [m]  (real spec: 20 cm)
+
+// thicknesses, bottom to top [m]
+real tCuB  = 20e-6;     // Cu stabilizer, bottom
+real tAgB  = 1.8e-6;    // Ag, bottom
+real tSub  = 50e-6;     // Hastelloy substrate
+real tBuf  = 0.2e-6;    // buffer stack
+real tSc   = 1e-6;      // REBCO
+real tAgT  = 2e-6;      // Ag, top
+real tCuT  = 20e-6;     // Cu stabilizer, top
+
+real yB0 = 0;
+real yB1 = yB0 + tCuB;   // top of Cu-bottom
+real yB2 = yB1 + tAgB;   // top of Ag-bottom
+real yB3 = yB2 + tSub;   // top of Hastelloy
+real yB4 = yB3 + tBuf;   // top of buffer
+real yB5 = yB4 + tSc;    // top of REBCO
+real yB6 = yB5 + tAgT;   // top of Ag-top
+real yB7 = yB6 + tCuT;   // top of Cu-top  (== total thickness, 95um)
+
+int nx    = 200;   // divisions along length
+
+// through-thickness divisions per layer (thin layers still get >=1)
+int nCuB=8, nAgB=2, nSub=6, nBuf=1, nSc=2, nAgT=2, nCuT=8;
+
+// ---- layer 1: Cu bottom ----
+border b1(t=0,1){x=Lx*t;      y=yB0; label=1;}
+border r1(t=0,1){x=Lx;        y=yB0+(yB1-yB0)*t; label=4;}
+border t1(t=0,1){x=Lx*(1-t);  y=yB1; label=11;}
+border l1(t=0,1){x=0;         y=yB1-(yB1-yB0)*t; label=3;}
+mesh Th1 = buildmesh(b1(nx)+r1(nCuB)+t1(nx)+l1(nCuB));
+
+// ---- layer 2: Ag bottom ----
+border b2(t=0,1){x=Lx*t;      y=yB1; label=11;}
+border r2(t=0,1){x=Lx;        y=yB1+(yB2-yB1)*t; label=4;}
+border t2(t=0,1){x=Lx*(1-t);  y=yB2; label=12;}
+border l2(t=0,1){x=0;         y=yB2-(yB2-yB1)*t; label=3;}
+mesh Th2 = buildmesh(b2(nx)+r2(nAgB)+t2(nx)+l2(nAgB));
+
+// ---- layer 3: Hastelloy substrate ----
+border b3(t=0,1){x=Lx*t;      y=yB2; label=12;}
+border r3(t=0,1){x=Lx;        y=yB2+(yB3-yB2)*t; label=4;}
+border t3(t=0,1){x=Lx*(1-t);  y=yB3; label=13;}
+border l3(t=0,1){x=0;         y=yB3-(yB3-yB2)*t; label=3;}
+mesh Th3 = buildmesh(b3(nx)+r3(nSub)+t3(nx)+l3(nSub));
+
+// ---- layer 4: buffer stack ----
+border b4(t=0,1){x=Lx*t;      y=yB3; label=13;}
+border r4(t=0,1){x=Lx;        y=yB3+(yB4-yB3)*t; label=4;}
+border t4(t=0,1){x=Lx*(1-t);  y=yB4; label=14;}
+border l4(t=0,1){x=0;         y=yB4-(yB4-yB3)*t; label=3;}
+mesh Th4 = buildmesh(b4(nx)+r4(nBuf)+t4(nx)+l4(nBuf));
+
+// ---- layer 5: REBCO ----
+border b5(t=0,1){x=Lx*t;      y=yB4; label=14;}
+border r5(t=0,1){x=Lx;        y=yB4+(yB5-yB4)*t; label=4;}
+border t5(t=0,1){x=Lx*(1-t);  y=yB5; label=15;}
+border l5(t=0,1){x=0;         y=yB5-(yB5-yB4)*t; label=3;}
+mesh Th5 = buildmesh(b5(nx)+r5(nSc)+t5(nx)+l5(nSc));
+
+// ---- layer 6: Ag top ----
+border b6(t=0,1){x=Lx*t;      y=yB5; label=15;}
+border r6(t=0,1){x=Lx;        y=yB5+(yB6-yB5)*t; label=4;}
+border t6(t=0,1){x=Lx*(1-t);  y=yB6; label=16;}
+border l6(t=0,1){x=0;         y=yB6-(yB6-yB5)*t; label=3;}
+mesh Th6 = buildmesh(b6(nx)+r6(nAgT)+t6(nx)+l6(nAgT));
+
+// ---- layer 7: Cu top ----
+border b7(t=0,1){x=Lx*t;      y=yB6; label=16;}
+border r7(t=0,1){x=Lx;        y=yB6+(yB7-yB6)*t; label=4;}
+border t7(t=0,1){x=Lx*(1-t);  y=yB7; label=2;}
+border l7(t=0,1){x=0;         y=yB7-(yB7-yB6)*t; label=3;}
+mesh Th7 = buildmesh(b7(nx)+r7(nCuT)+t7(nx)+l7(nCuT));
+
+int[int] rr1=[0,1], rr2=[0,2], rr3=[0,3], rr4=[0,4], rr5=[0,5], rr6=[0,6], rr7=[0,7];
+Th1 = change(Th1, region=rr1);
+Th2 = change(Th2, region=rr2);
+Th3 = change(Th3, region=rr3);
+Th4 = change(Th4, region=rr4);
+Th5 = change(Th5, region=rr5);
+Th6 = change(Th6, region=rr6);
+Th7 = change(Th7, region=rr7);
+
+mesh Th = Th1 + Th2 + Th3 + Th4 + Th5 + Th6 + Th7;

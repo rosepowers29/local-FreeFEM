@@ -1,0 +1,58 @@
+// ============================================================
+// step1_steady_conduction.edp  (7-layer version)
+// Steady-state heat conduction check on the real 7-layer tape stack.
+// Cooling: T = 77 K fixed at the two end faces (label 3,4) only.
+// All other outer surfaces (label 1,2) are adiabatic (vacuum) -> natural BC.
+// A localized "hot spot" volumetric heat source is placed in the REBCO
+// layer (region 5) near mid-length.
+// ============================================================
+
+include "hts_mesh_module.idp"
+
+fespace Ph(Th, P0);
+Ph reg = region;
+
+// ---- material properties near 77-90 K (placeholders, refine later) ----
+// thermal conductivity [W/(m.K)]
+real kCu   = 400.0;   // copper stabilizer
+real kAg   = 450.0;   // silver
+real kSub  = 10.0;    // Hastelloy C276
+real kBuf  = 2.0;     // buffer stack (oxide, thin, minor thermal role)
+real kSc   = 4.0;     // REBCO (ab-plane effective)
+
+// region map: 1=Cu(bot) 2=Ag(bot) 3=Hastelloy 4=Buffer 5=REBCO 6=Ag(top) 7=Cu(top)
+Ph k = (reg==1)*kCu + (reg==2)*kAg + (reg==3)*kSub
+     + (reg==4)*kBuf + (reg==5)*kSc + (reg==6)*kAg + (reg==7)*kCu;
+
+// volumetric hot-spot source [W/m^3] switched on only in REBCO (region 5)
+real xHotLo = Lx*0.48, xHotHi = Lx*0.52;
+real Q0 = 5e8; // W/m^3
+
+fespace Vh(Th, P1);
+Vh T, w;
+Vh source = (reg==5)*(x>xHotLo)*(x<xHotHi)*Q0;
+
+real Tcold = 77.0; // K, LN2 bath temperature at the two end contacts
+
+solve steadyHeat(T, w) =
+    int2d(Th)( k*(dx(T)*dx(w) + dy(T)*dy(w)) )
+  - int2d(Th)( source*w )
+  + on(3, 4, T=Tcold);
+
+cout << "min T = " << T[].min << "  max T = " << T[].max << " K" << endl;
+
+// sample temperature along REBCO midplane, and along the two outer Cu faces
+{
+  ofstream fout("/home/claude/hts/step1_profile.csv");
+  fout << "x,T_rebco_mid,T_cu_top,T_cu_bottom\n";
+  int n = 200;
+  real yRebco  = 0.5*(yB4+yB5);
+  real yCuTop  = yB7 - 1e-9;
+  real yCuBot  = yB0 + 1e-9;
+  for (int i = 0; i <= n; i++){
+    real xx = Lx*i/n;
+    fout << xx << "," << T(xx, yRebco) << "," << T(xx, yCuTop) << "," << T(xx, yCuBot) << "\n";
+  }
+}
+
+cout << "Wrote /home/claude/hts/step1_profile.csv" << endl;
