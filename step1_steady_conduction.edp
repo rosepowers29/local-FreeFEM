@@ -43,7 +43,7 @@ cout << "min T = " << T[].min << "  max T = " << T[].max << " K" << endl;
 
 // sample temperature along REBCO midplane, and along the two outer Cu faces
 {
-  ofstream fout("/home/claude/hts/step1_profile.csv");
+  ofstream fout("/scratch/rosep8/local-FreeFEM/step1_profile.csv");
   fout << "x,T_rebco_mid,T_cu_top,T_cu_bottom\n";
   int n = 200;
   real yRebco  = 0.5*(yB4+yB5);
@@ -55,4 +55,4 @@ cout << "min T = " << T[].min << "  max T = " << T[].max << " K" << endl;
   }
 }
 
-cout << "Wrote /home/claude/hts/step1_profile.csv" << endl;
+cout << "Wrote /scratch/rosep8/local-FreeFEM/step1_profile.csv" << endl;

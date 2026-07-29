@@ -81,7 +81,7 @@ Vh Told, source, kfun, rhocpfun, pulse, w;
 
 real tStart = 0.0;
 {
-  ifstream fchk("/home/claude/hts/checkpoint.txt");
+  ifstream fchk("/scratch/rosep8/local-FreeFEM/checkpoint.txt");
   fchk >> tStart;
   for (int i=0;i<T.n;i++) fchk >> T[][i];
   cout << "Resumed from checkpoint at t=" << tStart << "s, Tmax=" << T[].max << "K" << endl;
@@ -100,7 +100,7 @@ int  nSteps = 5;    // small test run first
 
 real t = tStart;
 {
-  ofstream fout("/home/claude/hts/transient_log.csv", append);
+  ofstream fout("/scratch/rosep8/local-FreeFEM/transient_log.csv", append);
   if (tStart == 0.0) fout << "t,Tmax,Tmax_x,Vtot\n";
 
   for (int step=0; step<=nSteps; step++){
@@ -141,10 +141,10 @@ real t = tStart;
     t += dt;
   }
 }
-cout << "Wrote /home/claude/hts/transient_log.csv" << endl;
+cout << "Wrote /scratch/rosep8/local-FreeFEM/transient_log.csv" << endl;
 
 {
-  ofstream fchkOut("/home/claude/hts/checkpoint.txt");
+  ofstream fchkOut("/scratch/rosep8/local-FreeFEM/checkpoint.txt");
   fchkOut.precision(12);
   fchkOut << t << "\n";
   for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
