@@ -1,0 +1,30 @@
+include "hts_mesh_module_3d.idp"
+fespace Vh3(Th3, P1);
+Vh3 T;
+{
+  ifstream fchk("/scratch/rosep8/local-FreeFEM/ckpt_3d_shell.txt");
+  real dummy; fchk >> dummy;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+}
+cout << "Loaded checkpoint, Tmax=" << T[].max << endl;
+
+real yCuTop = yB7-1e-9, yCuBot = yB0+1e-9;
+real yAgBmid=0.5*(yB1+yB2), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
+real zMid = width/2, zEdge = 1e-9;
+
+int nxs = 60;
+{
+  ofstream fout("/scratch/rosep8/local-FreeFEM/steady_verify_3d_shell.csv");
+  fout << "x,T_rebco,T_AgB,T_AgT,T_Cu_top_centerZ,T_Cu_top_edgeZ,T_Cu_bottom_centerZ\n";
+  for (int i=0;i<=nxs;i++){
+    real xx = Lx*i/nxs;
+    fout << xx << ","
+         << T(xx,yScmid,zMid) << ","
+         << T(xx,yAgBmid,zMid) << ","
+         << T(xx,yAgTmid,zMid) << ","
+         << T(xx,yCuTop,zMid) << ","
+         << T(xx,yCuTop,zEdge) << ","
+         << T(xx,yCuBot,zMid) << "\n";
+  }
+}
+cout << "Wrote steady_verify_3d_shell.csv" << endl;

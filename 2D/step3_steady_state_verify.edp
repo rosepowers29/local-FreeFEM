@@ -17,7 +17,7 @@ real width = 0.012;
 real Tcold = 77.0;
 
 real Ic77w = JcT(77.0)*tSc;
-real I0w   = 0.7*Ic77w;
+real I0w   = 1.0*Ic77w;
 cout << "Ic(77K) per unit width = " << Ic77w << " A/m  (total Ic = " << Ic77w*width << " A)" << endl;
 cout << "Operating current I0   = " << I0w   << " A/m  (total I0 = " << I0w*width   << " A)" << endl;
 
@@ -35,14 +35,27 @@ func real Itot(real E, real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl
        + tAgT*(E/rhoAg(TagTl)) + tCuT*(E/rhoCu(TcuTl));
 }
 func real solveE(real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl, real Itarget){
-  real Elo = 0.0, Ehi = 4.0;
+  // log-space bisection (see step2 for full rationale) + hard conservation check
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0 = 4.0;
   int guard = 0;
-  while (Itot(Ehi,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget && guard<40){ Ehi *= 2.0; guard++; }
-  for (int it=0; it<40; it++){
-    real Emid = 0.5*(Elo+Ehi);
-    if (Itot(Emid,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget) Elo = Emid; else Ehi = Emid;
+  while (Itot(Ehi0,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget && guard<40){ Ehi0 *= 2.0; guard++; }
+  real logElo = log(1e-30), logEhi = log(Ehi0);
+  for (int it=0; it<50; it++){
+    real logEmid = 0.5*(logElo+logEhi);
+    real Emid = exp(logEmid);
+    if (Itot(Emid,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget) logElo = logEmid; else logEhi = logEmid;
   }
-  return 0.5*(Elo+Ehi);
+  real Efinal = exp(0.5*(logElo+logEhi));
+  real Icheck = Itot(Efinal,TcuBl,TagBl,Tscl,TagTl,TcuTl);
+  real relErr = abs(Icheck-Itarget)/max(Itarget,1e-30);
+  if (relErr > 1e-3){
+    cout << "*** CURRENT CONSERVATION FAILURE in solveE ***" << endl;
+    cout << "    Itarget=" << Itarget << "  Itot(Efinal)=" << Icheck
+         << "  relErr=" << relErr << "  Efinal=" << Efinal << endl;
+  }
+  assert(relErr <= 1e-3);
+  return Efinal;
 }
 
 // uniform x-sampling is fine here -- no localized disturbance to miss
@@ -61,8 +74,8 @@ Ph source, kfun;
 real yCuBmid = 0.5*(yB0+yB1), yAgBmid = 0.5*(yB1+yB2),
      yScmid  = 0.5*(yB4+yB5), yAgTmid = 0.5*(yB5+yB6), yCuTmid = 0.5*(yB6+yB7);
 
-real relax = 0.2;   // under-relaxation for Picard iteration
-int nPicard = 30;
+real relax = 0.5;   // under-relaxation for Picard iteration
+int nPicard = 15;
 for (int iter=0; iter<nPicard; iter++){
 
   // 1) per-x electrical solve

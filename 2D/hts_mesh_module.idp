@@ -42,7 +42,16 @@ func real yphys(real s){
   return yB6 + (yB7-yB6)*(s-c6)/(c7-c6);
 }
 
-int[int] sqLabels = [3,4,2,1];  // left,right,top,bottom labels for the unit square
+// FreeFEM square()'s default label order is [1=bottom,2=right,3=top,4=left].
+// We want OUR labels to be [1=bottom,2=top,3=left(cold end),4=right(cold end)],
+// so remap: default-bottom->1, default-right->4, default-top->2, default-left->3.
+// (A prior version of this array, [3,4,2,1], was WRONG -- it mapped
+// default-bottom->3 and default-left->1, silently swapping which physical
+// face got the Dirichlet cold-end BC in on(3,4,...) calls throughout every
+// downstream script: one real end was left adiabatic, and the BOTTOM face
+// was wrongly clamped to 77K instead -- confirmed via arc-length check,
+// see project history/README.)
+int[int] sqLabels = [1,4,2,3];
 mesh Th = square(nx, ny, [Lx*x, y], label=sqLabels);
 Th = movemesh(Th, [x, yphys(y)]);
 

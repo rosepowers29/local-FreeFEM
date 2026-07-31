@@ -1,0 +1,125 @@
+// ============================================================
+// step4_overcurrent_scan.edp
+// Baseline thermal-runaway threshold: heater OFF, ONE current ratio per
+// invocation (set via TESTRATIO below), cold-start (T=77K) Picard solve.
+// Appends result to overcurrent_scan.csv. Run repeatedly with different
+// TESTRATIO values to build the sweep.
+// ============================================================
+
+include "hts_mesh_module.idp"
+include "hts_materials.idp"
+
+real width = 0.012;
+real Tcold = 77.0;
+real Ic77w = JcT(77.0)*tSc;
+
+real TESTRATIO = 1.005;
+
+func real kOf(int rg, real Tl){
+  if (rg==1 || rg==7) return kCu(Tl);
+  if (rg==2 || rg==6) return kAg(Tl);
+  if (rg==3) return kHast(Tl);
+  if (rg==4) return kBuf(Tl);
+  if (rg==5) return kSc(Tl);
+  return 1.0;
+}
+func real Itot(real E, real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl){
+  return tCuB*(E/rhoCu(TcuBl)) + tAgB*(E/rhoAg(TagBl)) + tSc*sigmaSc(E,Tscl)*E
+       + tAgT*(E/rhoAg(TagTl)) + tCuT*(E/rhoCu(TcuTl));
+}
+func real solveE(real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl, real Itarget){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0 = 4.0;
+  int guard = 0;
+  while (Itot(Ehi0,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget && guard<40){ Ehi0 *= 2.0; guard++; }
+  real logElo = log(1e-30), logEhi = log(Ehi0);
+  for (int it=0; it<50; it++){
+    real logEmid = 0.5*(logElo+logEhi);
+    real Emid = exp(logEmid);
+    if (Itot(Emid,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget) logElo = logEmid; else logEhi = logEmid;
+  }
+  real Efinal = exp(0.5*(logElo+logEhi));
+  real Icheck = Itot(Efinal,TcuBl,TagBl,Tscl,TagTl,TcuTl);
+  real relErr = abs(Icheck-Itarget)/max(Itarget,1e-30);
+  assert(relErr <= 1e-3);
+  return Efinal;
+}
+
+int nxs = 30;   // reduced -- spatially uniform problem, doesn't need fine sampling
+real[int] xSample(nxs+1), Earr(nxs+1);
+for (int i=0;i<=nxs;i++) xSample[i] = Lx*i/nxs;
+func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
+
+fespace Ph(Th, P0);
+fespace Vh(Th, P1);
+Ph reg = region;
+Vh T = Tcold, Tnew, w;
+Ph source, kfun;
+
+real yCuBmid=0.5*(yB0+yB1), yAgBmid=0.5*(yB1+yB2),
+     yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6), yCuTmid=0.5*(yB6+yB7);
+
+real I0w = TESTRATIO*Ic77w;
+real relax = 0.3;
+int nPicard = 80;             // overall cap across all chunks for this ratio
+int nPicardThisRun = 10;   // per-invocation cap; rerun to continue (checkpointed per ratio)
+real TmaxPrev = Tcold;
+int converged = 0;
+int iterUsed = 0;
+int iterStart = 0;
+
+// resume from a per-ratio checkpoint (must be initialized first via
+// init_oc_checkpoint.edp with the matching TESTRATIO)
+string ckptFile = "/scratch/rosep8/local-FreeFEM/oc_ckpt.txt";
+{
+  ifstream fchk(ckptFile);
+  fchk >> iterStart;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+  cout << "Resumed ratio="<<TESTRATIO<<" from iter="<<iterStart<<" Tmax="<<T[].max << endl;
+}
+TmaxPrev = T[].max;
+
+for (int iter=iterStart; iter<min(iterStart+nPicardThisRun, nPicard); iter++){
+  for (int i=0;i<=nxs;i++){
+    real xx = xSample[i];
+    real TcuBl=T(xx,yCuBmid), TagBl=T(xx,yAgBmid), Tscl=T(xx,yScmid),
+         TagTl=T(xx,yAgTmid), TcuTl=T(xx,yCuTmid);
+    Earr[i] = solveE(TcuBl,TagBl,Tscl,TagTl,TcuTl, I0w);
+  }
+  source = (reg==1)*(Efun(x)^2/rhoCu(T)) + (reg==7)*(Efun(x)^2/rhoCu(T))
+         + (reg==2)*(Efun(x)^2/rhoAg(T)) + (reg==6)*(Efun(x)^2/rhoAg(T))
+         + (reg==5)*(sigmaSc(Efun(x),T)*Efun(x)^2);
+  kfun = kOf(region, T);
+  solve steadyHeat(Tnew, w) =
+      int2d(Th)( kfun*(dx(Tnew)*dx(w) + dy(Tnew)*dy(w)) )
+    - int2d(Th)( source*w )
+    + on(3, 4, Tnew=Tcold);
+
+  T = T + relax*(Tnew - T);
+  iterUsed = iter+1;
+  real TmaxNow = T[].max;
+  cout << "ratio="<<TESTRATIO<<" iter="<<iter<<" Tmax="<<TmaxNow << endl;
+
+  if (TmaxNow > 900.0){ converged = 0; TmaxPrev = TmaxNow; break; }
+  if (iter>5 && abs(TmaxNow-TmaxPrev) < 1e-4){ converged = 1; TmaxPrev = TmaxNow; break; }
+  TmaxPrev = TmaxNow;
+}
+
+bool isDone = (converged==1) || (TmaxPrev>900.0) || (iterUsed>=nPicard);
+
+// always save checkpoint so a later extended nPicard can continue from here
+{
+  ofstream fchkOut(ckptFile);
+  fchkOut.precision(12);
+  fchkOut << iterUsed << "\n";
+  for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+}
+
+if (!isDone){
+  cout << "Checkpoint saved at iter="<<iterUsed<<", not yet converged -- rerun to continue." << endl;
+} else {
+  ofstream fout("/scratch/rosep8/local-FreeFEM/overcurrent_scan.csv", append);
+  fout << TESTRATIO << "," << I0w << "," << TmaxPrev << "," << converged << "," << iterUsed << "\n";
+  cout << "=== FINAL ratio="<<TESTRATIO<<" I0="<<I0w<<" Tmax="<<TmaxPrev
+       <<" converged="<<converged<<" (iters="<<iterUsed<<") ===" << endl;
+}

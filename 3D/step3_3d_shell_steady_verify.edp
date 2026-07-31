@@ -1,0 +1,129 @@
+// ============================================================
+// step3_3d_shell_steady_verify.edp
+// 3D steady-state verification WITH the copper shell geometry.
+// Current-sharing now has 4 parallel conducting channels (down from 5):
+//   Cu-shell (merged top+bottom+sides, area=shellArea)
+//   Ag-bottom (core only, area=tAgB*coreWidth)
+//   REBCO (core only, area=tSc*coreWidth)
+//   Ag-top (core only, area=tAgT*coreWidth)
+// kfun/source computed cheaply on the 2D (x,y) cross-section at z=width/2
+// (inside the core) and lifted into 3D, exactly as in the no-shell model --
+// still valid since there's no slit yet (z-uniform within each of the
+// core and shell z-ranges separately).
+// ============================================================
+
+include "hts_mesh_module_3d.idp"
+include "hts_materials.idp"
+
+real Tcold = 77.0;
+real shellArea = width*yB7 - coreWidth*(yB6-yB1);
+real TESTRATIO = 1.00;
+
+// Work in ABSOLUTE current (Amps) throughout -- the old "per unit width"
+// convention from the 2D/no-shell model doesn't cleanly apply here, since
+// the shell spans the full 12mm width while the core layers span only
+// coreWidth. Itot() below uses ABSOLUTE cross-sectional areas, so the
+// target must be an absolute current too.
+real IcRebcoActual = JcT(77.0)*tSc*coreWidth;   // actual REBCO critical current [A]
+real I0w = TESTRATIO * IcRebcoActual;
+
+func real kOf(int rg, real Tl){
+  if (rg==1) return kCu(Tl);
+  if (rg==2 || rg==6) return kAg(Tl);
+  if (rg==3) return kHast(Tl);
+  if (rg==4) return kBuf(Tl);
+  if (rg==5) return kSc(Tl);
+  return 1.0;
+}
+// Itot/solveE now take a SINGLE representative Cu-shell temperature
+// (sampled at the top-center, nearest REBCO) instead of separate CuB/CuT
+func real Itot(real E, real TcuShell, real TagB, real Tsc, real TagT){
+  return shellArea*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
+       + tSc*coreWidth*sigmaSc(E,Tsc)*E + tAgT*coreWidth*(E/rhoAg(TagT));
+}
+func real solveE(real TcuShell, real TagB, real Tsc, real TagT, real Itarget){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0 = 4.0;
+  int guard = 0;
+  while (Itot(Ehi0,TcuShell,TagB,Tsc,TagT) < Itarget && guard<40){ Ehi0 *= 2.0; guard++; }
+  real logElo = log(1e-30), logEhi = log(Ehi0);
+  for (int it=0; it<50; it++){
+    real logEmid = 0.5*(logElo+logEhi);
+    real Emid = exp(logEmid);
+    if (Itot(Emid,TcuShell,TagB,Tsc,TagT) < Itarget) logElo = logEmid; else logEhi = logEmid;
+  }
+  real Efinal = exp(0.5*(logElo+logEhi));
+  real Icheck = Itot(Efinal,TcuShell,TagB,Tsc,TagT);
+  real relErr = abs(Icheck-Itarget)/max(Itarget,1e-30);
+  assert(relErr <= 1e-3);
+  return Efinal;
+}
+
+int nxs = 30;
+real[int] xSample(nxs+1), Earr(nxs+1);
+for (int i=0;i<=nxs;i++) xSample[i] = Lx*i/nxs;
+func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
+
+fespace Vh3(Th3, P1);
+fespace Ph3(Th3, P0);
+Ph3 reg = region;
+Vh3 T = Tcold, Tnew, w;
+Ph3 kfun, source;
+
+real zMid = width/2;   // representative z, well inside the core
+real yCuTop = yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
+
+real relax = 0.5;
+int nPicard = 30;
+int nPicardThisRun = 8;
+cout << "Ic_REBCO (absolute, A)=" << IcRebcoActual << "  I0 (A)=" << I0w << " (ratio="<<TESTRATIO<<")" << endl;
+
+int iterStart = 0;
+{
+  ifstream fchk("/scratch/rosep8/local-FreeFEM/ckpt_3d_shell.txt");
+  fchk >> iterStart;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+  cout << "Resumed from iter="<<iterStart<<" Tmax="<<T[].max << endl;
+}
+
+for (int iter=iterStart; iter<min(iterStart+nPicardThisRun,nPicard); iter++){
+  real t0 = clock();
+  for (int i=0;i<=nxs;i++){
+    real xx = xSample[i];
+    real TcuShell=T(xx,yCuTop,zMid), TagB=T(xx,yAgBmid,zMid),
+         Tsc=T(xx,yScmid,zMid), TagT=T(xx,yAgTmid,zMid);
+    Earr[i] = solveE(TcuShell,TagB,Tsc,TagT, I0w);
+  }
+  // source/kfun evaluated directly in 3D but ONLY as functions of (region,x,T) --
+  // still cheap since region is a fast P0 lookup and T eval is O(1); the earlier
+  // >100s cost came specifically from calling material-property table lookups
+  // (rhoCu/rhoAg/sigmaSc) per-element -- unavoidable here since the shell's
+  // resistivity genuinely needs the LOCAL 3D temperature, not a 2D proxy, given
+  // the shell wraps around all 4 sides. Mitigated by the coarser z-resolution.
+  source = (reg==1)*(Efun(x)^2/rhoCu(T)) + (reg==2)*(Efun(x)^2/rhoAg(T))
+         + (reg==6)*(Efun(x)^2/rhoAg(T)) + (reg==5)*(sigmaSc(Efun(x),T)*Efun(x)^2);
+  kfun = kOf(region, T);
+
+  solve steadyHeat3D(Tnew, w) =
+      int3d(Th3)( kfun*(dx(Tnew)*dx(w) + dy(Tnew)*dy(w) + dz(Tnew)*dz(w)) )
+    - int3d(Th3)( source*w )
+    + on(2, 4, Tnew=Tcold);
+
+  T = T + relax*(Tnew - T);
+  real t1 = clock();
+  cout << "iter="<<iter<<" Tmax="<<T[].max<<"  (iter time "<<(t1-t0)<<"s)" << endl;
+}
+
+{
+  ofstream fchkOut("/scratch/rosep8/local-FreeFEM/ckpt_3d_shell.txt");
+  fchkOut.precision(12);
+  fchkOut << min(iterStart+nPicardThisRun,nPicard) << "\n";
+  for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+}
+cout << "Checkpoint saved." << endl;
+
+cout << "--- z-independence check (within core), x=Lx/2, y=yScmid ---" << endl;
+for (int i=1; i<3; i++){
+  real zz = zB1 + (zB2-zB1)*i/3;
+  cout << "z="<<zz<<"  T="<<T(Lx/2, yScmid, zz) << endl;
+}

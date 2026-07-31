@@ -1,0 +1,69 @@
+// ============================================================
+// hts_mesh_module_3d.idp  (v4 -- copper shell, UNIFORM x/z resolution)
+//
+// Reverted from a dense/sparse heater-aware mesh (v3) after finding it
+// caused severe linear-solver ill-conditioning (CG needed >30,000
+// iterations to converge, direct solver correspondingly slow) -- the
+// sharp resolution transitions were the likely cause. Back to simple
+// UNIFORM resolution in x and z (matching the style that worked reliably
+// before), with nx/nz bumped up moderately from the v2 baseline to give
+// reasonable (if not extremely fine) resolution of a 2mm-scale heater
+// footprint: dx=200mm/70=2.9mm, dz(core)~11.96mm/30=0.4mm.
+//
+// Geometry/regions/labels UNCHANGED from v2 (see that version's header
+// for full details): 6 regions (Cu shell + 5 core layers), continuous
+// 20um copper shell wrapping the full perimeter, cube()'s native label
+// convention (cold ends = labels 2,4).
+// ============================================================
+
+load "msh3"
+
+real Lx    = 0.20;
+real tCuB  = 20e-6, tAgB = 1.8e-6, tSub = 50e-6, tBuf = 0.2e-6,
+     tSc   = 1e-6,  tAgT = 2e-6,  tCuT = 20e-6;
+real yB0=0, yB1=yB0+tCuB, yB2=yB1+tAgB, yB3=yB2+tSub, yB4=yB3+tBuf,
+     yB5=yB4+tSc, yB6=yB5+tAgT, yB7=yB6+tCuT;
+
+real width   = 0.012;
+real tSideCu = 20e-6;
+real zB0 = 0, zB1 = tSideCu, zB2 = width - tSideCu, zB3 = width;
+real coreWidth = zB2 - zB1;
+
+int nx = 50;    // dx ~ 4mm
+int nCuB=8, nAgB=2, nSub=6, nBuf=1, nSc=2, nAgT=2, nCuT=8;
+int ny = nCuB+nAgB+nSub+nBuf+nSc+nAgT+nCuT;
+
+int nzSide=2, nzCore=16;   // dz(core) ~ 0.4mm, ~5 elements across a 2mm heater
+int nz = 2*nzSide + nzCore;
+
+func real yphys(real s){
+  real fCuB=nCuB*1.0/ny, fAgB=nAgB*1.0/ny, fSub=nSub*1.0/ny, fBuf=nBuf*1.0/ny,
+       fSc=nSc*1.0/ny, fAgT=nAgT*1.0/ny, fCuT=nCuT*1.0/ny;
+  real c0=0, c1=c0+fCuB, c2=c1+fAgB, c3=c2+fSub, c4=c3+fBuf, c5=c4+fSc, c6=c5+fAgT, c7=c6+fCuT;
+  if (s<=c1) return yB0 + (yB1-yB0)*(s-c0)/(c1-c0);
+  if (s<=c2) return yB1 + (yB2-yB1)*(s-c1)/(c2-c1);
+  if (s<=c3) return yB2 + (yB3-yB2)*(s-c2)/(c3-c2);
+  if (s<=c4) return yB3 + (yB4-yB3)*(s-c3)/(c4-c3);
+  if (s<=c5) return yB4 + (yB5-yB4)*(s-c4)/(c5-c4);
+  if (s<=c6) return yB5 + (yB6-yB5)*(s-c5)/(c6-c5);
+  return yB6 + (yB7-yB6)*(s-c6)/(c7-c6);
+}
+
+func real zphys(real s){
+  real fS = nzSide*1.0/nz, fC = nzCore*1.0/nz;
+  real c0=0, c1=c0+fS, c2=c1+fC, c3=c2+fS;
+  if (s<=c1) return zB0 + (zB1-zB0)*(s-c0)/(c1-c0);
+  if (s<=c2) return zB1 + (zB2-zB1)*(s-c1)/(c2-c1);
+  return zB2 + (zB3-zB2)*(s-c2)/(c3-c2);
+}
+
+mesh3 Th3 = cube(nx, ny, nz, [Lx*x, yphys(y), zphys(z)]);
+
+fespace Ph3region(Th3, P0);
+Ph3region region0 = (y<=yB1 || y>yB6 || z<=zB1 || z>=zB2)*1
+                   + (y>yB1 && y<=yB2 && z>zB1 && z<zB2)*2
+                   + (y>yB2 && y<=yB3 && z>zB1 && z<zB2)*3
+                   + (y>yB3 && y<=yB4 && z>zB1 && z<zB2)*4
+                   + (y>yB4 && y<=yB5 && z>zB1 && z<zB2)*5
+                   + (y>yB5 && y<=yB6 && z>zB1 && z<zB2)*6;
+Th3 = change(Th3, fregion=region0(x,y,z));

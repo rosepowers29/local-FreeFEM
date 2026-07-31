@@ -1,0 +1,10 @@
+include "hts_mesh_module_3d.idp"
+fespace Vh3(Th3, P1);
+Vh3 T = 77.0;
+{
+  ofstream fchkOut("/scratch/rosep8/local-FreeFEM/ckpt_3d_shell.txt");
+  fchkOut.precision(12);
+  fchkOut << 0 << "\n";
+  for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+}
+cout << "Initialized ckpt_3d_shell.txt, T.n=" << T.n << endl;

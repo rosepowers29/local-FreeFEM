@@ -1,0 +1,47 @@
+============================================================
+HTS TAPE MESH REPORT
+============================================================
+
+Overall geometry:
+  Length (Lx)        = 0.2 m  (200 mm)
+  Total thickness    = 9.5e-05 m  (95 um)
+  Aspect ratio (L/t) = 2105.26:1
+
+Mesh size:
+  Vertices  = 6030
+  Triangles = 11600
+  x-divisions (nx)   = 200  -> dx = 1 mm
+
+Layer-by-layer breakdown (bottom to top):
+  #  Layer          Thickness[um]  y-range[um]         Region  y-divs  Area(computed)[m^2]  Area(expected)[m^2]  Error
+  1  Cu (bottom)   20   [0, 20]   region=1   ndiv=8   4e-06   4e-06   -1.37643e-11%
+  2  Ag (bottom)   1.8   [20, 21.8]   region=2   ndiv=2   3.6e-07   3.6e-07   -4.11752e-12%
+  3  Hastelloy   50   [21.8, 71.8]   region=3   ndiv=6   1e-05   1e-05   1.44673e-11%
+  4  Buffer   0.2   [71.8, 72]   region=4   ndiv=1   4e-08   4e-08   1.5551e-12%
+  5  REBCO   1   [72, 73]   region=5   ndiv=2   2e-07   2e-07   2.47492e-12%
+  6  Ag (top)   2   [73, 75]   region=6   ndiv=2   4e-07   4e-07   2.47492e-12%
+  7  Cu (top)   20   [75, 95]   region=7   ndiv=8   4e-06   4e-06   -1.37643e-11%
+
+  Total area (computed) = 1.9e-05 m^2
+  Total area (expected) = 1.9e-05 m^2
+
+Mesh conformity check (this mesh is built as ONE connected mesh via
+movemesh, so interface duplication is structurally impossible -- but
+verifying vertex counts at each interface anyway, as a standing check):
+  interface at y=20um: 201 vertices (expect exactly 201)
+  interface at y=21.8um: 201 vertices (expect exactly 201)
+  interface at y=71.8um: 201 vertices (expect exactly 201)
+  interface at y=72um: 201 vertices (expect exactly 201)
+  interface at y=73um: 201 vertices (expect exactly 201)
+  interface at y=75um: 201 vertices (expect exactly 201)
+
+Mesh quality (min/max edge length per region, as a sanity check on
+aspect ratio -- these layers are INTENTIONALLY highly anisotropic,
+since resolving mm-cm quench physics along x needs dx>>dy):
+  Cu (bottom): dx~1000um, dy~2.5um  (aspect ratio ~400:1)
+  Ag (bottom): dx~1000um, dy~0.9um  (aspect ratio ~1111.11:1)
+  Hastelloy: dx~1000um, dy~8.33333um  (aspect ratio ~120:1)
+  Buffer: dx~1000um, dy~0.2um  (aspect ratio ~5000:1)
+  REBCO: dx~1000um, dy~0.5um  (aspect ratio ~2000:1)
+  Ag (top): dx~1000um, dy~1um  (aspect ratio ~1000:1)
+  Cu (top): dx~1000um, dy~2.5um  (aspect ratio ~400:1)

@@ -1,0 +1,41 @@
+// ============================================================
+// make_normal_zone.edp
+// Loads the 0.7*Ic pre-pulse checkpoint (uniform 77K, steady current already
+// flowing) and OVERWRITES temperature to a value above Tc across the FULL
+// cross-section over a chosen length window centered at x=Lx/2 -- i.e.
+// directly imposes an already-developed normal zone of length Lzone,
+// rather than trying to create one indirectly via a surface heater pulse.
+// This lets us test the classical MPZ question directly: does a normal
+// zone of THIS length grow or shrink under transport current alone?
+// ============================================================
+
+include "hts_mesh_module.idp"
+fespace Vh(Th, P1);
+Vh T;
+
+real tCkpt;
+{
+  ifstream fchk("/scratch/rosep8/local-FreeFEM/checkpoint_prepulse_0.55s.txt");
+  fchk >> tCkpt;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+}
+cout << "Loaded base checkpoint at t=" << tCkpt << "s, Tmax=" << T[].max << "K" << endl;
+
+real Lzone = 0.180;   // length of the imposed normal zone [m] -- ADJUST to bisect
+real Tzone = 200.0;    // K, imposed temperature within the zone (above Tc=90K)
+real xLo = Lx*0.5 - Lzone*0.5, xHi = Lx*0.5 + Lzone*0.5;
+
+Vh mask = (x>xLo)*(x<xHi);
+T = mask*Tzone + (1-mask)*T;
+
+cout << "Imposed normal zone: length=" << Lzone*1000 << "mm  T=" << Tzone
+     << "K  over x in [" << xLo << ", " << xHi << "]" << endl;
+cout << "New Tmax=" << T[].max << "K" << endl;
+
+{
+  ofstream fchkOut("/scratch/rosep8/local-FreeFEM/checkpoint.txt");
+  fchkOut.precision(12);
+  fchkOut << tCkpt << "\n";
+  for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+}
+cout << "Saved as checkpoint.txt, ready to run step2 (heater disabled) from here." << endl;

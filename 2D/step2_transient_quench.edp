@@ -25,7 +25,7 @@ real width = 0.012;           // tape width [m]
 real Tcold = 77.0;            // K, LN2 bath at the two end contacts (label 3,4)
 
 real Ic77w   = JcT(77.0)*tSc;      // critical current per unit width at 77K [A/m]
-real I0wTarg = 0.7*Ic77w;          // target operating current per unit width
+real I0wTarg = 0.7*Ic77w;          // operating current (revert to 0.7*Ic for MPZ test)
 cout << "Ic(77K) per unit width = " << Ic77w << " A/m  (total Ic = " << Ic77w*width << " A)" << endl;
 cout << "Target I0 = " << I0wTarg << " A/m  (total I0 = " << I0wTarg*width << " A)" << endl;
 
@@ -35,10 +35,7 @@ real tSettleEnd = 0.55;    // s, end of post-ramp settle window
 real tPulseStart= 0.55;    // s, heater pulse starts
 real tPulseDur  = 0.01;    // s, heater pulse duration (10 ms)
 real tPulseEnd  = tPulseStart + tPulseDur;
-real tEnd       = tPulseEnd + 0.05;   // s, recovery window (shortened -- long-term
-                                       // stability already confirmed in the prior run;
-                                       // this pass is about the current-redistribution
-                                       // dynamics during/just after the pulse)
+real tEnd       = tPulseEnd + 0.15;   // s, recovery observation window
 
 func real I0ofT(real tt){
   if (tt < Tramp) return I0wTarg*(tt/Tramp);
@@ -48,20 +45,20 @@ func real I0ofT(real tt){
 // ---- heater: 2mm x 2mm spot on the top Cu surface, boundary label 2 ----
 real xHeatLo = Lx*0.5 - 1e-3, xHeatHi = Lx*0.5 + 1e-3;  // 2mm window at mid-length
 real heaterArea = 2e-3*2e-3;               // 4mm^2 (matches physical spot size)
-real heaterPower = 13.0;                   // W
+real heaterPower = 13.0;                   // W (original modest value)
 real qHeater = heaterPower/heaterArea;     // W/m^2 = 3.25e6
 
 // ---- phase-dependent timestep, capped so it never overshoots a boundary ----
 real[int] phaseBounds = [Tramp, tSettleEnd, tPulseStart, tPulseEnd, tEnd];
 func real dtRaw(real tt){
-  if (tt < Tramp)       return 0.02;   // ramp: coarse, current changes slowly
-  if (tt < tSettleEnd)  return 0.01;   // settle: confirm baseline
-  if (tt < tPulseEnd)   return 0.001;  // pulse: resolve the 10ms window finely
-  return 0.003;                        // recovery: moderate resolution
+  if (tt < Tramp)       return 0.02;
+  if (tt < tSettleEnd)  return 0.01;
+  if (tt < tPulseEnd)   return 0.001;
+  return 0.003;
 }
 func real dtCapped(real tt){
   real d = dtRaw(tt);
-  for (int i=0;i<5;i++) if (tt < phaseBounds[i] && tt+d > phaseBounds[i]) d = phaseBounds[i]-tt;
+  for (int i=0;i<5;i++) if (tt < phaseBounds[i]-1e-9 && tt+d > phaseBounds[i]) d = phaseBounds[i]-tt;
   return d;
 }
 
@@ -89,15 +86,42 @@ func real Itot(real E, real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl
        + tAgT*(E/rhoAg(TagTl)) + tCuT*(E/rhoCu(TcuTl));
 }
 func real solveE(real TcuBl, real TagBl, real Tscl, real TagTl, real TcuTl, real Itarget){
+  // Bisect in log(E), not linear E: REBCO's power law (n~13-20) means E spans an
+  // enormous dynamic range as current varies -- e.g. E~1e-7 V/m near 0.7*Ic but
+  // ~1e-12 V/m at just 4% of Ic. A fixed 28-iteration LINEAR bisection over [0,4]
+  // only resolves to ~1.5e-8 absolute, which cannot represent these tiny values at
+  // all: it silently bottoms out and returns a meaningless floor value instead of
+  // the converged root (this was a real bug -- confirmed by checking that Itot()
+  // at the returned E did not actually match Itarget for small target currents).
+  // Log-space bisection has no such absolute floor; 80 iterations gives ample
+  // relative precision across the whole physically relevant range.
   if (Itarget <= 0.0) return 0.0;
-  real Elo = 0.0, Ehi = 4.0;
+  real Ehi0 = 4.0;
   int guard = 0;
-  while (Itot(Ehi,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget && guard<40){ Ehi *= 2.0; guard++; }
-  for (int it=0; it<28; it++){
-    real Emid = 0.5*(Elo+Ehi);
-    if (Itot(Emid,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget) Elo = Emid; else Ehi = Emid;
+  while (Itot(Ehi0,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget && guard<40){ Ehi0 *= 2.0; guard++; }
+  real logElo = log(1e-30), logEhi = log(Ehi0);
+  for (int it=0; it<50; it++){
+    real logEmid = 0.5*(logElo+logEhi);
+    real Emid = exp(logEmid);
+    if (Itot(Emid,TcuBl,TagBl,Tscl,TagTl,TcuTl) < Itarget) logElo = logEmid; else logEhi = logEmid;
   }
-  return 0.5*(Elo+Ehi);
+  real Efinal = exp(0.5*(logElo+logEhi));
+
+  // CONSERVATION CHECK: Itot(Efinal) must actually match Itarget. This is the
+  // exact class of bug found previously (bisection silently bottoming out on
+  // resolution and returning a value that did NOT satisfy the target) -- fail
+  // hard rather than silently propagate a wrong E-field into the simulation.
+  real Icheck = Itot(Efinal,TcuBl,TagBl,Tscl,TagTl,TcuTl);
+  real relErr = abs(Icheck-Itarget)/max(Itarget,1e-30);
+  if (relErr > 1e-3){
+    cout << "*** CURRENT CONSERVATION FAILURE in solveE ***" << endl;
+    cout << "    Itarget=" << Itarget << "  Itot(Efinal)=" << Icheck
+         << "  relErr=" << relErr << "  Efinal=" << Efinal << endl;
+    cout << "    layer T: CuB="<<TcuBl<<" AgB="<<TagBl<<" Sc="<<Tscl<<" AgT="<<TagTl<<" CuT="<<TcuTl<<endl;
+  }
+  assert(relErr <= 1e-3);
+
+  return Efinal;
 }
 
 // non-uniform x-sampling: dense around the heater (where current-sharing
@@ -138,8 +162,8 @@ real xHeatCenter = Lx*0.5;
 
 real t = tStart;
 {
-  ofstream fout("/scratch/rosep8/local-FreeFEM/transient_log.csv", append);
-  if (tStart == 0.0)
+  ofstream fout("/scratch/rosep8/local-FreeFEM/quench_trial.csv", append);
+  if (tStart <= 0.0)
     fout << "t,I0,Tmax,Vtot,T_CuB,T_AgB,T_Hast,T_Buf,T_REBCO,T_AgT,T_CuT,"
          << "IcuB,IagB,Isc,IagT,IcuT,E_heater\n";
 
@@ -204,10 +228,11 @@ real t = tStart;
       + on(3, 4, T=Tcold);
 
     t += dt;
+    for (int i=0;i<5;i++) if (abs(t-phaseBounds[i]) < 1e-9) t = phaseBounds[i];
     step++;
   }
 }
-cout << "Wrote /scratch/rosep8/local-FreeFEM/transient_log.csv" << endl;
+cout << "Wrote /scratch/rosep8/local-FreeFEM/quench_trial.csv" << endl;
 
 {
   ofstream fchkOut("/scratch/rosep8/local-FreeFEM/checkpoint.txt");
