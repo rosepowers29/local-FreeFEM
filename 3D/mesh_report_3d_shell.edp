@@ -1,12 +1,12 @@
 include "hts_mesh_module_3d.idp"
 cout << "3D shell mesh: nv=" << Th3.nv << "  nt=" << Th3.nt << "  nbe=" << Th3.nbe << endl;
 {
-  ofstream fv("/scratch/rosep8/local-FreeFEM/mesh3d_shell_vertices.csv");
+  ofstream fv("/scratch/rosep8/local-FreeFEM/3D/mesh3d_shell_vertices.csv");
   fv << "x,y,z\n";
   for (int i=0;i<Th3.nv;i++) fv << Th3(i).x << "," << Th3(i).y << "," << Th3(i).z << "\n";
 }
 {
-  ofstream ft("/scratch/rosep8/local-FreeFEM/mesh3d_shell_boundary.csv");
+  ofstream ft("/scratch/rosep8/local-FreeFEM/3D/mesh3d_shell_boundary.csv");
   ft << "v0,v1,v2,label\n";
   for (int i=0;i<Th3.nbe;i++) ft << Th3.be(i)[0] << "," << Th3.be(i)[1] << "," << Th3.be(i)[2] << "," << Th3.be(i).label << "\n";
 }
@@ -14,7 +14,7 @@ cout << "3D shell mesh: nv=" << Th3.nv << "  nt=" << Th3.nt << "  nbe=" << Th3.n
 fespace Ph3(Th3, P0);
 Ph3 reg = region;
 {
-  ofstream fs("/scratch/rosep8/local-FreeFEM/shell_crosssection.csv");
+  ofstream fs("/scratch/rosep8/local-FreeFEM/3D/shell_crosssection.csv");
   fs << "y,z,region\n";
   int ny2=60, nz2=60;
   for (int i=0;i<=ny2;i++){

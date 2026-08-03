@@ -1,0 +1,101 @@
+// ============================================================
+// hts_materials.idp
+// Loads all tabulated (T, property) data and defines material
+// property functions exactly matching the user's COMSOL model.
+// Requires hts_mesh_module.idp to already be included (uses Lx etc. only
+// indirectly; no hard dependency, but kept together by convention).
+// ============================================================
+
+// ---- generic linear interpolation table loader ----
+func int loadTable(string fname, int n, real[int] &T, real[int] &V){
+  ifstream f(fname);
+  for(int i=0;i<n;i++){ f >> T[i] >> V[i]; }
+  return n;
+}
+
+func real interp1(real[int] &T, real[int] &V, int nn, real Tq){
+  if (Tq <= T[0])    return V[0];
+  if (Tq >= T[nn-1]) return V[nn-1];
+  for(int i=0;i<nn-1;i++){
+    if (Tq>=T[i] && Tq<=T[i+1]){
+      real fr = (Tq-T[i])/(T[i+1]-T[i]);
+      return V[i] + fr*(V[i+1]-V[i]);
+    }
+  }
+  return V[nn-1];
+}
+
+// ---- load every table (row counts match `wc -l` on each file) ----
+real[int] TcpAg(71),   VcpAg(71);      int ncpAg   = loadTable("data/cp_ag.txt",   71, TcpAg, VcpAg);
+real[int] TcpBuf(132), VcpBuf(132);    int ncpBuf  = loadTable("data/cp_buff.txt", 132, TcpBuf, VcpBuf);
+real[int] TcpCu(16),   VcpCu(16);      int ncpCu   = loadTable("data/cp_cu.txt",   16, TcpCu, VcpCu);
+real[int] TcpHast(43), VcpHast(43);    int ncpHast = loadTable("data/cp_hast.txt", 43, TcpHast, VcpHast);
+real[int] TcpSc(34),   VcpSc(34);      int ncpSc   = loadTable("data/cp_rebco.txt",34, TcpSc, VcpSc);
+
+real[int] TkAg(29),    VkAg(29);       int nkAg    = loadTable("data/k_ag.txt",    29, TkAg, VkAg);
+real[int] TkBuf(23),   VkBuf(23);      int nkBuf   = loadTable("data/k_buff.txt",  23, TkBuf, VkBuf);
+real[int] TkCu(16),    VkCu(16);       int nkCu    = loadTable("data/k_cu.txt",    16, TkCu, VkCu);
+real[int] TkHast(47),  VkHast(47);     int nkHast  = loadTable("data/k_hast.txt",  47, TkHast, VkHast);
+real[int] TkSc(13),    VkSc(13);       int nkSc    = loadTable("data/k_rebco.txt", 13, TkSc, VkSc);
+
+real[int] TrhoCu(16),   VrhoCu(16);    int nrhoCu   = loadTable("data/rho_cu.txt", 16, TrhoCu, VrhoCu); // real measured data (note: possible anomaly at 273/300K, see discussion)
+real[int] TrhoHast(39), VrhoHast(39);  int nrhoHast = loadTable("data/rho_hast.txt", 39, TrhoHast, VrhoHast);
+real[int] TrhoAg(19),   VrhoAg(19);    int nrhoAg   = loadTable("data/rho_silver.txt", 19, TrhoAg, VrhoAg);
+
+// ---- convenience wrappers: property(T) for each material ----
+func real cpAg(real T)   { return interp1(TcpAg,   VcpAg,   ncpAg,   T); }
+func real cpBuf(real T)  { return interp1(TcpBuf,  VcpBuf,  ncpBuf,  T); }
+func real cpCu(real T)   { return interp1(TcpCu,   VcpCu,   ncpCu,   T); }
+func real cpHast(real T) { return interp1(TcpHast, VcpHast, ncpHast, T); }
+func real cpSc(real T)   { return interp1(TcpSc,   VcpSc,   ncpSc,   T); }
+
+func real kAg(real T)    { return interp1(TkAg,  VkAg,  nkAg,  T); }
+func real kBuf(real T)   { return interp1(TkBuf, VkBuf, nkBuf, T); }
+func real kCu(real T)    { return interp1(TkCu,  VkCu,  nkCu,  T); }
+func real kHast(real T)  { return interp1(TkHast,VkHast,nkHast,T); }
+func real kSc(real T)    { return interp1(TkSc,  VkSc,  nkSc,  T); }
+
+func real rhoCu(real T)   { return interp1(TrhoCu,  VrhoCu,  nrhoCu,  T); }  // real measured data (flag: non-monotonic 273->300K point, see discussion)
+func real rhoHast(real T) { return interp1(TrhoHast,VrhoHast,nrhoHast,T); }
+func real rhoAg(real T)   { return interp1(TrhoAg,  VrhoAg,  nrhoAg,  T); }
+
+// ---- densities [kg/m^3] (from *_vars.csv) ----
+real rhomCu   = 8960.0;
+real rhomAg   = 10490.0;
+real rhomHast = 8890.0;
+real rhomBuf  = 3600.0;
+real rhomSc   = 6390.0;
+
+// ---- REBCO superconducting parameters (from comsol_params.csv / rebco_vars.csv) ----
+real Jc0       = 8.0e10;   // A/m^2
+real Tc        = 90.0;     // K
+real n0        = 20.0;     // n-value reference
+real E0        = 1.0e-4;   // V/m  (1 uV/cm criterion)
+real Einit     = 1.0e-10;  // V/m  (numerical floor ONLY, to avoid literal E=0 singularity --
+                            // NOT the critical-field criterion. Was mistakenly set equal to
+                            // E0 (1e-4), which clamped the entire below-Ic operating regime
+                            // into an artificially resistive state. See discussion.)
+real sigmaRebco= 1.0e6;    // S/m  (REBCO normal-state floor conductivity)
+real sigmaMax  = 1.0e20;   // raised: 1e16 was binding at the nominal 0.7Ic/77K operating point   // S/m  (numerical cap)
+real sigmaBuf  = 1.0e-10;  // S/m  (buffer, effectively insulating)
+
+func real JcT(real T){
+  // Jc0*(Tc-T)*(T<Tc)/(Tc-50) + (T>=Tc)   -- floor of 1 A/m^2 above Tc (numerical safety)
+  if (T < Tc) return Jc0*(Tc-T)/(Tc-50.0);
+  else return 1.0;
+}
+func real nT(real T){
+  // (n0-10)*(Tc-T)*(T<Tc)/(Tc-50) + 10     -- floor of n=10 above Tc
+  if (T < Tc) return (n0-10.0)*(Tc-T)/(Tc-50.0) + 10.0;
+  else return 10.0;
+}
+
+// total REBCO conductivity given local |E| and T (scalar E assumed ~ Ex, dominant
+// component along the tape length -- consistent with the 1D-per-layer approach)
+func real sigmaSc(real Emag, real T){
+  real Estab = max(abs(Emag), Einit);
+  real JcVal   = JcT(T);
+  real nVal    = nT(T);
+  real scTerm = (JcVal/Estab) * (Estab/E0)^(1.0/nVal);
+  return min(scTerm, sigmaMax) + sigmaRebco;
+}

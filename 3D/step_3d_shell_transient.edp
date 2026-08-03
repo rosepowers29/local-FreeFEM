@@ -110,14 +110,14 @@ int maxStepsThisRun = 1;   // per-invocation cap given ~40s/step cost
 
 real t = 0.0;
 {
-  ifstream fchk("/scratch/rosep8/local-FreeFEM/ckpt_3d_transient.txt");
+  ifstream fchk("/scratch/rosep8/local-FreeFEM/3D/ckpt_3d_transient.txt");
   fchk >> t;
   for (int i=0;i<T.n;i++) fchk >> T[][i];
   cout << "Resumed at t="<<t<<"s Tmax="<<T[].max << endl;
 }
 
 {
-  ofstream fout("/scratch/rosep8/local-FreeFEM/transient_3d.csv", append);
+  ofstream fout("/scratch/rosep8/local-FreeFEM/3D/transient_3d.csv", append);
   if (t <= 1e-12) fout << "t,I0,Tmax,maxCurrentConservationRelErr\n";
 
   int step = 0;
@@ -157,7 +157,7 @@ real t = 0.0;
 }
 
 {
-  ofstream fchkOut("/scratch/rosep8/local-FreeFEM/ckpt_3d_transient.txt");
+  ofstream fchkOut("/scratch/rosep8/local-FreeFEM/3D/ckpt_3d_transient.txt");
   fchkOut.precision(12);
   fchkOut << t << "\n";
   for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";

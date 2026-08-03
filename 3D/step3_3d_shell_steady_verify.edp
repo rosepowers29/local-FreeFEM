@@ -80,7 +80,7 @@ cout << "Ic_REBCO (absolute, A)=" << IcRebcoActual << "  I0 (A)=" << I0w << " (r
 
 int iterStart = 0;
 {
-  ifstream fchk("/scratch/rosep8/local-FreeFEM/ckpt_3d_shell.txt");
+  ifstream fchk("/scratch/rosep8/local-FreeFEM/3D/ckpt_3d_shell.txt");
   fchk >> iterStart;
   for (int i=0;i<T.n;i++) fchk >> T[][i];
   cout << "Resumed from iter="<<iterStart<<" Tmax="<<T[].max << endl;
@@ -115,7 +115,7 @@ for (int iter=iterStart; iter<min(iterStart+nPicardThisRun,nPicard); iter++){
 }
 
 {
-  ofstream fchkOut("/scratch/rosep8/local-FreeFEM/ckpt_3d_shell.txt");
+  ofstream fchkOut("/scratch/rosep8/local-FreeFEM/3D/ckpt_3d_shell.txt");
   fchkOut.precision(12);
   fchkOut << min(iterStart+nPicardThisRun,nPicard) << "\n";
   for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
