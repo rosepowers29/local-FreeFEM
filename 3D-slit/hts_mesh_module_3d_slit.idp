@@ -1,0 +1,94 @@
+// ============================================================
+// hts_mesh_module_3d_slit.idp
+// 3D shell mesh WITH a laser slit down the tape centerline.
+//
+// Slit: 5um wide, cuts FULL THICKNESS (top to bottom, severing the
+// copper shell's top/bottom portions in that region -- only the shell's
+// SIDE edges remain continuous, providing the one remaining electrical
+// path between the two halves within the slit's x-extent). Represented
+// as a "stadium" (capsule) shape in the (x,z) plane: all points within
+// radius R of the line segment from (xSlitStart, zCenter) to
+// (xSlitEnd, zCenter) -- gives rounded (semicircular) ends automatically,
+// no separate case needed for the caps.
+//
+// Region 7 = slit (vacuum-like properties, defined in materials module).
+// Regions 1-6 unchanged from the no-slit shell model.
+// ============================================================
+
+load "msh3"
+
+real Lx    = 0.20;
+real tCuB  = 20e-6, tAgB = 1.8e-6, tSub = 50e-6, tBuf = 0.2e-6,
+     tSc   = 1e-6,  tAgT = 2e-6,  tCuT = 20e-6;
+real yB0=0, yB1=yB0+tCuB, yB2=yB1+tAgB, yB3=yB2+tSub, yB4=yB3+tBuf,
+     yB5=yB4+tSc, yB6=yB5+tAgT, yB7=yB6+tCuT;
+
+real width   = 0.012;
+real tSideCu = 20e-6;
+real zB0 = 0, zB1 = tSideCu, zB2 = width - tSideCu, zB3 = width;
+real coreWidth = zB2 - zB1;
+
+// ---- slit geometry ----
+real slitWidth  = 5e-6;
+real slitR      = slitWidth/2;
+real xSlitStart = 0.010, xSlitEnd = 0.190;
+real zSlitCenter = width/2;
+
+// distance from (px,pz) to the slit's centerline segment
+func real distToSlitSegment(real px, real pz){
+  real xa = xSlitStart, xb = xSlitEnd, zc = zSlitCenter;
+  real xq = px;
+  if (xq < xa) xq = xa;
+  if (xq > xb) xq = xb;
+  return sqrt((px-xq)^2 + (pz-zc)^2);
+}
+func bool inSlit(real px, real pz){
+  return distToSlitSegment(px,pz) <= slitR;
+}
+
+int nx = 100;   // dx ~ 2mm (rounded-cap curvature at R=2.5um isn't resolved
+                // at this scale regardless of x-resolution -- see discussion)
+int nCuB=8, nAgB=2, nSub=6, nBuf=1, nSc=2, nAgT=2, nCuT=8;
+int ny = nCuB+nAgB+nSub+nBuf+nSc+nAgT+nCuT;
+
+// z structure: shell | core-left-of-slit | slit band | core-right-of-slit | shell
+int nzShell=2, nzCoreOuter=10, nzSlitBand=4;
+int nz = 2*nzShell + 2*nzCoreOuter + nzSlitBand;
+
+real zSlitLo = zSlitCenter-slitR, zSlitHi = zSlitCenter+slitR;
+
+func real yphys(real s){
+  real fCuB=nCuB*1.0/ny, fAgB=nAgB*1.0/ny, fSub=nSub*1.0/ny, fBuf=nBuf*1.0/ny,
+       fSc=nSc*1.0/ny, fAgT=nAgT*1.0/ny, fCuT=nCuT*1.0/ny;
+  real c0=0, c1=c0+fCuB, c2=c1+fAgB, c3=c2+fSub, c4=c3+fBuf, c5=c4+fSc, c6=c5+fAgT, c7=c6+fCuT;
+  if (s<=c1) return yB0 + (yB1-yB0)*(s-c0)/(c1-c0);
+  if (s<=c2) return yB1 + (yB2-yB1)*(s-c1)/(c2-c1);
+  if (s<=c3) return yB2 + (yB3-yB2)*(s-c2)/(c3-c2);
+  if (s<=c4) return yB3 + (yB4-yB3)*(s-c3)/(c4-c3);
+  if (s<=c5) return yB4 + (yB5-yB4)*(s-c4)/(c5-c4);
+  if (s<=c6) return yB5 + (yB6-yB5)*(s-c5)/(c6-c5);
+  return yB6 + (yB7-yB6)*(s-c6)/(c7-c6);
+}
+
+func real zphys(real s){
+  real fSh=nzShell*1.0/nz, fCo=nzCoreOuter*1.0/nz, fSl=nzSlitBand*1.0/nz;
+  real c0=0, c1=c0+fSh, c2=c1+fCo, c3=c2+fSl, c4=c3+fCo, c5=c4+fSh;
+  if (s<=c1) return zB0 + (zB1-zB0)*(s-c0)/(c1-c0);
+  if (s<=c2) return zB1 + (zSlitLo-zB1)*(s-c1)/(c2-c1);
+  if (s<=c3) return zSlitLo + (zSlitHi-zSlitLo)*(s-c2)/(c3-c2);
+  if (s<=c4) return zSlitHi + (zB2-zSlitHi)*(s-c3)/(c4-c3);
+  return zB2 + (zB3-zB2)*(s-c4)/(c5-c4);
+}
+
+mesh3 Th3 = cube(nx, ny, nz, [Lx*x, yphys(y), zphys(z)]);
+
+fespace Ph3region(Th3, P0);
+Ph3region region0 = 7*(inSlit(x,z))
+                   + (1-inSlit(x,z))*(
+                       (y<=yB1 || y>yB6 || z<=zB1 || z>=zB2)*1
+                     + (y>yB1 && y<=yB2 && z>zB1 && z<zB2)*2
+                     + (y>yB2 && y<=yB3 && z>zB1 && z<zB2)*3
+                     + (y>yB3 && y<=yB4 && z>zB1 && z<zB2)*4
+                     + (y>yB4 && y<=yB5 && z>zB1 && z<zB2)*5
+                     + (y>yB5 && y<=yB6 && z>zB1 && z<zB2)*6 );
+Th3 = change(Th3, fregion=region0(x,y,z));

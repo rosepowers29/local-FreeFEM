@@ -1,0 +1,193 @@
+// ============================================================
+// step_3d_slit_heater_onesided.edp
+// Heater on ONE side of the slit only (left half, z=width/4), steady/
+// always-on for a first look at current redistribution. Operating
+// current: 0.7*Ic (matching the disturbance-below-Ic scenario used
+// throughout this project).
+//
+// Electrical model: outside the slit's x-range, one equipotential
+// channel as before. WITHIN the slit's x-range, current splits into two
+// independent parallel paths (left/right), matched by requiring equal
+// total voltage drop across the slit's length (both paths share the same
+// two endpoints, x=xSlitStart and x=xSlitEnd) -- solved via bisection on
+// the left/right current-split fraction. This sub-solve is cheap (no 3D
+// solve involved), so it's redone from scratch each Picard iteration.
+// ============================================================
+
+include "hts_mesh_module_3d_slit.idp"
+include "hts_materials.idp"
+
+real Tcold = 77.0;
+real IcRebcoActual = JcT(77.0)*tSc*coreWidth;
+real I0 = 0.7 * IcRebcoActual;
+
+real shellAreaFull = width*yB7 - coreWidth*(yB6-yB1);
+real leftCoreWidth  = (zSlitCenter-slitR) - zB1;
+real rightCoreWidth = zB2 - (zSlitCenter+slitR);
+real leftShellArea  = tSideCu*yB7 + (tCuB+tCuT)*leftCoreWidth;
+real rightShellArea = tSideCu*yB7 + (tCuB+tCuT)*rightCoreWidth;
+
+// heater: 2mm x 2mm, 13W, centered on the LEFT half (z=width/4), top face
+real xHeatC = Lx/2, zHeatC = width/4;
+real xHeatLo = xHeatC-1e-3, xHeatHi = xHeatC+1e-3;
+real zHeatLo = zHeatC-1e-3, zHeatHi = zHeatC+1e-3;
+real heaterPower = 13.0;
+real qHeater = heaterPower/(2e-3*2e-3);
+
+func real kOf(int rg, real Tl){
+  if (rg==1) return kCu(Tl);
+  if (rg==2 || rg==6) return kAg(Tl);
+  if (rg==3) return kHast(Tl);
+  if (rg==4) return kBuf(Tl);
+  if (rg==5) return kSc(Tl);
+  if (rg==7) return 1e-2;
+  return 1.0;
+}
+func real sourceOfFull(int rg, real Ef, real Tl){
+  if (rg==1) return Ef^2/rhoCu(Tl);
+  if (rg==2 || rg==6) return Ef^2/rhoAg(Tl);
+  if (rg==5) return sigmaSc(Ef,Tl)*Ef^2;
+  return 0.0;
+}
+
+func real ItotFull(real E, real TcuShell, real TagB, real Tsc, real TagT){
+  return shellAreaFull*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
+       + tSc*coreWidth*sigmaSc(E,Tsc)*E + tAgT*coreWidth*(E/rhoAg(TagT));
+}
+func real solveEFull(real TcuShell, real TagB, real Tsc, real TagT, real Itarget){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0=4.0; int guard=0;
+  while (ItotFull(Ehi0,TcuShell,TagB,Tsc,TagT) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  real logElo=log(1e-30), logEhi=log(Ehi0);
+  for(int it=0;it<50;it++){
+    real logEmid=0.5*(logElo+logEhi);
+    real Emid=exp(logEmid);
+    if (ItotFull(Emid,TcuShell,TagB,Tsc,TagT) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  }
+  real Ef=exp(0.5*(logElo+logEhi));
+  real relErr=abs(ItotFull(Ef,TcuShell,TagB,Tsc,TagT)-Itarget)/max(Itarget,1e-30);
+  assert(relErr<=1e-3);
+  return Ef;
+}
+
+func real ItotHalf(real E, real TcuShell, real TagB, real Tsc, real TagT, real shellA, real cw){
+  return shellA*(E/rhoCu(TcuShell)) + tAgB*cw*(E/rhoAg(TagB))
+       + tSc*cw*sigmaSc(E,Tsc)*E + tAgT*cw*(E/rhoAg(TagT));
+}
+func real solveEHalf(real TcuShell, real TagB, real Tsc, real TagT, real Itarget, real shellA, real cw){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0=4.0; int guard=0;
+  while (ItotHalf(Ehi0,TcuShell,TagB,Tsc,TagT,shellA,cw) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  real logElo=log(1e-30), logEhi=log(Ehi0);
+  for(int it=0;it<50;it++){
+    real logEmid=0.5*(logElo+logEhi);
+    real Emid=exp(logEmid);
+    if (ItotHalf(Emid,TcuShell,TagB,Tsc,TagT,shellA,cw) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  }
+  real Ef=exp(0.5*(logElo+logEhi));
+  real relErr=abs(ItotHalf(Ef,TcuShell,TagB,Tsc,TagT,shellA,cw)-Itarget)/max(Itarget,1e-30);
+  assert(relErr<=1e-3);
+  return Ef;
+}
+
+int nxs = 60;                    // samples over the FULL length
+real[int] xSample(nxs+1), Earr(nxs+1);      // single-channel field (outside slit)
+real[int] ElArr(nxs+1), ErArr(nxs+1);       // split fields (inside slit, 0 elsewhere)
+for (int i=0;i<=nxs;i++) xSample[i] = Lx*i/nxs;
+func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
+func real ElFun(real xx){ return interp1(xSample, ElArr, nxs+1, xx); }
+func real ErFun(real xx){ return interp1(xSample, ErArr, nxs+1, xx); }
+
+fespace Vh3(Th3, P1);
+fespace Ph3(Th3, P0);
+Ph3 reg = region;
+Vh3 T = Tcold, Tnew, w;
+Ph3 kfun, source;
+
+real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
+real zLeftRep = width/4, zRightRep = 3*width/4;
+
+int nPicard = 20;
+int nPicardThisRun = 1;
+cout << "I0="<<I0<<"  qHeater="<<qHeater<<" W/m^2  heater at z=width/4 (LEFT side)" << endl;
+
+int iterStart = 0;
+{
+  ifstream fchk("ckpt_3d_slit_heater.txt");
+  fchk >> iterStart;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+  cout << "Resumed from iter="<<iterStart<<" Tmax="<<T[].max << endl;
+}
+
+real relax = 0.5;
+for (int iter=iterStart; iter<min(iterStart+nPicardThisRun,nPicard); iter++){
+  real t0 = clock();
+
+  // --- electrical sub-solve (cheap, redone fully each Picard iteration) ---
+  for (int i=0;i<=nxs;i++){
+    real xx = xSample[i];
+    if (xx < xSlitStart || xx > xSlitEnd){
+      real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep),
+           Tsc=T(xx,yScmid,zLeftRep), TagT=T(xx,yAgTmid,zLeftRep);
+      Earr[i] = solveEFull(TcuShell,TagB,Tsc,TagT, I0);
+      ElArr[i] = 0; ErArr[i] = 0;
+    } else {
+      Earr[i] = 0;
+      // will fill Elarr/ErArr after finding fracLeft below
+    }
+  }
+  // bisect on fracLeft using representative L/R temperatures at slit midpoint
+  // (good enough: within the slit, T varies slowly over its 180mm length
+  // compared to how strongly it's peaked right at the 2mm heater)
+  real TcuL=T(xHeatC,yCuTop,zLeftRep), TagBL=T(xHeatC,yAgBmid,zLeftRep),
+       TscL=T(xHeatC,yScmid,zLeftRep), TagTL=T(xHeatC,yAgTmid,zLeftRep);
+  real TcuR=T(xHeatC,yCuTop,zRightRep), TagBR=T(xHeatC,yAgBmid,zRightRep),
+       TscR=T(xHeatC,yScmid,zRightRep), TagTR=T(xHeatC,yAgTmid,zRightRep);
+  cout << "  DEBUG sampled T: TcuL="<<TcuL<<" TagBL="<<TagBL<<" TscL="<<TscL<<" TagTL="<<TagTL << endl;
+  cout << "  DEBUG sampled T: TcuR="<<TcuR<<" TagBR="<<TagBR<<" TscR="<<TscR<<" TagTR="<<TagTR << endl;
+
+  func real Vdiff(real fracLeft){
+    real Il=fracLeft*I0, Ir=(1-fracLeft)*I0;
+    real El = solveEHalf(TcuL,TagBL,TscL,TagTL, Il, leftShellArea, leftCoreWidth);
+    real Er = solveEHalf(TcuR,TagBR,TscR,TagTR, Ir, rightShellArea, rightCoreWidth);
+    return (El-Er)*(xSlitEnd-xSlitStart);   // uniform E along slit -> linear V
+  }
+  real flo=0.0, fhi=1.0;
+  for(int it=0;it<30;it++){
+    real fmid=0.5*(flo+fhi);
+    if (Vdiff(fmid) < 0) flo=fmid; else fhi=fmid;
+  }
+  real fracLeft = 0.5*(flo+fhi);
+  real ElVal = solveEHalf(TcuL,TagBL,TscL,TagTL, fracLeft*I0, leftShellArea, leftCoreWidth);
+  real ErVal = solveEHalf(TcuR,TagBR,TscR,TagTR, (1-fracLeft)*I0, rightShellArea, rightCoreWidth);
+  for (int i=0;i<=nxs;i++){
+    real xx = xSample[i];
+    if (xx >= xSlitStart && xx <= xSlitEnd){ ElArr[i]=ElVal; ErArr[i]=ErVal; }
+  }
+  cout << "  fracLeft="<<fracLeft<<"  El="<<ElVal<<"  Er="<<ErVal << endl;
+
+  // --- thermal source: single-channel outside slit, split L/R inside ---
+  Ph3 inSlitRange = (x>=xSlitStart)*(x<=xSlitEnd);
+  source = (1-inSlitRange)*sourceOfFull(region, Efun(x), T)
+         + inSlitRange*( (z<zSlitCenter)*sourceOfFull(region, ElFun(x), T)
+                        + (z>zSlitCenter)*sourceOfFull(region, ErFun(x), T) );
+  kfun = kOf(region, T);
+
+  solve steadyHeat3D(Tnew, w) =
+      int3d(Th3)( kfun*(dx(Tnew)*dx(w) + dy(Tnew)*dy(w) + dz(Tnew)*dz(w)) )
+    - int3d(Th3)( source*w )
+    - int2d(Th3, 3)( qHeater*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
+    + on(2, 4, Tnew=Tcold);
+
+  T = T + relax*(Tnew - T);
+  real t1 = clock();
+  cout << "iter="<<iter<<" Tmax="<<T[].max<<"  (iter time "<<(t1-t0)<<"s)" << endl;
+}
+
+{
+  ofstream fchkOut("ckpt_3d_slit_heater.txt");
+  fchkOut.precision(12);
+  fchkOut << min(iterStart+nPicardThisRun,nPicard) << "\n";
+  for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+}
+cout << "Checkpoint saved." << endl;

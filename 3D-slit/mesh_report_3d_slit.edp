@@ -1,0 +1,49 @@
+include "hts_mesh_module_3d_slit.idp"
+cout << "3D slit mesh: nv=" << Th3.nv << "  nt=" << Th3.nt << "  nbe=" << Th3.nbe << endl;
+
+{
+  ofstream fv("mesh3d_slit_vertices.csv");
+  fv << "x,y,z\n";
+  for (int i=0;i<Th3.nv;i++) fv << Th3(i).x << "," << Th3(i).y << "," << Th3(i).z << "\n";
+}
+{
+  ofstream ft("mesh3d_slit_boundary.csv");
+  ft << "v0,v1,v2,label\n";
+  for (int i=0;i<Th3.nbe;i++) ft << Th3.be(i)[0] << "," << Th3.be(i)[1] << "," << Th3.be(i)[2] << "," << Th3.be(i).label << "\n";
+}
+
+fespace Ph3(Th3, P0);
+Ph3 reg = region;
+
+// cross-section 1: y-z plane at x=Lx/2 (deep in the slit's straight region)
+// -- shows the shell wrapping the core, WITH the slit gap down the middle
+{
+  ofstream fs("slit_crosssection_yz.csv");
+  fs << "y,z,region\n";
+  int ny2=60, nz2=120;
+  for (int i=0;i<=ny2;i++){
+    for (int j=0;j<=nz2;j++){
+      real yy = yB7*i/ny2, zz = width*j/nz2;
+      real yq = (yy<=0)?1e-9:(yy>=yB7?yB7-1e-9:yy);
+      real zq = (zz<=0)?1e-9:(zz>=width?width-1e-9:zz);
+      fs << yy << "," << zz << "," << reg(Lx/2,yq,zq) << "\n";
+    }
+  }
+}
+
+// cross-section 2: x-z plane at y=yB7/2 (mid-thickness), showing the slit's
+// full length INCLUDING the rounded end caps
+{
+  ofstream fs2("slit_crosssection_xz.csv");
+  fs2 << "x,z,region\n";
+  int nx2=200, nz2=80;
+  real yMid = yB7/2;
+  for (int i=0;i<=nx2;i++){
+    for (int j=0;j<=nz2;j++){
+      real xx = Lx*i/nx2, zz = width*j/nz2;
+      real zq = (zz<=0)?1e-9:(zz>=width?width-1e-9:zz);
+      fs2 << xx << "," << zz << "," << reg(xx,yMid,zq) << "\n";
+    }
+  }
+}
+cout << "Wrote mesh3d_slit_vertices.csv, mesh3d_slit_boundary.csv, slit_crosssection_yz.csv, slit_crosssection_xz.csv" << endl;

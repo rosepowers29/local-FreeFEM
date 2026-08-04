@@ -1,0 +1,23 @@
+include "hts_mesh_module_3d_slit.idp"
+fespace Vh3(Th3, P1);
+Vh3 T;
+{
+  ifstream fchk("ckpt_3d_slit.txt");
+  real dummy; fchk >> dummy;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+}
+cout << "Loaded checkpoint, Tmax=" << T[].max << endl;
+
+real zLeft = width/4, zRight = 3*width/4;   // symmetric sample points, one on each side of the slit
+real yScmid = 0.5*(yB4+yB5);
+
+int nxs = 60;
+{
+  ofstream fout("steady_verify_3d_slit.csv");
+  fout << "x,T_rebco_left,T_rebco_right\n";
+  for (int i=0;i<=nxs;i++){
+    real xx = Lx*i/nxs;
+    fout << xx << "," << T(xx,yScmid,zLeft) << "," << T(xx,yScmid,zRight) << "\n";
+  }
+}
+cout << "Wrote steady_verify_3d_slit.csv" << endl;
