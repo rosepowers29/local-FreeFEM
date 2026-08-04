@@ -32,7 +32,7 @@ real heaterPower = 13.0;
 real qHeater = heaterPower/(2e-3*2e-3);
 
 real Tramp = 0.5, tPulseStart = Tramp, tPulseDur = 0.01, tPulseEnd = tPulseStart+tPulseDur;
-real tEnd = tPulseEnd + 0.08;
+real tEnd = tPulseEnd + 0.5;
 
 func real I0ofT(real tt){
   if (tt < Tramp) return I0Target*(tt/Tramp);
