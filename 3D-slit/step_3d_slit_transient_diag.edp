@@ -120,6 +120,11 @@ func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
 func real ElFun(real xx){ return interp1(xSample, ElArr, nxs+1, xx); }
 func real ErFun(real xx){ return interp1(xSample, ErArr, nxs+1, xx); }
 
+// Diagnostics (voltage taps / RTDs / Hall-probe placeholders) -- must be
+// included after Efun/ElFun/ErFun above, per that file's header comment.
+include "diagnostics_3d_slit.idp"
+real[int] diagVL(nTapsPerSide), diagVR(nTapsPerSide);
+
 fespace Vh3(Th3, P1);
 fespace Ph3(Th3, P0);
 Ph3 reg = region;
@@ -142,6 +147,17 @@ real t = 0.0;
 {
   ofstream fout("transient_3d_slit.csv", append);
   if (t <= 1e-12) fout << "t,I0,Tmax,TmaxLeft,TmaxRight,fracLeft\n";
+
+  ofstream fdiag("diagnostics_3d_slit.csv", append);
+  if (t <= 1e-12) {
+    writeDiagnosticsMetadata("diagnostics_positions_3d_slit.csv");
+    fdiag << "t,I0,Tmax,fracLeft,V_CL_plus,V_CL_minus";
+    for (int i=0;i<nTapsPerSide;i++) fdiag << ",V1_" << (i+1);
+    for (int i=0;i<nTapsPerSide;i++) fdiag << ",V2_" << (i+1);
+    for (int i=0;i<nRTDsPerSide;i++) fdiag << ",RTD1_" << (i+1);
+    for (int i=0;i<nRTDsPerSide;i++) fdiag << ",RTD2_" << (i+1);
+    fdiag << ",H1,H2\n";
+  }
 
   int step = 0;
   while (t < tEnd-1e-12 && step < maxStepsThisRun){
@@ -189,6 +205,16 @@ real t = 0.0;
     real TmaxRight = T(xHeatC,yCuTop,zRightRep);
     cout << "t="<<t<<"s I0="<<I0w<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
     fout << t << "," << I0w << "," << T[].max << "," << TmaxLeft << "," << TmaxRight << "," << fracLeft << "\n";
+
+    diagAllTapVoltages(diagVL, diagVR);
+    real VclPlus = 0.0;
+    real VclMinus = diagVcum(Lx, -1);   // == diagVcum(Lx,+1) by the slit's equal-voltage-drop closure condition
+    fdiag << t << "," << I0w << "," << T[].max << "," << fracLeft << "," << VclPlus << "," << VclMinus;
+    for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVL[i];
+    for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVR[i];
+    for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagLeft);
+    for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagRight);
+    fdiag << "," << hallNotModeled << "," << hallNotModeled << "\n";
 
     real dt = dtCapped(t);
     if (dt <= 1e-9) break;

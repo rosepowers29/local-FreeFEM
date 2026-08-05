@@ -1,0 +1,125 @@
+// ============================================================
+// diagnostics_3d_slit.idp
+// Lab-instrumentation-style diagnostics export for the 3D slit model.
+//
+// Mimics a real diagnostics board (see user-provided layout diagram):
+//   - 10 voltage taps per side (20 total), evenly spaced over 80% of
+//     the slit length, centered on the slit/heater x-location.
+//   - 8 RTD-style point temperature sensors per side (16 total),
+//     nested at the midpoint of each tap-to-tap gap EXCEPT the one
+//     gap that straddles the heater/Hall-probe location (no RTD
+//     there, matching the diagram).
+//   - 2 Hall-probe position placeholders (one per side, co-located
+//     with the heater), reserved but NOT wired to any B-field
+//     computation yet -- exported as a fixed sentinel value until the
+//     self-field roadmap item is implemented.
+//   - V_CL+ / V_CL- : the current-lead voltage reference points at the
+//     tape ends (x=0, x=Lx), outside the slit -- single channel there.
+//
+// IMPORTANT -- scope/inclusion requirements:
+//   This file assumes the INCLUDING script has ALREADY defined, with
+//   exactly these names (as step_3d_slit_transient.edp does):
+//     real Lx, width, xSlitStart, xSlitEnd, yB7
+//     func real Efun(real xx)   -- full-channel E, valid outside slit range
+//     func real ElFun(real xx)  -- left-channel E,  valid inside slit range
+//     func real ErFun(real xx)  -- right-channel E, valid inside slit range
+//   Include this file AFTER those are defined (i.e. after the E-field
+//   sampling arrays for the current timestep have been filled), not
+//   at the top of the script, since tap voltages must reflect the
+//   CURRENT timestep's field. Positions/metadata below are static and
+//   only need to be computed once, but voltage evaluation
+//   (diagVoltage/diagAllTapVoltages) must be called freshly each step.
+// ============================================================
+
+// ---- physical z-locations representing "side" (matches TmaxLeft/
+// TmaxRight convention already used elsewhere in the transient script) ----
+real zDiagLeft  = width/4;
+real zDiagRight = 3*width/4;
+
+// ---- tap layout: 10 per side, 80% of slit length, centered on slit ----
+int nTapsPerSide = 10;
+real slitLen    = xSlitEnd - xSlitStart;
+real spanCenter = 0.5*(xSlitStart + xSlitEnd);
+real spanFrac   = 0.8;
+real spanLen    = spanFrac*slitLen;
+real xSpanLo    = spanCenter - 0.5*spanLen;
+real xSpanHi    = spanCenter + 0.5*spanLen;
+real tapSpacing = spanLen/(nTapsPerSide-1);
+
+real[int] xTap(nTapsPerSide);
+for (int i=0; i<nTapsPerSide; i++) xTap[i] = xSpanLo + i*tapSpacing;
+
+// ---- RTD layout: one at the midpoint of each tap-gap, except the
+// gap straddling spanCenter (heater/Hall location) ----
+int nGaps = nTapsPerSide - 1;
+int heaterGapIdx = -1;
+for (int i=0; i<nGaps; i++)
+  if (xTap[i] <= spanCenter+1e-12 && xTap[i+1] >= spanCenter-1e-12) heaterGapIdx = i;
+
+int nRTDsPerSide = nGaps - 1;
+real[int] xRTD(nRTDsPerSide);
+{
+  int k = 0;
+  for (int i=0; i<nGaps; i++){
+    if (i == heaterGapIdx) continue;
+    xRTD[k] = 0.5*(xTap[i] + xTap[i+1]);
+    k++;
+  }
+}
+
+// ---- Hall probe placeholder positions (reserved, not yet computed) ----
+real xHall = spanCenter;   // co-located with heater, per diagram (H_1/H_2)
+real hallNotModeled = -999.0;   // sentinel: B-field modeling not yet implemented
+
+// ---- field integration: honors the slit's L/R channel split ----
+// side: -1 = left (z=zDiagLeft), +1 = right (z=zDiagRight)
+func real diagEfield(real xx, int side){
+  if (xx < xSlitStart || xx > xSlitEnd) return Efun(xx);
+  return (side < 0) ? ElFun(xx) : ErFun(xx);
+}
+
+// Cumulative voltage from x=0 (V_CL+ reference) out to xx, along the
+// given side's physical conductor path. Midpoint-rule integration --
+// cheap (interpolation lookups only, no solve) so a fine sub-count is
+// fine even though this runs every timestep.
+func real diagVcum(real xx, int side){
+  int nSub = 400;
+  real h = xx/nSub;
+  real sum = 0.0;
+  for (int j=0; j<nSub; j++){
+    real xm = (j+0.5)*h;
+    sum += diagEfield(xm, side)*h;
+  }
+  return sum;
+}
+
+// Fills two length-nTapsPerSide arrays with the current cumulative tap
+// voltages for left/right. Call once per timestep after Efun/ElFun/
+// ErFun have been refreshed for that step.
+func int diagAllTapVoltages(real[int] &VL, real[int] &VR){
+  for (int i=0; i<nTapsPerSide; i++){
+    VL[i] = diagVcum(xTap[i], -1);
+    VR[i] = diagVcum(xTap[i], +1);
+  }
+  return 0;
+}
+
+// One-time metadata export: physical location + type of every channel,
+// written once (not per-row) so it doesn't bloat the timeseries CSV.
+func int writeDiagnosticsMetadata(string fname){
+  ofstream fmeta(fname);
+  fmeta << "channel,type,side,x_m,y_m,z_m,notes\n";
+  for (int i=0; i<nTapsPerSide; i++){
+    fmeta << "V1_" << (i+1) << ",voltage_tap,left," << xTap[i] << "," << yB7 << "," << zDiagLeft  << ",cumulative from V_CL+\n";
+    fmeta << "V2_" << (i+1) << ",voltage_tap,right," << xTap[i] << "," << yB7 << "," << zDiagRight << ",cumulative from V_CL+\n";
+  }
+  for (int i=0; i<nRTDsPerSide; i++){
+    fmeta << "RTD1_" << (i+1) << ",temperature_rtd,left," << xRTD[i] << "," << yB7 << "," << zDiagLeft  << ",surface-mounted (top Cu)\n";
+    fmeta << "RTD2_" << (i+1) << ",temperature_rtd,right," << xRTD[i] << "," << yB7 << "," << zDiagRight << ",surface-mounted (top Cu)\n";
+  }
+  fmeta << "H1,hall_probe,left," << xHall << "," << yB7 << "," << zDiagLeft  << ",PLACEHOLDER - not yet wired to B-field computation\n";
+  fmeta << "H2,hall_probe,right," << xHall << "," << yB7 << "," << zDiagRight << ",PLACEHOLDER - not yet wired to B-field computation\n";
+  fmeta << "V_CL_plus,current_lead_voltage,n/a,0," << yB7 << ",n/a,reference (=0 by construction)\n";
+  fmeta << "V_CL_minus,current_lead_voltage,n/a," << Lx << "," << yB7 << ",n/a,far current lead\n";
+  return 0;
+}
