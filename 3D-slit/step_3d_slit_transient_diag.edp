@@ -149,8 +149,13 @@ real t = 0.0;
   if (t <= 1e-12) fout << "t,I0,Tmax,TmaxLeft,TmaxRight,fracLeft\n";
 
   ofstream fdiag("diagnostics_3d_slit.csv", append);
-  if (t <= 1e-12) {
-    writeDiagnosticsMetadata("diagnostics_positions_3d_slit.csv");
+  int diagFileCheck = exec("test -s diagnostics_3d_slit.csv");
+  bool diagCsvHasHeader = (diagFileCheck == 0);
+  // Metadata is static and cheap -- just rewrite it every invocation so it's
+  // always present/current, regardless of when this feature was added
+  // relative to an in-progress run's t value.
+  writeDiagnosticsMetadata("diagnostics_positions_3d_slit.csv");
+  if (!diagCsvHasHeader) {
     fdiag << "t,I0,Tmax,fracLeft,V_CL_plus,V_CL_minus";
     for (int i=0;i<nTapsPerSide;i++) fdiag << ",V1_" << (i+1);
     for (int i=0;i<nTapsPerSide;i++) fdiag << ",V2_" << (i+1);
@@ -163,7 +168,12 @@ real t = 0.0;
   while (t < tEnd-1e-12 && step < maxStepsThisRun){
     real I0w = I0ofT(t);
 
-    // electrical: single channel outside slit range, split L/R inside
+    // electrical: single channel outside slit range, split L/R inside.
+    // WITHIN the slit, El(x)/Er(x) are resolved PER-x (matching the
+    // outside-slit treatment) rather than sampled once at a single
+    // representative point and extended uniformly -- the heater creates a
+    // strongly localized hot spot, and a single point's local resistivity
+    // is not representative of the other ~178mm of slit length.
     for (int i=0;i<=nxs;i++){
       real xx = xSample[i];
       if (xx < xSlitStart || xx > xSlitEnd){
@@ -175,15 +185,52 @@ real t = 0.0;
         Earr[i] = 0;
       }
     }
-    real TcuL=T(xHeatC,yCuTop,zLeftRep), TagBL=T(xHeatC,yAgBmid,zLeftRep),
-         TscL=T(xHeatC,yScmid,zLeftRep), TagTL=T(xHeatC,yAgTmid,zLeftRep);
-    real TcuR=T(xHeatC,yCuTop,zRightRep), TagBR=T(xHeatC,yAgBmid,zRightRep),
-         TscR=T(xHeatC,yScmid,zRightRep), TagTR=T(xHeatC,yAgTmid,zRightRep);
+
+    // Precompute local per-x temperatures within the slit range for both
+    // sides ONCE per timestep -- T is fixed during this algebraic
+    // current-split sub-solve, so there's no need to re-evaluate the FE
+    // field on every bisection iteration below.
+    real[int] TcuLx(nxs+1), TagBLx(nxs+1), TscLx(nxs+1), TagTLx(nxs+1);
+    real[int] TcuRx(nxs+1), TagBRx(nxs+1), TscRx(nxs+1), TagTRx(nxs+1);
+    int iSlitLo=-1, iSlitHi=-1;
+    for (int i=0;i<=nxs;i++){
+      real xx = xSample[i];
+      if (xx >= xSlitStart && xx <= xSlitEnd){
+        if (iSlitLo<0) iSlitLo=i;
+        iSlitHi=i;
+        TcuLx[i]=T(xx,yCuTop,zLeftRep);  TagBLx[i]=T(xx,yAgBmid,zLeftRep);
+        TscLx[i]=T(xx,yScmid,zLeftRep);  TagTLx[i]=T(xx,yAgTmid,zLeftRep);
+        TcuRx[i]=T(xx,yCuTop,zRightRep); TagBRx[i]=T(xx,yAgBmid,zRightRep);
+        TscRx[i]=T(xx,yScmid,zRightRep); TagTRx[i]=T(xx,yAgTmid,zRightRep);
+      }
+    }
+
+    // Total voltage drop along each side = integral of the LOCAL field
+    // (current fixed at Il/Ir along the length, field varies with local T)
+    // over the slit's x-range, trapezoidal over the same x-sample grid used
+    // everywhere else.
+    func real VLeftTotal(real fracLeft){
+      real Il = fracLeft*I0w;
+      real sum = 0.0;
+      for (int i=iSlitLo;i<iSlitHi;i++){
+        real Ea = solveEHalf(TcuLx[i],  TagBLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth);
+        real Eb = solveEHalf(TcuLx[i+1],TagBLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth);
+        sum += 0.5*(Ea+Eb)*(xSample[i+1]-xSample[i]);
+      }
+      return sum;
+    }
+    func real VRightTotal(real fracLeft){
+      real Ir = (1-fracLeft)*I0w;
+      real sum = 0.0;
+      for (int i=iSlitLo;i<iSlitHi;i++){
+        real Ea = solveEHalf(TcuRx[i],  TagBRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth);
+        real Eb = solveEHalf(TcuRx[i+1],TagBRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth);
+        sum += 0.5*(Eb+Ea)*(xSample[i+1]-xSample[i]);
+      }
+      return sum;
+    }
     func real Vdiff(real fracLeft){
-      real Il=fracLeft*I0w, Ir=(1-fracLeft)*I0w;
-      real El = solveEHalf(TcuL,TagBL,TscL,TagTL, Il, leftShellArea, leftCoreWidth);
-      real Er = solveEHalf(TcuR,TagBR,TscR,TagTR, Ir, rightShellArea, rightCoreWidth);
-      return (El-Er)*(xSlitEnd-xSlitStart);
+      return VLeftTotal(fracLeft) - VRightTotal(fracLeft);
     }
     real flo=0.0, fhi=1.0;
     if (I0w <= 0.0){ flo=0.5; fhi=0.5; }
@@ -194,11 +241,10 @@ real t = 0.0;
       }
     }
     real fracLeft = 0.5*(flo+fhi);
-    real ElVal = solveEHalf(TcuL,TagBL,TscL,TagTL, fracLeft*I0w, leftShellArea, leftCoreWidth);
-    real ErVal = solveEHalf(TcuR,TagBR,TscR,TagTR, (1-fracLeft)*I0w, rightShellArea, rightCoreWidth);
-    for (int i=0;i<=nxs;i++){
-      real xx = xSample[i];
-      if (xx >= xSlitStart && xx <= xSlitEnd){ ElArr[i]=ElVal; ErArr[i]=ErVal; }
+    real IlFinal = fracLeft*I0w, IrFinal = (1-fracLeft)*I0w;
+    for (int i=iSlitLo;i<=iSlitHi;i++){
+      ElArr[i] = solveEHalf(TcuLx[i],TagBLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth);
+      ErArr[i] = solveEHalf(TcuRx[i],TagBRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth);
     }
 
     real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
