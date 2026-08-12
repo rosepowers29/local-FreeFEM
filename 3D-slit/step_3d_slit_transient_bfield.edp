@@ -126,11 +126,6 @@ func real ErFun(real xx){ return interp1(xSample, ErArr, nxs+1, xx); }
 include "diagnostics_3d_slit.idp"
 real[int] diagVL(nTapsPerSide), diagVR(nTapsPerSide);
 
-// Self-field B computation (Kim-model Jc(B,T) feedback) -- also must be
-// included after Efun/ElFun/ErFun, per its own header comment.
-include "bfield_3d_slit.idp"
-real[int] Bleft(nxs+1), Bright(nxs+1);
-
 fespace Vh3(Th3, P1);
 fespace Ph3(Th3, P0);
 Ph3 reg = region;
@@ -139,6 +134,15 @@ Ph3 kfun, source, rhocpfun;
 
 real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
 real zLeftRep = width/4, zRightRep = 3*width/4;
+
+// Self-field B computation (Kim-model Jc(B,T) feedback) -- must be
+// included after Efun/ElFun/ErFun AND after Vh3 T exists (bfield_3d_slit.idp's
+// computeSelfFieldB references the mesh field T directly), per its own
+// header comment. FreeFEM resolves identifiers at parse time even inside
+// func bodies not yet called, so this really does need to come after the
+// Vh3 T declaration above, not just before it's first USED.
+include "bfield_3d_slit.idp"
+real[int] Bleft(nxs+1), Bright(nxs+1);
 
 int maxStepsThisRun = 1;
 
