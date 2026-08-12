@@ -1,0 +1,311 @@
+// ============================================================
+// step_3d_slit_transient.edp
+// Full transient scenario WITH the slit: ramp current to 0.7*Ic over
+// 0.5s, then apply the 2mm x 2mm / 13W / 10ms spot heater on the LEFT
+// side only (z=width/4), then observe recovery or runaway -- and
+// critically, track how the current SPLIT between left/right evolves.
+//
+// Electrical model: outside the slit's x-range, one equipotential
+// channel. WITHIN the slit's x-range, current splits into two
+// independent parallel paths matched by equal voltage drop across the
+// slit's length (cheap bisection, redone every timestep -- no 3D solve
+// involved in this sub-solve).
+// ============================================================
+
+include "hts_mesh_module_3d_slit.idp"
+include "hts_materials.idp"
+
+real Tcold = 77.0;
+real IcRebcoActual = JcT(77.0)*tSc*coreWidth;
+real I0Target = 0.7 * IcRebcoActual;
+
+real shellAreaFull = width*yB7 - coreWidth*(yB6-yB1);
+real leftCoreWidth  = (zSlitCenter-slitR) - zB1;
+real rightCoreWidth = zB2 - (zSlitCenter+slitR);
+real leftShellArea  = tSideCu*yB7 + (tCuB+tCuT)*leftCoreWidth;
+real rightShellArea = tSideCu*yB7 + (tCuB+tCuT)*rightCoreWidth;
+
+real xHeatC = Lx/2, zHeatC = width/4;   // LEFT side only
+real xHeatLo = xHeatC-1e-3, xHeatHi = xHeatC+1e-3;
+real zHeatLo = zHeatC-1e-3, zHeatHi = zHeatC+1e-3;
+real heaterPower = 13.0;
+real qHeater = heaterPower/(2e-3*2e-3);
+
+real Tramp = 0.5, tPulseStart = Tramp, tPulseDur = 0.01, tPulseEnd = tPulseStart+tPulseDur;
+real tEnd = tPulseEnd + 1.5;
+
+func real I0ofT(real tt){
+  if (tt < Tramp) return I0Target*(tt/Tramp);
+  return I0Target;
+}
+real[int] phaseBounds = [Tramp, tPulseStart, tPulseEnd, tEnd];
+func real dtRaw(real tt){
+  if (tt < Tramp) return 0.05;
+  if (tt < tPulseEnd) return 0.002;
+  if (tt > tPulseEnd + 0.2) return 0.02;
+  return 0.01;
+}
+func real dtCapped(real tt){
+  real d = dtRaw(tt);
+  for (int i=0;i<4;i++) if (tt < phaseBounds[i]-1e-9 && tt+d > phaseBounds[i]) d = phaseBounds[i]-tt;
+  return d;
+}
+
+func real kOf(int rg, real Tl){
+  if (rg==1) return kCu(Tl);
+  if (rg==2 || rg==6) return kAg(Tl);
+  if (rg==3) return kHast(Tl);
+  if (rg==4) return kBuf(Tl);
+  if (rg==5) return kSc(Tl);
+  if (rg==7) return 1e-2;
+  return 1.0;
+}
+func real sourceOfFull(int rg, real Ef, real Tl){
+  if (rg==1) return Ef^2/rhoCu(Tl);
+  if (rg==2 || rg==6) return Ef^2/rhoAg(Tl);
+  if (rg==5) return sigmaSc(Ef,Tl)*Ef^2;
+  return 0.0;
+}
+func real rhoCpOf(int rg, real Tl){
+  if (rg==1) return rhomCu*cpCu(Tl);
+  if (rg==2 || rg==6) return rhomAg*cpAg(Tl);
+  if (rg==3) return rhomHast*cpHast(Tl);
+  if (rg==4) return rhomBuf*cpBuf(Tl);
+  if (rg==5) return rhomSc*cpSc(Tl);
+  return 1.0;   // region 7 (slit): nominal small value for well-posedness
+}
+
+func real ItotFull(real E, real TcuShell, real TagB, real Tsc, real TagT){
+  return shellAreaFull*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
+       + tSc*coreWidth*sigmaSc(E,Tsc)*E + tAgT*coreWidth*(E/rhoAg(TagT));
+}
+func real solveEFull(real TcuShell, real TagB, real Tsc, real TagT, real Itarget){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0=4.0; int guard=0;
+  while (ItotFull(Ehi0,TcuShell,TagB,Tsc,TagT) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  real logElo=log(1e-30), logEhi=log(Ehi0);
+  for(int it=0;it<50;it++){
+    real logEmid=0.5*(logElo+logEhi);
+    real Emid=exp(logEmid);
+    if (ItotFull(Emid,TcuShell,TagB,Tsc,TagT) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  }
+  real Ef=exp(0.5*(logElo+logEhi));
+  real relErr=abs(ItotFull(Ef,TcuShell,TagB,Tsc,TagT)-Itarget)/max(Itarget,1e-30);
+  assert(relErr<=1e-3);
+  return Ef;
+}
+func real ItotHalf(real E, real TcuShell, real TagB, real Tsc, real TagT, real shellA, real cw){
+  return shellA*(E/rhoCu(TcuShell)) + tAgB*cw*(E/rhoAg(TagB))
+       + tSc*cw*sigmaSc(E,Tsc)*E + tAgT*cw*(E/rhoAg(TagT));
+}
+func real solveEHalf(real TcuShell, real TagB, real Tsc, real TagT, real Itarget, real shellA, real cw){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0=4.0; int guard=0;
+  while (ItotHalf(Ehi0,TcuShell,TagB,Tsc,TagT,shellA,cw) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  real logElo=log(1e-30), logEhi=log(Ehi0);
+  for(int it=0;it<50;it++){
+    real logEmid=0.5*(logElo+logEhi);
+    real Emid=exp(logEmid);
+    if (ItotHalf(Emid,TcuShell,TagB,Tsc,TagT,shellA,cw) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  }
+  real Ef=exp(0.5*(logElo+logEhi));
+  real relErr=abs(ItotHalf(Ef,TcuShell,TagB,Tsc,TagT,shellA,cw)-Itarget)/max(Itarget,1e-30);
+  assert(relErr<=1e-3);
+  return Ef;
+}
+
+int nxs = 60;
+real[int] xSample(nxs+1), Earr(nxs+1), ElArr(nxs+1), ErArr(nxs+1);
+for (int i=0;i<=nxs;i++) xSample[i] = Lx*i/nxs;
+func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
+func real ElFun(real xx){ return interp1(xSample, ElArr, nxs+1, xx); }
+func real ErFun(real xx){ return interp1(xSample, ErArr, nxs+1, xx); }
+
+// Diagnostics (voltage taps / RTDs / Hall-probe placeholders) -- must be
+// included after Efun/ElFun/ErFun above, per that file's header comment.
+include "diagnostics_3d_slit.idp"
+real[int] diagVL(nTapsPerSide), diagVR(nTapsPerSide);
+
+// Self-field B computation (Kim-model Jc(B,T) feedback) -- also must be
+// included after Efun/ElFun/ErFun, per its own header comment.
+include "bfield_3d_slit.idp"
+real[int] Bleft(nxs+1), Bright(nxs+1);
+
+fespace Vh3(Th3, P1);
+fespace Ph3(Th3, P0);
+Ph3 reg = region;
+Vh3 T, Told, w;
+Ph3 kfun, source, rhocpfun;
+
+real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
+real zLeftRep = width/4, zRightRep = 3*width/4;
+
+int maxStepsThisRun = 1;
+
+real t = 0.0;
+{
+  ifstream fchk("ckpt_3d_slit_transient.txt");
+  fchk >> t;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+  cout << "Resumed at t="<<t<<"s Tmax="<<T[].max << endl;
+}
+
+{
+  ofstream fout("transient_3d_slit.csv", append);
+  if (t <= 1e-12) fout << "t,I0,Tmax,TmaxLeft,TmaxRight,fracLeft\n";
+
+  ofstream fdiag("diagnostics_3d_slit.csv", append);
+  int diagFileCheck = exec("test -s diagnostics_3d_slit.csv");
+  bool diagCsvHasHeader = (diagFileCheck == 0);
+  // Metadata is static and cheap -- just rewrite it every invocation so it's
+  // always present/current, regardless of when this feature was added
+  // relative to an in-progress run's t value.
+  writeDiagnosticsMetadata("diagnostics_positions_3d_slit.csv");
+  if (!diagCsvHasHeader) {
+    fdiag << "t,I0,Tmax,fracLeft,V_CL_plus,V_CL_minus";
+    for (int i=0;i<nTapsPerSide;i++) fdiag << ",V1_" << (i+1);
+    for (int i=0;i<nTapsPerSide;i++) fdiag << ",V2_" << (i+1);
+    for (int i=0;i<nRTDsPerSide;i++) fdiag << ",RTD1_" << (i+1);
+    for (int i=0;i<nRTDsPerSide;i++) fdiag << ",RTD2_" << (i+1);
+    fdiag << ",H1,H2\n";
+  }
+
+  int step = 0;
+  while (t < tEnd-1e-12 && step < maxStepsThisRun){
+    real I0w = I0ofT(t);
+
+    // Self-field B, computed from the CURRENT (about-to-be-overwritten)
+    // Earr/ElArr/ErArr and T -- i.e. the previous timestep's converged
+    // state -- then held fixed through this timestep's bisection below
+    // (the "lagged" coupling decision).
+    computeSelfFieldB(Bleft, Bright, nxs+1);
+
+    // electrical: single channel outside slit range, split L/R inside.
+    // WITHIN the slit, El(x)/Er(x) are resolved PER-x (matching the
+    // outside-slit treatment) rather than sampled once at a single
+    // representative point and extended uniformly -- the heater creates a
+    // strongly localized hot spot, and a single point's local resistivity
+    // is not representative of the other ~178mm of slit length.
+    for (int i=0;i<=nxs;i++){
+      real xx = xSample[i];
+      if (xx < xSlitStart || xx > xSlitEnd){
+        real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep),
+             Tsc=T(xx,yScmid,zLeftRep), TagT=T(xx,yAgTmid,zLeftRep);
+        Earr[i] = solveEFullB(TcuShell,TagB,Tsc,TagT, I0w, Bleft[i]);
+        ElArr[i] = 0; ErArr[i] = 0;
+      } else {
+        Earr[i] = 0;
+      }
+    }
+
+    // Precompute local per-x temperatures within the slit range for both
+    // sides ONCE per timestep -- T is fixed during this algebraic
+    // current-split sub-solve, so there's no need to re-evaluate the FE
+    // field on every bisection iteration below.
+    real[int] TcuLx(nxs+1), TagBLx(nxs+1), TscLx(nxs+1), TagTLx(nxs+1);
+    real[int] TcuRx(nxs+1), TagBRx(nxs+1), TscRx(nxs+1), TagTRx(nxs+1);
+    int iSlitLo=-1, iSlitHi=-1;
+    for (int i=0;i<=nxs;i++){
+      real xx = xSample[i];
+      if (xx >= xSlitStart && xx <= xSlitEnd){
+        if (iSlitLo<0) iSlitLo=i;
+        iSlitHi=i;
+        TcuLx[i]=T(xx,yCuTop,zLeftRep);  TagBLx[i]=T(xx,yAgBmid,zLeftRep);
+        TscLx[i]=T(xx,yScmid,zLeftRep);  TagTLx[i]=T(xx,yAgTmid,zLeftRep);
+        TcuRx[i]=T(xx,yCuTop,zRightRep); TagBRx[i]=T(xx,yAgBmid,zRightRep);
+        TscRx[i]=T(xx,yScmid,zRightRep); TagTRx[i]=T(xx,yAgTmid,zRightRep);
+      }
+    }
+
+    // Total voltage drop along each side = integral of the LOCAL field
+    // (current fixed at Il/Ir along the length, field varies with local T)
+    // over the slit's x-range, trapezoidal over the same x-sample grid used
+    // everywhere else.
+    func real VLeftTotal(real fracLeft){
+      real Il = fracLeft*I0w;
+      real sum = 0.0;
+      for (int i=iSlitLo;i<iSlitHi;i++){
+        real Ea = solveEHalfB(TcuLx[i],  TagBLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, Bleft[i]);
+        real Eb = solveEHalfB(TcuLx[i+1],TagBLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, Bleft[i+1]);
+        sum += 0.5*(Ea+Eb)*(xSample[i+1]-xSample[i]);
+      }
+      return sum;
+    }
+    func real VRightTotal(real fracLeft){
+      real Ir = (1-fracLeft)*I0w;
+      real sum = 0.0;
+      for (int i=iSlitLo;i<iSlitHi;i++){
+        real Ea = solveEHalfB(TcuRx[i],  TagBRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, Bright[i]);
+        real Eb = solveEHalfB(TcuRx[i+1],TagBRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, Bright[i+1]);
+        sum += 0.5*(Eb+Ea)*(xSample[i+1]-xSample[i]);
+      }
+      return sum;
+    }
+    func real Vdiff(real fracLeft){
+      return VLeftTotal(fracLeft) - VRightTotal(fracLeft);
+    }
+    real flo=0.0, fhi=1.0;
+    if (I0w <= 0.0){ flo=0.5; fhi=0.5; }
+    else {
+      for(int it=0;it<30;it++){
+        real fmid=0.5*(flo+fhi);
+        if (Vdiff(fmid) < 0) flo=fmid; else fhi=fmid;
+      }
+    }
+    real fracLeft = 0.5*(flo+fhi);
+    real IlFinal = fracLeft*I0w, IrFinal = (1-fracLeft)*I0w;
+    for (int i=iSlitLo;i<=iSlitHi;i++){
+      ElArr[i] = solveEHalfB(TcuLx[i],TagBLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, Bleft[i]);
+      ErArr[i] = solveEHalfB(TcuRx[i],TagBRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, Bright[i]);
+    }
+
+    real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
+    real TmaxRight = T(xHeatC,yCuTop,zRightRep);
+    cout << "t="<<t<<"s I0="<<I0w<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
+    fout << t << "," << I0w << "," << T[].max << "," << TmaxLeft << "," << TmaxRight << "," << fracLeft << "\n";
+
+    diagAllTapVoltages(diagVL, diagVR);
+    real VclPlus = 0.0;
+    real VclMinus = diagVcum(Lx, -1);   // == diagVcum(Lx,+1) by the slit's equal-voltage-drop closure condition
+    fdiag << t << "," << I0w << "," << T[].max << "," << fracLeft << "," << VclPlus << "," << VclMinus;
+    for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVL[i];
+    for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVR[i];
+    for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagLeft);
+    for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagRight);
+    real BatHallLeft = interp1(xSample, Bleft, nxs+1, xHall);
+    real BatHallRight = interp1(xSample, Bright, nxs+1, xHall);
+    fdiag << "," << BatHallLeft << "," << BatHallRight << "\n";
+
+    real dt = dtCapped(t);
+    if (dt <= 1e-9) break;
+
+    real qHeaterNow = 0.0;
+    if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
+
+    Ph3 inSlitRange = (x>=xSlitStart)*(x<=xSlitEnd);
+    source = (1-inSlitRange)*sourceOfFull(region, Efun(x), T)
+           + inSlitRange*( (z<zSlitCenter)*sourceOfFull(region, ElFun(x), T)
+                          + (z>zSlitCenter)*sourceOfFull(region, ErFun(x), T) );
+    Told = T;
+    kfun = kOf(region, Told);
+    rhocpfun = rhoCpOf(region, Told);
+
+    solve heatStep(T, w) =
+        int3d(Th3)( rhocpfun*T*w/dt + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
+      - int3d(Th3)( rhocpfun*Told*w/dt + source*w )
+      - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
+      + on(2, 4, T=Tcold);
+
+    t += dt;
+    for (int i=0;i<4;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
+    step++;
+  }
+}
+
+{
+  ofstream fchkOut("ckpt_3d_slit_transient.txt");
+  fchkOut.precision(12);
+  fchkOut << t << "\n";
+  for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+}
+cout << "Saved checkpoint at t="<<t<<"s" << endl;

@@ -1,0 +1,306 @@
+// ============================================================
+// bfield_3d_slit.idp
+// Self-field B computation for Kim-model Jc(B,T) suppression.
+//
+// Scope decisions (see project history for the full discussion):
+//  - Self-field only: computed via Biot-Savart directly from the
+//    tape's own current distribution. No external circuit / current
+//    return path is modeled (open-conductor approximation) -- this is
+//    least accurate near the current leads (x=0, x=Lx) and most
+//    accurate near the tape's midpoint, which is where the physics of
+//    interest (heater/hot-spot self-field suppression) actually lives.
+//  - LAGGED coupling: B is computed from the PREVIOUS timestep's
+//    converged current distribution, then held fixed through the
+//    current timestep's current-sharing bisection -- matches the
+//    existing Told-based lagging already used for source terms, and
+//    avoids a nested Picard loop.
+//  - Thin-SHEET approximation, one sheet per CURRENT-CARRYING layer
+//    (Hastelloy/buffer carry no current, no sheet needed): Ag-bottom,
+//    REBCO, Ag-top (simple flat sheets) + the Cu shell decomposed into
+//    4 non-overlapping sub-sheets (top strip, bottom strip, left wall,
+//    right wall) to preserve its actual wrap-around geometry rather
+//    than approximating it as flat. Each sheet's current density is
+//    resolved in 2D (along x AND across its own width) -- deliberately
+//    not collapsed to a 1D line current, since width-resolved self-field
+//    structure at the tape edges is the specific thing motivating the
+//    thin-sheet choice over a filament approximation.
+//  - Within the slit's x-range, Ag-bottom/REBCO/Ag-top and the Cu
+//    top/bottom strips split left/right at z=zSlitCenter (matching the
+//    existing electrical model); the Cu side walls are always whole,
+//    always on their respective side (confirmed from the mesh module:
+//    the walls sit entirely outside the slit's z-range, so are never
+//    severed by it).
+//
+// REQUIRES: this file must be included in a script that has already
+// included hts_mesh_module_3d_slit.idp and hts_materials.idp, and
+// which defines (with these exact names, as step_3d_slit_transient_diag.edp
+// does): the E-field sample arrays/functions Efun/ElFun/ErFun and their
+// backing arrays Earr/ElArr/ErArr, xSample, nxs, xSlitStart, xSlitEnd,
+// zSlitCenter, zLeftRep, zRightRep, and Vh3 T.
+// ============================================================
+
+// ---- Kim model: Jc(B,T) = Jc(T)/(1+|B|/B0) ----
+// PLACEHOLDER VALUE -- no experimental Jc(B,T) data on hand as of this
+// writing. 0.1 T is a round, order-of-magnitude-typical value for
+// REBCO self-field suppression scales in the literature, chosen
+// without search access to verify against a specific source. Treat as
+// a stand-in to be replaced once real data or a specific literature
+// value is available. Also note: this is an ISOTROPIC Kim model using
+// |B| regardless of orientation, per the project roadmap's stated
+// plan -- real REBCO Jc(B) is strongly anisotropic (perpendicular
+// field suppresses much more than parallel field); that anisotropy is
+// a known simplification here, not an oversight, and is a candidate
+// refinement for later, not implemented now.
+real B0kim = 0.1;
+
+func real JcTB(real Tl, real Bmag){
+  return JcT(Tl) / (1.0 + Bmag/B0kim);
+}
+func real sigmaScB(real Emag, real Tl, real Bmag){
+  real Estab = max(abs(Emag), Einit);
+  real JcVal = JcTB(Tl, Bmag);
+  real nVal  = nT(Tl);   // Kim model here only suppresses Jc, not n -- standard simplification
+  real scTerm = (JcVal/Estab) * (Estab/E0)^(1.0/nVal);
+  return min(scTerm, sigmaMax) + sigmaRebco;
+}
+
+// ---- sheet geometry (all derived from the real mesh-module constants,
+// nothing hardcoded) ----
+real yCuBotSheet = tCuB/2.0;
+real yCuTopSheet = yB6 + tCuT/2.0;
+real yCuWallMid  = 0.5*(yB1+yB6);
+real zCuLeftWall  = tSideCu/2.0;
+real zCuRightWall = width - tSideCu/2.0;
+
+real yAgBSheet = 0.5*(yB1+yB2);
+real yScSheet  = 0.5*(yB4+yB5);
+real yAgTSheet = 0.5*(yB5+yB6);
+
+// ---- E-field helper: which E value applies at x for the given side
+// (side<0 = left/z<center, side>0 = right/z>center) -- outside the
+// slit range both sides see the same unified Efun, matching the
+// diagnostics module's identical convention ----
+func real EforSide(real xx, int side){
+  if (xx < xSlitStart || xx > xSlitEnd) return Efun(xx);
+  return (side < 0) ? ElFun(xx) : ErFun(xx);
+}
+
+// ---- generic 2D Biot-Savart sheet integrators. Current always flows
+// in +x (the model's universal assumption). K(x) is surface current
+// density [A/m], uniform across the sheet's short/transverse extent at
+// a given x (consistent with the existing model's per-x-slice-uniform
+// current assumption within each layer) but resolved in 2D spatially
+// via explicit sub-strips across that transverse extent, so the actual
+// finite width still shapes the near-field the way a real sheet would.
+// ----
+func real[int] biotSheetYConst(real px,real py,real pz, real ySheet, real za,real zb,
+                                real[int] &Karr, int nSub){
+  int Nz = 6;
+  real dz = (zb-za)/Nz;
+  real sx=0.0, sy=0.0, sz=0.0;
+  for (int iz=0; iz<Nz; iz++){
+    real zq = za + (iz+0.5)*dz;
+    for (int ix=0; ix<nSub-1; ix++){
+      real xq = 0.5*(xSample[ix]+xSample[ix+1]);
+      real Kavg = 0.5*(Karr[ix]+Karr[ix+1]);
+      real dI = Kavg*dz;
+      real dxSeg = xSample[ix+1]-xSample[ix];
+      real rx=px-xq, ry=py-ySheet, rz=pz-zq;
+      real rmag = sqrt(rx^2+ry^2+rz^2);
+      real inv = dI/(4*pi*(rmag^3+1e-30));
+      // dl=(dxSeg,0,0); dl x r = (0, -dxSeg*rz, dxSeg*ry)
+      sy += (-dxSeg*rz)*inv;
+      sz += ( dxSeg*ry)*inv;
+    }
+  }
+  real[int] res = [sx, sy, sz];
+  return res;
+}
+func real[int] biotSheetZConst(real px,real py,real pz, real zSheet, real ya,real yb,
+                                real[int] &Karr, int nSub){
+  int Ny = 4;
+  real dy = (yb-ya)/Ny;
+  real sx=0.0, sy=0.0, sz=0.0;
+  for (int iy=0; iy<Ny; iy++){
+    real yq = ya + (iy+0.5)*dy;
+    for (int ix=0; ix<nSub-1; ix++){
+      real xq = 0.5*(xSample[ix]+xSample[ix+1]);
+      real Kavg = 0.5*(Karr[ix]+Karr[ix+1]);
+      real dI = Kavg*dy;
+      real dxSeg = xSample[ix+1]-xSample[ix];
+      real rx=px-xq, ry=py-yq, rz=pz-zSheet;
+      real rmag = sqrt(rx^2+ry^2+rz^2);
+      real inv = dI/(4*pi*(rmag^3+1e-30));
+      sy += (-dxSeg*rz)*inv;
+      sz += ( dxSeg*ry)*inv;
+    }
+  }
+  real[int] res = [sx, sy, sz];
+  return res;
+}
+
+// ---- near-field-excluding variant, used ONLY when a sheet is being
+// evaluated at a point ON ITSELF (same y-height, same side) -- e.g.
+// REBCO's own contribution to B at REBCO's own location. Segments
+// immediately adjacent to the evaluation x-index are excluded from
+// the discretized sum (that's exactly where the y-distance is zero
+// and the naive kernel is near-singular), and nothing is added back:
+// the exact uniform-current-slab result for the field AT THE CENTER
+// of a locally-uniform slab is precisely zero (see project notes),
+// so omitting that immediate neighborhood entirely IS the correct
+// near-field treatment here, not merely an approximation of it.
+//
+// CAVEAT: the excluded window's width is tied to the x-sampling grid
+// spacing (~3.3mm at nxs=60), which is coarser than the length scale
+// over which current density is truly uniform right at sharp
+// features (the heater footprint, the slit edges). The zero-near-term
+// result is exact only insofar as current is locally uniform within
+// the excluded window -- it is a weaker approximation specifically at
+// those sharp features than everywhere else. nExclude is left as an
+// explicit, tunable parameter for exactly this reason.
+func real[int] biotSheetYConstExcludeNear(real px,real py,real pz, real ySheet, real za,real zb,
+                                           real[int] &Karr, int nSub, int excludeIdx, int nExclude){
+  int Nz = 6;
+  real dz = (zb-za)/Nz;
+  real sx=0.0, sy=0.0, sz=0.0;
+  int loEx = max(0, excludeIdx-nExclude);
+  int hiEx = min(nSub-2, excludeIdx+nExclude-1);
+  for (int iz=0; iz<Nz; iz++){
+    real zq = za + (iz+0.5)*dz;
+    for (int ix=0; ix<nSub-1; ix++){
+      if (ix>=loEx && ix<=hiEx) continue;   // skip the near neighborhood
+      real xq = 0.5*(xSample[ix]+xSample[ix+1]);
+      real Kavg = 0.5*(Karr[ix]+Karr[ix+1]);
+      real dI = Kavg*dz;
+      real dxSeg = xSample[ix+1]-xSample[ix];
+      real rx=px-xq, ry=py-ySheet, rz=pz-zq;
+      real rmag = sqrt(rx^2+ry^2+rz^2);
+      real inv = dI/(4*pi*(rmag^3+1e-30));
+      sy += (-dxSeg*rz)*inv;
+      sz += ( dxSeg*ry)*inv;
+    }
+  }
+  real[int] res = [sx, sy, sz];
+  return res;
+}
+
+// ---- self-field driver: builds all 12 sheet current-density arrays
+// from the CURRENT (soon to be overwritten) Earr/ElArr/ErArr and T --
+// i.e. the previous timestep's converged state, per the lagged-
+// coupling decision -- and evaluates |B| (in Tesla) at the REBCO
+// layer's representative point for each side, at every x-sample point.
+//
+// NOTE on a deliberate simplification: the REBCO sheet's current here
+// is reconstructed via the plain sigmaSc(E,T) formula (NOT sigmaScB),
+// even though the "real" current that produced this stored E may have
+// been computed under B-suppression on a previous step. This avoids
+// needing a separate persisted-B checkpoint across script invocations
+// (B is always freshly recomputed from the already-checkpointed E/T
+// state instead). Given the whole self-field treatment is already an
+// approximation (open-conductor, lagged, isotropic Kim model), this
+// additional simplification is judged acceptable -- it does not
+// compound across timesteps, since nothing here is itself persisted.
+real mu0 = 4*pi*1e-7;
+
+func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
+  real[int] KcuBotL(nSub), KcuBotR(nSub), KcuTopL(nSub), KcuTopR(nSub);
+  real[int] KcuLW(nSub), KcuRW(nSub);
+  real[int] KagbL(nSub), KagbR(nSub), KscL(nSub), KscR(nSub), KagtL(nSub), KagtR(nSub);
+
+  for (int i=0; i<nSub; i++){
+    real xx = xSample[i];
+    real ElHere = EforSide(xx,-1), ErHere = EforSide(xx,+1);
+    real TcuBotL=T(xx,yCuBotSheet,zLeftRep), TcuBotR=T(xx,yCuBotSheet,zRightRep);
+    real TcuTopL=T(xx,yCuTopSheet,zLeftRep), TcuTopR=T(xx,yCuTopSheet,zRightRep);
+    real TcuLWt=T(xx,yCuWallMid,zCuLeftWall), TcuRWt=T(xx,yCuWallMid,zCuRightWall);
+    real TagbL=T(xx,yAgBSheet,zLeftRep), TagbR=T(xx,yAgBSheet,zRightRep);
+    real TscL=T(xx,yScSheet,zLeftRep),   TscR=T(xx,yScSheet,zRightRep);
+    real TagtL=T(xx,yAgTSheet,zLeftRep), TagtR=T(xx,yAgTSheet,zRightRep);
+
+    KcuBotL[i]=tCuB*(ElHere/rhoCu(TcuBotL)); KcuBotR[i]=tCuB*(ErHere/rhoCu(TcuBotR));
+    KcuTopL[i]=tCuT*(ElHere/rhoCu(TcuTopL)); KcuTopR[i]=tCuT*(ErHere/rhoCu(TcuTopR));
+    KcuLW[i]=tSideCu*(ElHere/rhoCu(TcuLWt)); KcuRW[i]=tSideCu*(ErHere/rhoCu(TcuRWt));
+    KagbL[i]=tAgB*(ElHere/rhoAg(TagbL));     KagbR[i]=tAgB*(ErHere/rhoAg(TagbR));
+    KscL[i]=sigmaSc(ElHere,TscL)*ElHere*tSc; KscR[i]=sigmaSc(ErHere,TscR)*ErHere*tSc;
+    KagtL[i]=tAgT*(ElHere/rhoAg(TagtL));     KagtR[i]=tAgT*(ErHere/rhoAg(TagtR));
+  }
+
+  for (int i=0; i<nSub; i++){
+    real xx = xSample[i];
+    for (int side=-1; side<=1; side+=2){
+      real pz = (side<0) ? zLeftRep : zRightRep;
+      real[int] hCuBotL=biotSheetYConst(xx,yScSheet,pz, yCuBotSheet, 0.0,zSlitCenter, KcuBotL,nSub);
+      real[int] hCuBotR=biotSheetYConst(xx,yScSheet,pz, yCuBotSheet, zSlitCenter,width, KcuBotR,nSub);
+      real[int] hCuTopL=biotSheetYConst(xx,yScSheet,pz, yCuTopSheet, 0.0,zSlitCenter, KcuTopL,nSub);
+      real[int] hCuTopR=biotSheetYConst(xx,yScSheet,pz, yCuTopSheet, zSlitCenter,width, KcuTopR,nSub);
+      real[int] hCuLW  =biotSheetZConst(xx,yScSheet,pz, zCuLeftWall, yB1,yB6, KcuLW,nSub);
+      real[int] hCuRW  =biotSheetZConst(xx,yScSheet,pz, zCuRightWall, yB1,yB6, KcuRW,nSub);
+      real[int] hAgbL  =biotSheetYConst(xx,yScSheet,pz, yAgBSheet, zB1,zSlitCenter, KagbL,nSub);
+      real[int] hAgbR  =biotSheetYConst(xx,yScSheet,pz, yAgBSheet, zSlitCenter,zB2, KagbR,nSub);
+      // REBCO's contribution to B AT ITS OWN LOCATION: only the
+      // portion on the SAME side as the evaluation point (side<0 uses
+      // hScL, side>0 uses hScR) needs the near-field exclusion, since
+      // that's the only piece sharing both the evaluation y-height AND
+      // covering the evaluation z-location. The opposite-side portion
+      // is a genuine, well-posed cross-term (nonzero z-separation) and
+      // uses ordinary Biot-Savart unchanged.
+      real[int] hScL(3), hScR(3);
+      if (side<0){ hScL=biotSheetYConstExcludeNear(xx,yScSheet,pz, yScSheet, zB1,zSlitCenter, KscL,nSub, i,2);
+                   hScR=biotSheetYConst(xx,yScSheet,pz, yScSheet, zSlitCenter,zB2, KscR,nSub); }
+      else       { hScL=biotSheetYConst(xx,yScSheet,pz, yScSheet, zB1,zSlitCenter, KscL,nSub);
+                   hScR=biotSheetYConstExcludeNear(xx,yScSheet,pz, yScSheet, zSlitCenter,zB2, KscR,nSub, i,2); }
+      real[int] hAgtL  =biotSheetYConst(xx,yScSheet,pz, yAgTSheet, zB1,zSlitCenter, KagtL,nSub);
+      real[int] hAgtR  =biotSheetYConst(xx,yScSheet,pz, yAgTSheet, zSlitCenter,zB2, KagtR,nSub);
+
+      real Hy = hCuBotL[1]+hCuBotR[1]+hCuTopL[1]+hCuTopR[1]+hCuLW[1]+hCuRW[1]
+              + hAgbL[1]+hAgbR[1]+hScL[1]+hScR[1]+hAgtL[1]+hAgtR[1];
+      real Hz = hCuBotL[2]+hCuBotR[2]+hCuTopL[2]+hCuTopR[2]+hCuLW[2]+hCuRW[2]
+              + hAgbL[2]+hAgbR[2]+hScL[2]+hScR[2]+hAgtL[2]+hAgtR[2];
+      real Hmag = sqrt(Hy^2+Hz^2);
+      if (side<0) BleftOut[i]=mu0*Hmag; else BrightOut[i]=mu0*Hmag;
+    }
+  }
+  return 0;
+}
+
+// ---- B-aware current-sharing bisection: identical structure to the
+// existing ItotFull/solveEFull and ItotHalf/solveEHalf, but using
+// sigmaScB (Kim-suppressed) instead of sigmaSc for the REBCO term. ----
+func real ItotFullB(real E, real TcuShell, real TagB, real Tsc, real TagT, real Bmag){
+  return shellAreaFull*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
+       + tSc*coreWidth*sigmaScB(E,Tsc,Bmag)*E + tAgT*coreWidth*(E/rhoAg(TagT));
+}
+func real solveEFullB(real TcuShell, real TagB, real Tsc, real TagT, real Itarget, real Bmag){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0=4.0; int guard=0;
+  while (ItotFullB(Ehi0,TcuShell,TagB,Tsc,TagT,Bmag) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  real logElo=log(1e-30), logEhi=log(Ehi0);
+  for(int it=0;it<50;it++){
+    real logEmid=0.5*(logElo+logEhi);
+    real Emid=exp(logEmid);
+    if (ItotFullB(Emid,TcuShell,TagB,Tsc,TagT,Bmag) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  }
+  real Ef=exp(0.5*(logElo+logEhi));
+  real relErr=abs(ItotFullB(Ef,TcuShell,TagB,Tsc,TagT,Bmag)-Itarget)/max(Itarget,1e-30);
+  assert(relErr<=1e-3);
+  return Ef;
+}
+func real ItotHalfB(real E, real TcuShell, real TagB, real Tsc, real TagT, real shellA, real cw, real Bmag){
+  return shellA*(E/rhoCu(TcuShell)) + tAgB*cw*(E/rhoAg(TagB))
+       + tSc*cw*sigmaScB(E,Tsc,Bmag)*E + tAgT*cw*(E/rhoAg(TagT));
+}
+func real solveEHalfB(real TcuShell, real TagB, real Tsc, real TagT, real Itarget, real shellA, real cw, real Bmag){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0=4.0; int guard=0;
+  while (ItotHalfB(Ehi0,TcuShell,TagB,Tsc,TagT,shellA,cw,Bmag) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  real logElo=log(1e-30), logEhi=log(Ehi0);
+  for(int it=0;it<50;it++){
+    real logEmid=0.5*(logElo+logEhi);
+    real Emid=exp(logEmid);
+    if (ItotHalfB(Emid,TcuShell,TagB,Tsc,TagT,shellA,cw,Bmag) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  }
+  real Ef=exp(0.5*(logElo+logEhi));
+  real relErr=abs(ItotHalfB(Ef,TcuShell,TagB,Tsc,TagT,shellA,cw,Bmag)-Itarget)/max(Itarget,1e-30);
+  assert(relErr<=1e-3);
+  return Ef;
+}
