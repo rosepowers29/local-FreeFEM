@@ -63,8 +63,9 @@ func real kOf(int rg, real Tl){
 func real sourceOfFull(int rg, real Ef, real Tl){
   if (rg==1) return Ef^2/rhoCu(Tl);
   if (rg==2 || rg==6) return Ef^2/rhoAg(Tl);
+  if (rg==3) return Ef^2/rhoHast(Tl);   // Hastelloy: now a genuine parallel branch, not excluded
   if (rg==5) return sigmaSc(Ef,Tl)*Ef^2;
-  return 0.0;
+  return 0.0;   // region 4 (buffer) remains excluded -- see bfield_3d_slit.idp header note
 }
 func real rhoCpOf(int rg, real Tl){
   if (rg==1) return rhomCu*cpCu(Tl);
@@ -75,44 +76,12 @@ func real rhoCpOf(int rg, real Tl){
   return 1.0;   // region 7 (slit): nominal small value for well-posedness
 }
 
-func real ItotFull(real E, real TcuShell, real TagB, real Tsc, real TagT){
-  return shellAreaFull*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
-       + tSc*coreWidth*sigmaSc(E,Tsc)*E + tAgT*coreWidth*(E/rhoAg(TagT));
-}
-func real solveEFull(real TcuShell, real TagB, real Tsc, real TagT, real Itarget){
-  if (Itarget <= 0.0) return 0.0;
-  real Ehi0=4.0; int guard=0;
-  while (ItotFull(Ehi0,TcuShell,TagB,Tsc,TagT) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
-  real logElo=log(1e-30), logEhi=log(Ehi0);
-  for(int it=0;it<50;it++){
-    real logEmid=0.5*(logElo+logEhi);
-    real Emid=exp(logEmid);
-    if (ItotFull(Emid,TcuShell,TagB,Tsc,TagT) < Itarget) logElo=logEmid; else logEhi=logEmid;
-  }
-  real Ef=exp(0.5*(logElo+logEhi));
-  real relErr=abs(ItotFull(Ef,TcuShell,TagB,Tsc,TagT)-Itarget)/max(Itarget,1e-30);
-  assert(relErr<=1e-3);
-  return Ef;
-}
-func real ItotHalf(real E, real TcuShell, real TagB, real Tsc, real TagT, real shellA, real cw){
-  return shellA*(E/rhoCu(TcuShell)) + tAgB*cw*(E/rhoAg(TagB))
-       + tSc*cw*sigmaSc(E,Tsc)*E + tAgT*cw*(E/rhoAg(TagT));
-}
-func real solveEHalf(real TcuShell, real TagB, real Tsc, real TagT, real Itarget, real shellA, real cw){
-  if (Itarget <= 0.0) return 0.0;
-  real Ehi0=4.0; int guard=0;
-  while (ItotHalf(Ehi0,TcuShell,TagB,Tsc,TagT,shellA,cw) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
-  real logElo=log(1e-30), logEhi=log(Ehi0);
-  for(int it=0;it<50;it++){
-    real logEmid=0.5*(logElo+logEhi);
-    real Emid=exp(logEmid);
-    if (ItotHalf(Emid,TcuShell,TagB,Tsc,TagT,shellA,cw) < Itarget) logElo=logEmid; else logEhi=logEmid;
-  }
-  real Ef=exp(0.5*(logElo+logEhi));
-  real relErr=abs(ItotHalf(Ef,TcuShell,TagB,Tsc,TagT,shellA,cw)-Itarget)/max(Itarget,1e-30);
-  assert(relErr<=1e-3);
-  return Ef;
-}
+// (The non-B-aware ItotFull/solveEFull/ItotHalf/solveEHalf that used to
+// live here were dead code -- never called; the actual solve uses only
+// the B-aware solveEFullB/solveEHalfB from bfield_3d_slit.idp. Removed
+// rather than left stale, since leaving them would mean an un-fixed
+// duplicate missing the Hastelloy branch below sitting right next to
+// the real implementation.)
 
 int nxs = 60;
 real[int] xSample(nxs+1), Earr(nxs+1), ElArr(nxs+1), ErArr(nxs+1);
@@ -132,7 +101,7 @@ Ph3 reg = region;
 Vh3 T, Told, w;
 Ph3 kfun, source, rhocpfun;
 
-real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
+real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yHastMid=0.5*(yB2+yB3), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
 real zLeftRep = width/4, zRightRep = 3*width/4;
 
 // Self-field B computation (Kim-model Jc(B,T) feedback) -- must be
@@ -176,14 +145,18 @@ real t = 0.0;
 
   int step = 0;
   while (t < tEnd-1e-12 && step < maxStepsThisRun){
+    real tStepStart = clock();
     real I0w = I0ofT(t);
 
     // Self-field B, computed from the CURRENT (about-to-be-overwritten)
     // Earr/ElArr/ErArr and T -- i.e. the previous timestep's converged
     // state -- then held fixed through this timestep's bisection below
     // (the "lagged" coupling decision).
+    real tBstart = clock();
     computeSelfFieldB(Bleft, Bright, nxs+1);
+    real tBfield = clock() - tBstart;
 
+    real tElecStart = clock();
     // electrical: single channel outside slit range, split L/R inside.
     // WITHIN the slit, El(x)/Er(x) are resolved PER-x (matching the
     // outside-slit treatment) rather than sampled once at a single
@@ -193,9 +166,9 @@ real t = 0.0;
     for (int i=0;i<=nxs;i++){
       real xx = xSample[i];
       if (xx < xSlitStart || xx > xSlitEnd){
-        real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep),
+        real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep), THast=T(xx,yHastMid,zLeftRep),
              Tsc=T(xx,yScmid,zLeftRep), TagT=T(xx,yAgTmid,zLeftRep);
-        Earr[i] = solveEFullB(TcuShell,TagB,Tsc,TagT, I0w, Bleft[i]);
+        Earr[i] = solveEFullB(TcuShell,TagB,THast,Tsc,TagT, I0w, Bleft[i]);
         ElArr[i] = 0; ErArr[i] = 0;
       } else {
         Earr[i] = 0;
@@ -206,17 +179,17 @@ real t = 0.0;
     // sides ONCE per timestep -- T is fixed during this algebraic
     // current-split sub-solve, so there's no need to re-evaluate the FE
     // field on every bisection iteration below.
-    real[int] TcuLx(nxs+1), TagBLx(nxs+1), TscLx(nxs+1), TagTLx(nxs+1);
-    real[int] TcuRx(nxs+1), TagBRx(nxs+1), TscRx(nxs+1), TagTRx(nxs+1);
+    real[int] TcuLx(nxs+1), TagBLx(nxs+1), THastLx(nxs+1), TscLx(nxs+1), TagTLx(nxs+1);
+    real[int] TcuRx(nxs+1), TagBRx(nxs+1), THastRx(nxs+1), TscRx(nxs+1), TagTRx(nxs+1);
     int iSlitLo=-1, iSlitHi=-1;
     for (int i=0;i<=nxs;i++){
       real xx = xSample[i];
       if (xx >= xSlitStart && xx <= xSlitEnd){
         if (iSlitLo<0) iSlitLo=i;
         iSlitHi=i;
-        TcuLx[i]=T(xx,yCuTop,zLeftRep);  TagBLx[i]=T(xx,yAgBmid,zLeftRep);
+        TcuLx[i]=T(xx,yCuTop,zLeftRep);  TagBLx[i]=T(xx,yAgBmid,zLeftRep);  THastLx[i]=T(xx,yHastMid,zLeftRep);
         TscLx[i]=T(xx,yScmid,zLeftRep);  TagTLx[i]=T(xx,yAgTmid,zLeftRep);
-        TcuRx[i]=T(xx,yCuTop,zRightRep); TagBRx[i]=T(xx,yAgBmid,zRightRep);
+        TcuRx[i]=T(xx,yCuTop,zRightRep); TagBRx[i]=T(xx,yAgBmid,zRightRep); THastRx[i]=T(xx,yHastMid,zRightRep);
         TscRx[i]=T(xx,yScmid,zRightRep); TagTRx[i]=T(xx,yAgTmid,zRightRep);
       }
     }
@@ -229,8 +202,8 @@ real t = 0.0;
       real Il = fracLeft*I0w;
       real sum = 0.0;
       for (int i=iSlitLo;i<iSlitHi;i++){
-        real Ea = solveEHalfB(TcuLx[i],  TagBLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, Bleft[i]);
-        real Eb = solveEHalfB(TcuLx[i+1],TagBLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, Bleft[i+1]);
+        real Ea = solveEHalfB(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, Bleft[i]);
+        real Eb = solveEHalfB(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, Bleft[i+1]);
         sum += 0.5*(Ea+Eb)*(xSample[i+1]-xSample[i]);
       }
       return sum;
@@ -239,8 +212,8 @@ real t = 0.0;
       real Ir = (1-fracLeft)*I0w;
       real sum = 0.0;
       for (int i=iSlitLo;i<iSlitHi;i++){
-        real Ea = solveEHalfB(TcuRx[i],  TagBRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, Bright[i]);
-        real Eb = solveEHalfB(TcuRx[i+1],TagBRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, Bright[i+1]);
+        real Ea = solveEHalfB(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, Bright[i]);
+        real Eb = solveEHalfB(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, Bright[i+1]);
         sum += 0.5*(Eb+Ea)*(xSample[i+1]-xSample[i]);
       }
       return sum;
@@ -259,15 +232,17 @@ real t = 0.0;
     real fracLeft = 0.5*(flo+fhi);
     real IlFinal = fracLeft*I0w, IrFinal = (1-fracLeft)*I0w;
     for (int i=iSlitLo;i<=iSlitHi;i++){
-      ElArr[i] = solveEHalfB(TcuLx[i],TagBLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, Bleft[i]);
-      ErArr[i] = solveEHalfB(TcuRx[i],TagBRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, Bright[i]);
+      ElArr[i] = solveEHalfB(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, Bleft[i]);
+      ErArr[i] = solveEHalfB(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, Bright[i]);
     }
+    real tElectrical = clock() - tElecStart;
 
     real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
     real TmaxRight = T(xHeatC,yCuTop,zRightRep);
     cout << "t="<<t<<"s I0="<<I0w<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
     fout << t << "," << I0w << "," << T[].max << "," << TmaxLeft << "," << TmaxRight << "," << fracLeft << "\n";
 
+    real tDiagStart = clock();
     diagAllTapVoltages(diagVL, diagVR);
     real VclPlus = 0.0;
     real VclMinus = diagVcum(Lx, -1);   // == diagVcum(Lx,+1) by the slit's equal-voltage-drop closure condition
@@ -279,6 +254,7 @@ real t = 0.0;
     real BatHallLeft = interp1(xSample, Bleft, nxs+1, xHall);
     real BatHallRight = interp1(xSample, Bright, nxs+1, xHall);
     fdiag << "," << BatHallLeft << "," << BatHallRight << "\n";
+    real tDiag = clock() - tDiagStart;
 
     real dt = dtCapped(t);
     if (dt <= 1e-9) break;
@@ -286,6 +262,7 @@ real t = 0.0;
     real qHeaterNow = 0.0;
     if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
 
+    real tFieldsStart = clock();
     Ph3 inSlitRange = (x>=xSlitStart)*(x<=xSlitEnd);
     source = (1-inSlitRange)*sourceOfFull(region, Efun(x), T)
            + inSlitRange*( (z<zSlitCenter)*sourceOfFull(region, ElFun(x), T)
@@ -293,12 +270,20 @@ real t = 0.0;
     Told = T;
     kfun = kOf(region, Told);
     rhocpfun = rhoCpOf(region, Told);
+    real tFields = clock() - tFieldsStart;
 
+    real tHeatStart = clock();
     solve heatStep(T, w) =
         int3d(Th3)( rhocpfun*T*w/dt + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
       - int3d(Th3)( rhocpfun*Told*w/dt + source*w )
       - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
       + on(2, 4, T=Tcold);
+    real tHeatSolve = clock() - tHeatStart;
+
+    real tStepTotal = clock() - tStepStart;
+    cout << "TIMING (s): Bfield=" << tBfield << "  electrical=" << tElectrical
+         << "  diagnostics=" << tDiag << "  fieldAssign=" << tFields << "  heatSolve=" << tHeatSolve
+         << "  ||  stepTotal=" << tStepTotal << endl;
 
     t += dt;
     for (int i=0;i<4;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
