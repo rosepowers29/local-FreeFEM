@@ -11,10 +11,12 @@ full voltage-tap / RTD diagnostics array.
 Produces:
   1. chart_diagnostics_voltages.png     -- all voltage-tap channels, one axes
   2. chart_diagnostics_temperatures.png -- all RTD channels, one axes
-  3. chart_diagnostics_lr_comparison.png -- left-minus-right differential
-     per matched tap/RTD pair -- the actual quench-detection-style signal
-     a real differential voltmeter/RTD-pair readout would show.
-  4. anim_diagnostics_voltage.gif / anim_diagnostics_temperature.gif --
+  3. chart_diagnostics_bfield.png       -- H1/H2 self-field (Hall probe
+     placeholder channels), left/right, at the heater/Hall x-location.
+  4. chart_diagnostics_lr_comparison.png -- left-minus-right differential
+     per matched tap/RTD pair (plus B, if available) -- the actual
+     quench-detection-style signal a real differential readout would show.
+  5. anim_diagnostics_voltage.gif / anim_diagnostics_temperature.gif --
      animated 2-strip (left-half / right-half) surface projections.
 
      IMPORTANT honesty note on the animations: these interpolate ALONG x
@@ -26,6 +28,15 @@ Produces:
      array (which is the whole point of this diagnostics work) -- it is
      NOT the full FEM temperature/voltage field, and should not be read
      as one.
+
+NOTE on B-field: H1/H2 are SINGLE-POINT channels (evaluated only at the
+heater/Hall x-location), unlike the voltage taps and RTDs which are
+spatially resolved arrays -- there's no "all B channels" multi-series
+plot the way there is for voltage/temperature, since there's only ever
+one reading per side. If your diagnostics CSV predates the B-field
+feature, H1/H2 will be the -999 sentinel throughout; this script detects
+that and skips the B-field chart (with a printed note) rather than
+plotting a meaningless flat line at -999.
 
 Channel positions are read from the metadata file rather than assumed, so
 this keeps working if tap/RTD count or spacing changes later.
@@ -96,6 +107,34 @@ def get_geometry(positions):
     return Lx, width, xHeater
 
 
+HALL_SENTINEL = -999.0
+
+
+def bfield_is_real(data):
+    """True if H1/H2 contain actual computed values rather than the
+    -999 placeholder sentinel written before the B-field feature existed."""
+    if "H1" not in data or "H2" not in data:
+        return False
+    return not (np.allclose(data["H1"], HALL_SENTINEL) and np.allclose(data["H2"], HALL_SENTINEL))
+
+
+def auto_bfield_unit(data):
+    """Pick a readable SI-prefixed unit (T / mT / uT / nT) based on the
+    actual magnitude of the data, rather than guessing a fixed scale --
+    self-field magnitude depends heavily on the scenario (ramp level,
+    how far into a hot spot the run gets), so a fixed unit risks either
+    a flat-looking or unreadably-scientific-notation axis depending on
+    the run."""
+    peak = float(np.max(np.abs(np.concatenate([data["H1"], data["H2"]]))))
+    if peak >= 1.0:
+        return 1.0, " [T]"
+    if peak >= 1e-3:
+        return 1e3, " [mT]"
+    if peak >= 1e-6:
+        return 1e6, " [\u00b5T]"
+    return 1e9, " [nT]"
+
+
 # ------------------------------------------------------------------ plots --
 
 def add_pulse_shading(ax, pulse_start, pulse_end, label=None):
@@ -139,10 +178,32 @@ def make_multiseries_plot(data, channels_left, channels_right, ylabel, title, ou
     plt.close(fig)
 
 
-def make_lr_comparison_plot(data, taps_left, taps_right, rtd_left, rtd_right, outpath,
-                             pulse_start, pulse_end, volt_unit_scale=1e6, volt_unit_label=" [\u00b5V]"):
+def make_bfield_plot(data, outpath, pulse_start, pulse_end, unit_scale, unit_label, xHeater):
+    """H1/H2 are single-point channels (only ever evaluated at the heater/
+    Hall x-location) -- a plain two-line time series, not a multi-series
+    plot like the tap/RTD arrays, since there's exactly one reading per side."""
     t = data["t"]
-    fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
+    fig, ax = plt.subplots(figsize=(11, 6))
+    ax.plot(t, data["H1"] * unit_scale, color="tab:red", linewidth=1.6, label="H1 (left)")
+    ax.plot(t, data["H2"] * unit_scale, color="tab:blue", linewidth=1.6, label="H2 (right)")
+    add_pulse_shading(ax, pulse_start, pulse_end, label="heater pulse")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel(f"self-field |B|{unit_label}")
+    loc_note = f" (at x={xHeater*1000:.0f}mm)" if xHeater is not None else ""
+    ax.set_title(f"Self-Field at Heater/Hall Location{loc_note}", fontsize=13)
+    ax.legend(loc="best", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150)
+    plt.close(fig)
+
+
+
+def make_lr_comparison_plot(data, taps_left, taps_right, rtd_left, rtd_right, outpath,
+                             pulse_start, pulse_end, volt_unit_scale=1e6, volt_unit_label=" [\u00b5V]",
+                             include_bfield=False, bfield_unit_scale=1.0, bfield_unit_label=" [T]"):
+    t = data["t"]
+    nrows = 3 if include_bfield else 2
+    fig, axes = plt.subplots(nrows, 1, figsize=(11, 4.4 * nrows), sharex=True)
     cmap = plt.get_cmap("viridis")
 
     n = min(len(taps_left), len(taps_right))
@@ -168,9 +229,19 @@ def make_lr_comparison_plot(data, taps_left, taps_right, rtd_left, rtd_right, ou
     axes[1].axhline(0, color="gray", linestyle="--", alpha=0.6)
     add_pulse_shading(axes[1], pulse_start, pulse_end)
     axes[1].set_ylabel("T_left $-$ T_right [K]")
-    axes[1].set_xlabel("time [s]")
+    if not include_bfield:
+        axes[1].set_xlabel("time [s]")
     axes[1].set_title("RTD temperature differential (left $-$ right), per matched pair", fontsize=11)
     axes[1].legend(fontsize=7, ncol=2, loc="best")
+
+    if include_bfield:
+        diffB = (data["H1"] - data["H2"]) * bfield_unit_scale
+        axes[2].plot(t, diffB, color="tab:purple", linewidth=1.4)
+        axes[2].axhline(0, color="gray", linestyle="--", alpha=0.6)
+        add_pulse_shading(axes[2], pulse_start, pulse_end)
+        axes[2].set_ylabel(f"B_left $-$ B_right{bfield_unit_label}")
+        axes[2].set_xlabel("time [s]")
+        axes[2].set_title("Self-field differential (H1 $-$ H2, at heater/Hall location)", fontsize=11)
 
     fig.suptitle("Left vs Right Comparison", fontsize=13)
     fig.tight_layout()
@@ -299,9 +370,25 @@ def main():
                           pulse_start, pulse_end, unit_scale=1.0, unit_label=" [K]")
     print(f"Wrote {t_path}")
 
+    has_bfield = bfield_is_real(data)
+    bfield_scale, bfield_label = (1.0, " [T]")
+    if has_bfield:
+        bfield_scale, bfield_label = auto_bfield_unit(data)
+        _Lx, _width, xHeater = get_geometry(positions)
+        b_path = os.path.join(args.outdir, "chart_diagnostics_bfield.png")
+        make_bfield_plot(data, b_path, pulse_start, pulse_end, bfield_scale, bfield_label, xHeater)
+        print(f"Wrote {b_path}")
+    else:
+        print("H1/H2 are still the pre-B-field sentinel (-999) throughout -- "
+              "skipping chart_diagnostics_bfield.png. This is expected for runs "
+              "from before the B-field feature was wired up; re-run with "
+              "step_3d_slit_transient_bfield.edp to get real self-field data.")
+
     lr_path = os.path.join(args.outdir, "chart_diagnostics_lr_comparison.png")
     make_lr_comparison_plot(data, taps_left, taps_right, rtd_left, rtd_right,
-                            lr_path, pulse_start, pulse_end)
+                            lr_path, pulse_start, pulse_end,
+                            include_bfield=has_bfield, bfield_unit_scale=bfield_scale,
+                            bfield_unit_label=bfield_label)
     print(f"Wrote {lr_path}")
 
     if not args.skip_animation:
