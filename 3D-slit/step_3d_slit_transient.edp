@@ -62,6 +62,7 @@ func real kOf(int rg, real Tl){
 func real sourceOfFull(int rg, real Ef, real Tl){
   if (rg==1) return Ef^2/rhoCu(Tl);
   if (rg==2 || rg==6) return Ef^2/rhoAg(Tl);
+  if (rg==3) return Ef^2/rhoHast(Tl);
   if (rg==5) return sigmaSc(Ef,Tl)*Ef^2;
   return 0.0;
 }
@@ -74,41 +75,43 @@ func real rhoCpOf(int rg, real Tl){
   return 1.0;   // region 7 (slit): nominal small value for well-posedness
 }
 
-func real ItotFull(real E, real TcuShell, real TagB, real Tsc, real TagT){
+func real ItotFull(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT){
   return shellAreaFull*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
+       + tSub*coreWidth*(E/rhoHast(THast))
        + tSc*coreWidth*sigmaSc(E,Tsc)*E + tAgT*coreWidth*(E/rhoAg(TagT));
 }
-func real solveEFull(real TcuShell, real TagB, real Tsc, real TagT, real Itarget){
+func real solveEFull(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget){
   if (Itarget <= 0.0) return 0.0;
   real Ehi0=4.0; int guard=0;
-  while (ItotFull(Ehi0,TcuShell,TagB,Tsc,TagT) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  while (ItotFull(Ehi0,TcuShell,TagB,THast,Tsc,TagT) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
   real logElo=log(1e-30), logEhi=log(Ehi0);
   for(int it=0;it<50;it++){
     real logEmid=0.5*(logElo+logEhi);
     real Emid=exp(logEmid);
-    if (ItotFull(Emid,TcuShell,TagB,Tsc,TagT) < Itarget) logElo=logEmid; else logEhi=logEmid;
+    if (ItotFull(Emid,TcuShell,TagB,THast,Tsc,TagT) < Itarget) logElo=logEmid; else logEhi=logEmid;
   }
   real Ef=exp(0.5*(logElo+logEhi));
-  real relErr=abs(ItotFull(Ef,TcuShell,TagB,Tsc,TagT)-Itarget)/max(Itarget,1e-30);
+  real relErr=abs(ItotFull(Ef,TcuShell,TagB,THast,Tsc,TagT)-Itarget)/max(Itarget,1e-30);
   assert(relErr<=1e-3);
   return Ef;
 }
-func real ItotHalf(real E, real TcuShell, real TagB, real Tsc, real TagT, real shellA, real cw){
+func real ItotHalf(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT, real shellA, real cw){
   return shellA*(E/rhoCu(TcuShell)) + tAgB*cw*(E/rhoAg(TagB))
+       + tSub*cw*(E/rhoHast(THast))
        + tSc*cw*sigmaSc(E,Tsc)*E + tAgT*cw*(E/rhoAg(TagT));
 }
-func real solveEHalf(real TcuShell, real TagB, real Tsc, real TagT, real Itarget, real shellA, real cw){
+func real solveEHalf(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget, real shellA, real cw){
   if (Itarget <= 0.0) return 0.0;
   real Ehi0=4.0; int guard=0;
-  while (ItotHalf(Ehi0,TcuShell,TagB,Tsc,TagT,shellA,cw) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  while (ItotHalf(Ehi0,TcuShell,TagB,THast,Tsc,TagT,shellA,cw) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
   real logElo=log(1e-30), logEhi=log(Ehi0);
   for(int it=0;it<50;it++){
     real logEmid=0.5*(logElo+logEhi);
     real Emid=exp(logEmid);
-    if (ItotHalf(Emid,TcuShell,TagB,Tsc,TagT,shellA,cw) < Itarget) logElo=logEmid; else logEhi=logEmid;
+    if (ItotHalf(Emid,TcuShell,TagB,THast,Tsc,TagT,shellA,cw) < Itarget) logElo=logEmid; else logEhi=logEmid;
   }
   real Ef=exp(0.5*(logElo+logEhi));
-  real relErr=abs(ItotHalf(Ef,TcuShell,TagB,Tsc,TagT,shellA,cw)-Itarget)/max(Itarget,1e-30);
+  real relErr=abs(ItotHalf(Ef,TcuShell,TagB,THast,Tsc,TagT,shellA,cw)-Itarget)/max(Itarget,1e-30);
   assert(relErr<=1e-3);
   return Ef;
 }
@@ -126,7 +129,7 @@ Ph3 reg = region;
 Vh3 T, Told, w;
 Ph3 kfun, source, rhocpfun;
 
-real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
+real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yHastMid=0.5*(yB2+yB3), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
 real zLeftRep = width/4, zRightRep = 3*width/4;
 
 int maxStepsThisRun = 1;
@@ -151,22 +154,22 @@ real t = 0.0;
     for (int i=0;i<=nxs;i++){
       real xx = xSample[i];
       if (xx < xSlitStart || xx > xSlitEnd){
-        real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep),
+        real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep), THast=T(xx,yHastMid,zLeftRep),
              Tsc=T(xx,yScmid,zLeftRep), TagT=T(xx,yAgTmid,zLeftRep);
-        Earr[i] = solveEFull(TcuShell,TagB,Tsc,TagT, I0w);
+        Earr[i] = solveEFull(TcuShell,TagB,THast,Tsc,TagT, I0w);
         ElArr[i] = 0; ErArr[i] = 0;
       } else {
         Earr[i] = 0;
       }
     }
-    real TcuL=T(xHeatC,yCuTop,zLeftRep), TagBL=T(xHeatC,yAgBmid,zLeftRep),
+    real TcuL=T(xHeatC,yCuTop,zLeftRep), TagBL=T(xHeatC,yAgBmid,zLeftRep), THastL=T(xHeatC,yHastMid,zLeftRep),
          TscL=T(xHeatC,yScmid,zLeftRep), TagTL=T(xHeatC,yAgTmid,zLeftRep);
-    real TcuR=T(xHeatC,yCuTop,zRightRep), TagBR=T(xHeatC,yAgBmid,zRightRep),
+    real TcuR=T(xHeatC,yCuTop,zRightRep), TagBR=T(xHeatC,yAgBmid,zRightRep), THastR=T(xHeatC,yHastMid,zRightRep),
          TscR=T(xHeatC,yScmid,zRightRep), TagTR=T(xHeatC,yAgTmid,zRightRep);
     func real Vdiff(real fracLeft){
       real Il=fracLeft*I0w, Ir=(1-fracLeft)*I0w;
-      real El = solveEHalf(TcuL,TagBL,TscL,TagTL, Il, leftShellArea, leftCoreWidth);
-      real Er = solveEHalf(TcuR,TagBR,TscR,TagTR, Ir, rightShellArea, rightCoreWidth);
+      real El = solveEHalf(TcuL,TagBL,THastL,TscL,TagTL, Il, leftShellArea, leftCoreWidth);
+      real Er = solveEHalf(TcuR,TagBR,THastR,TscR,TagTR, Ir, rightShellArea, rightCoreWidth);
       return (El-Er)*(xSlitEnd-xSlitStart);
     }
     real flo=0.0, fhi=1.0;
@@ -178,8 +181,8 @@ real t = 0.0;
       }
     }
     real fracLeft = 0.5*(flo+fhi);
-    real ElVal = solveEHalf(TcuL,TagBL,TscL,TagTL, fracLeft*I0w, leftShellArea, leftCoreWidth);
-    real ErVal = solveEHalf(TcuR,TagBR,TscR,TagTR, (1-fracLeft)*I0w, rightShellArea, rightCoreWidth);
+    real ElVal = solveEHalf(TcuL,TagBL,THastL,TscL,TagTL, fracLeft*I0w, leftShellArea, leftCoreWidth);
+    real ErVal = solveEHalf(TcuR,TagBR,THastR,TscR,TagTR, (1-fracLeft)*I0w, rightShellArea, rightCoreWidth);
     for (int i=0;i<=nxs;i++){
       real xx = xSample[i];
       if (xx >= xSlitStart && xx <= xSlitEnd){ ElArr[i]=ElVal; ErArr[i]=ErVal; }

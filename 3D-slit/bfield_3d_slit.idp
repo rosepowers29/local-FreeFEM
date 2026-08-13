@@ -73,6 +73,7 @@ real zCuLeftWall  = tSideCu/2.0;
 real zCuRightWall = width - tSideCu/2.0;
 
 real yAgBSheet = 0.5*(yB1+yB2);
+real yHastSheet = 0.5*(yB2+yB3);
 real yScSheet  = 0.5*(yB4+yB5);
 real yAgTSheet = 0.5*(yB5+yB6);
 
@@ -205,7 +206,7 @@ real mu0 = 4*pi*1e-7;
 func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
   real[int] KcuBotL(nSub), KcuBotR(nSub), KcuTopL(nSub), KcuTopR(nSub);
   real[int] KcuLW(nSub), KcuRW(nSub);
-  real[int] KagbL(nSub), KagbR(nSub), KscL(nSub), KscR(nSub), KagtL(nSub), KagtR(nSub);
+  real[int] KagbL(nSub), KagbR(nSub), KhastL(nSub), KhastR(nSub), KscL(nSub), KscR(nSub), KagtL(nSub), KagtR(nSub);
 
   for (int i=0; i<nSub; i++){
     real xx = xSample[i];
@@ -214,6 +215,7 @@ func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
     real TcuTopL=T(xx,yCuTopSheet,zLeftRep), TcuTopR=T(xx,yCuTopSheet,zRightRep);
     real TcuLWt=T(xx,yCuWallMid,zCuLeftWall), TcuRWt=T(xx,yCuWallMid,zCuRightWall);
     real TagbL=T(xx,yAgBSheet,zLeftRep), TagbR=T(xx,yAgBSheet,zRightRep);
+    real ThastL=T(xx,yHastSheet,zLeftRep), ThastR=T(xx,yHastSheet,zRightRep);
     real TscL=T(xx,yScSheet,zLeftRep),   TscR=T(xx,yScSheet,zRightRep);
     real TagtL=T(xx,yAgTSheet,zLeftRep), TagtR=T(xx,yAgTSheet,zRightRep);
 
@@ -221,6 +223,7 @@ func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
     KcuTopL[i]=tCuT*(ElHere/rhoCu(TcuTopL)); KcuTopR[i]=tCuT*(ErHere/rhoCu(TcuTopR));
     KcuLW[i]=tSideCu*(ElHere/rhoCu(TcuLWt)); KcuRW[i]=tSideCu*(ErHere/rhoCu(TcuRWt));
     KagbL[i]=tAgB*(ElHere/rhoAg(TagbL));     KagbR[i]=tAgB*(ErHere/rhoAg(TagbR));
+    KhastL[i]=tSub*(ElHere/rhoHast(ThastL)); KhastR[i]=tSub*(ErHere/rhoHast(ThastR));
     KscL[i]=sigmaSc(ElHere,TscL)*ElHere*tSc; KscR[i]=sigmaSc(ErHere,TscR)*ErHere*tSc;
     KagtL[i]=tAgT*(ElHere/rhoAg(TagtL));     KagtR[i]=tAgT*(ErHere/rhoAg(TagtR));
   }
@@ -237,6 +240,11 @@ func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
       real[int] hCuRW  =biotSheetZConst(xx,yScSheet,pz, zCuRightWall, yB1,yB6, KcuRW,nSub);
       real[int] hAgbL  =biotSheetYConst(xx,yScSheet,pz, yAgBSheet, zB1,zSlitCenter, KagbL,nSub);
       real[int] hAgbR  =biotSheetYConst(xx,yScSheet,pz, yAgBSheet, zSlitCenter,zB2, KagbR,nSub);
+      // Hastelloy is a genuine cross-term here (evaluated at REBCO's
+      // y-height, not its own), so no near-field exclusion is needed --
+      // ordinary Biot-Savart, same as Ag/Cu.
+      real[int] hHastL =biotSheetYConst(xx,yScSheet,pz, yHastSheet, zB1,zSlitCenter, KhastL,nSub);
+      real[int] hHastR =biotSheetYConst(xx,yScSheet,pz, yHastSheet, zSlitCenter,zB2, KhastR,nSub);
       // REBCO's contribution to B AT ITS OWN LOCATION: only the
       // portion on the SAME side as the evaluation point (side<0 uses
       // hScL, side>0 uses hScR) needs the near-field exclusion, since
@@ -253,9 +261,9 @@ func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
       real[int] hAgtR  =biotSheetYConst(xx,yScSheet,pz, yAgTSheet, zSlitCenter,zB2, KagtR,nSub);
 
       real Hy = hCuBotL[1]+hCuBotR[1]+hCuTopL[1]+hCuTopR[1]+hCuLW[1]+hCuRW[1]
-              + hAgbL[1]+hAgbR[1]+hScL[1]+hScR[1]+hAgtL[1]+hAgtR[1];
+              + hAgbL[1]+hAgbR[1]+hHastL[1]+hHastR[1]+hScL[1]+hScR[1]+hAgtL[1]+hAgtR[1];
       real Hz = hCuBotL[2]+hCuBotR[2]+hCuTopL[2]+hCuTopR[2]+hCuLW[2]+hCuRW[2]
-              + hAgbL[2]+hAgbR[2]+hScL[2]+hScR[2]+hAgtL[2]+hAgtR[2];
+              + hAgbL[2]+hAgbR[2]+hHastL[2]+hHastR[2]+hScL[2]+hScR[2]+hAgtL[2]+hAgtR[2];
       real Hmag = sqrt(Hy^2+Hz^2);
       if (side<0) BleftOut[i]=mu0*Hmag; else BrightOut[i]=mu0*Hmag;
     }
@@ -265,42 +273,59 @@ func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
 
 // ---- B-aware current-sharing bisection: identical structure to the
 // existing ItotFull/solveEFull and ItotHalf/solveEHalf, but using
-// sigmaScB (Kim-suppressed) instead of sigmaSc for the REBCO term. ----
-func real ItotFullB(real E, real TcuShell, real TagB, real Tsc, real TagT, real Bmag){
+// sigmaScB (Kim-suppressed) instead of sigmaSc for the REBCO term.
+//
+// Hastelloy (region 3) is included here as a genuine parallel resistive
+// branch (tSub*coreWidth*(E/rhoHast(THast)), same Ohmic form as Cu/Ag) --
+// NOT excluded as "non-conducting". It has real, measured, merely-HIGH
+// (not insulating) resistivity: ~1.23e-6 Ohm*m at 77-86K, essentially
+// flat with temperature, versus Cu/Ag's ~3-6e-9 Ohm*m which itself rises
+// with T. Back-of-envelope at 80K: Hastelloy's resistance per unit
+// length is ~235x the parallel Cu+Ag combination, i.e. it carries
+// roughly ~0.4-0.5% of the stabilizer's current there -- small, but a
+// real, included contribution now rather than an assumed-zero omission.
+// Buffer (region 4) remains excluded -- its assumed conductivity
+// (sigmaBuf=1e-10 S/m) is ~4 orders of magnitude below even Hastelloy's
+// real resistivity and is itself a nominal placeholder, not measured
+// data, but that's a separate, much-better-justified approximation than
+// Hastelloy's blanket exclusion was.
+func real ItotFullB(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT, real Bmag){
   return shellAreaFull*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
+       + tSub*coreWidth*(E/rhoHast(THast))
        + tSc*coreWidth*sigmaScB(E,Tsc,Bmag)*E + tAgT*coreWidth*(E/rhoAg(TagT));
 }
-func real solveEFullB(real TcuShell, real TagB, real Tsc, real TagT, real Itarget, real Bmag){
+func real solveEFullB(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget, real Bmag){
   if (Itarget <= 0.0) return 0.0;
   real Ehi0=4.0; int guard=0;
-  while (ItotFullB(Ehi0,TcuShell,TagB,Tsc,TagT,Bmag) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  while (ItotFullB(Ehi0,TcuShell,TagB,THast,Tsc,TagT,Bmag) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
   real logElo=log(1e-30), logEhi=log(Ehi0);
   for(int it=0;it<50;it++){
     real logEmid=0.5*(logElo+logEhi);
     real Emid=exp(logEmid);
-    if (ItotFullB(Emid,TcuShell,TagB,Tsc,TagT,Bmag) < Itarget) logElo=logEmid; else logEhi=logEmid;
+    if (ItotFullB(Emid,TcuShell,TagB,THast,Tsc,TagT,Bmag) < Itarget) logElo=logEmid; else logEhi=logEmid;
   }
   real Ef=exp(0.5*(logElo+logEhi));
-  real relErr=abs(ItotFullB(Ef,TcuShell,TagB,Tsc,TagT,Bmag)-Itarget)/max(Itarget,1e-30);
+  real relErr=abs(ItotFullB(Ef,TcuShell,TagB,THast,Tsc,TagT,Bmag)-Itarget)/max(Itarget,1e-30);
   assert(relErr<=1e-3);
   return Ef;
 }
-func real ItotHalfB(real E, real TcuShell, real TagB, real Tsc, real TagT, real shellA, real cw, real Bmag){
+func real ItotHalfB(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT, real shellA, real cw, real Bmag){
   return shellA*(E/rhoCu(TcuShell)) + tAgB*cw*(E/rhoAg(TagB))
+       + tSub*cw*(E/rhoHast(THast))
        + tSc*cw*sigmaScB(E,Tsc,Bmag)*E + tAgT*cw*(E/rhoAg(TagT));
 }
-func real solveEHalfB(real TcuShell, real TagB, real Tsc, real TagT, real Itarget, real shellA, real cw, real Bmag){
+func real solveEHalfB(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget, real shellA, real cw, real Bmag){
   if (Itarget <= 0.0) return 0.0;
   real Ehi0=4.0; int guard=0;
-  while (ItotHalfB(Ehi0,TcuShell,TagB,Tsc,TagT,shellA,cw,Bmag) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  while (ItotHalfB(Ehi0,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bmag) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
   real logElo=log(1e-30), logEhi=log(Ehi0);
   for(int it=0;it<50;it++){
     real logEmid=0.5*(logElo+logEhi);
     real Emid=exp(logEmid);
-    if (ItotHalfB(Emid,TcuShell,TagB,Tsc,TagT,shellA,cw,Bmag) < Itarget) logElo=logEmid; else logEhi=logEmid;
+    if (ItotHalfB(Emid,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bmag) < Itarget) logElo=logEmid; else logEhi=logEmid;
   }
   real Ef=exp(0.5*(logElo+logEhi));
-  real relErr=abs(ItotHalfB(Ef,TcuShell,TagB,Tsc,TagT,shellA,cw,Bmag)-Itarget)/max(Itarget,1e-30);
+  real relErr=abs(ItotHalfB(Ef,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bmag)-Itarget)/max(Itarget,1e-30);
   assert(relErr<=1e-3);
   return Ef;
 }
