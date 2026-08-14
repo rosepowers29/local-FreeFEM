@@ -115,11 +115,26 @@ real[int] Bleft(nxs+1), Bright(nxs+1);
 
 int maxStepsThisRun = 1;
 
+// CHECKPOINT FORMAT CHANGE: now also persists Earr/ElArr/ErArr, not just
+// t and T. This is required for computeSelfFieldB's lagged design to
+// actually work: it reads these arrays BEFORE this step's electrical
+// solve overwrites them, expecting last step's converged values. Without
+// persisting them, every fresh script invocation saw freshly-zero-
+// initialized arrays instead, and B was silently 0 forever regardless of
+// the real current/heating state -- a real bug, not a physics effect,
+// caught by exactly that symptom (uniformly zero B at every Hall probe
+// reading). Checkpoints from before this fix do NOT have this data --
+// re-run init_3d_slit_transient_checkpoint.edp for a fresh start rather
+// than resuming an old checkpoint with this script; there's no valid B
+// history in an old checkpoint to recover anyway (B was always 0 there).
 real t = 0.0;
 {
   ifstream fchk("ckpt_3d_slit_transient.txt");
   fchk >> t;
   for (int i=0;i<T.n;i++) fchk >> T[][i];
+  for (int i=0;i<=nxs;i++) fchk >> Earr[i];
+  for (int i=0;i<=nxs;i++) fchk >> ElArr[i];
+  for (int i=0;i<=nxs;i++) fchk >> ErArr[i];
   cout << "Resumed at t="<<t<<"s Tmax="<<T[].max << endl;
 }
 
@@ -296,5 +311,8 @@ real t = 0.0;
   fchkOut.precision(12);
   fchkOut << t << "\n";
   for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+  for (int i=0;i<=nxs;i++) fchkOut << Earr[i] << "\n";
+  for (int i=0;i<=nxs;i++) fchkOut << ElArr[i] << "\n";
+  for (int i=0;i<=nxs;i++) fchkOut << ErArr[i] << "\n";
 }
 cout << "Saved checkpoint at t="<<t<<"s" << endl;
