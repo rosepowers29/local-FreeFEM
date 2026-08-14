@@ -77,14 +77,21 @@ def reinit_run_dir(run_dir: Path, force: bool):
 def run_freefem(script_name, extra_args, log_fh, freefem_bin=None):
     exe = freefem_binary(freefem_bin)
     cmd = [exe, "-nw", script_name] + extra_args
-    log_fh.write(f"{ts()} $ {' '.join(cmd)}\n")
+    header = f"{ts()} $ {' '.join(cmd)}\n"
+    print(header, end="", flush=True)
+    log_fh.write(header)
     log_fh.flush()
-    result = subprocess.run(cmd, cwd=SCRIPT_DIR, capture_output=True, text=True)
-    log_fh.write(result.stdout)
-    if result.returncode != 0:
-        log_fh.write(result.stderr)
-    log_fh.flush()
-    return result.returncode
+    # Stream output live (mesh build + a single timestep solve costs minutes
+    # here, not seconds) instead of buffering it all until the process exits
+    # -- a silent multi-minute wait is indistinguishable from a real hang.
+    proc = subprocess.Popen(cmd, cwd=SCRIPT_DIR, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, bufsize=1)
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        log_fh.write(line)
+        log_fh.flush()
+    proc.wait()
+    return proc.returncode
 
 
 def read_last_row(csv_path: Path):

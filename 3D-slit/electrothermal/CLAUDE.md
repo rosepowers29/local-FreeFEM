@@ -104,3 +104,14 @@ re-invocation as documented above.
   then `$FREEFEM_BIN` env var, then `PATH`. Needed in practice: a
   from-source/home-directory FreeFEM install on a remote machine is
   common and usually isn't on `PATH`.
+- **No output for minutes at a time is normal, not a hang.** Each
+  invocation rebuilds the mesh from scratch and solves one timestep —
+  minutes, not seconds, per root `CLAUDE.md`. `run_transient.py` streams
+  FreeFEM's own stdout/stderr live (to both the console and `run.log`)
+  rather than buffering it until the process exits, specifically so a
+  slow invocation stays distinguishable from a genuinely stuck one. If
+  you see this print nothing at all for several minutes even with the
+  streaming fix in place, that's a real problem worth investigating, not
+  expected behavior. `--max-steps N` bounds how many timesteps run, not
+  how long each one takes — a "5-step smoke test" is still on the order
+  of many minutes, not instant.
