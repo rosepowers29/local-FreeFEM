@@ -99,3 +99,8 @@ re-invocation as documented above.
   invocation — there's no mid-solve signal-based kill, since each
   invocation is already a short, complete process with no internal
   iteration loop to interrupt.
+- **`FreeFem++` binary resolution**: `run_transient.py`/`sweep_transient.py`
+  don't assume it's on `PATH` — resolution order is `--freefem-bin` flag,
+  then `$FREEFEM_BIN` env var, then `PATH`. Needed in practice: a
+  from-source/home-directory FreeFEM install on a remote machine is
+  common and usually isn't on `PATH`.

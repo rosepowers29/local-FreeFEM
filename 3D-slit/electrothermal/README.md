@@ -80,6 +80,11 @@ python3 run_transient.py --ratio 0.70
 python3 sweep_transient.py --ratios 0.5,0.6,0.7,0.8,0.9,1.0
 ```
 
+If `FreeFem++` isn't on `PATH` (common for a from-source/home-directory
+install on a remote machine), point the wrapper at it instead of relying
+on shell aliases: `--freefem-bin /path/to/FreeFem++`, or set it once via
+`export FREEFEM_BIN=/path/to/FreeFem++`.
+
 Output lands in `runs/<label>/` (label auto-derived from the ratio, e.g.
 `r0p70`): the usual checkpoint/CSVs (via `-outprefix`), plus
 `run.log` (one line per invocation) and `status.json` (final outcome —

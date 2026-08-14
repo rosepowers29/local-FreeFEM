@@ -38,6 +38,9 @@ def main():
     p.add_argument("--recover-hold-time", type=float, default=rt.DEFAULT_RECOVER_HOLD_TIME)
     p.add_argument("--max-steps", type=int, default=rt.DEFAULT_MAX_STEPS)
     p.add_argument("--force", action="store_true")
+    p.add_argument("--freefem-bin", default=None,
+                   help="Path to the FreeFem++ executable (default: $FREEFEM_BIN "
+                        "env var, else whatever 'FreeFem++' resolves to on PATH).")
     p.add_argument("--parallel", type=int, default=1,
                    help="Number of ratios to run concurrently (default: 1, "
                         "sequential -- matches today's proven-safe behavior). "
@@ -51,7 +54,7 @@ def main():
         dict(ratio=ratio, label=rt.sanitize_label(ratio), base_dir=args.base_dir,
              runaway_tmax=args.runaway_tmax, deviation_eps=args.deviation_eps,
              recover_eps=args.recover_eps, recover_hold_time=args.recover_hold_time,
-             max_steps=args.max_steps, force=args.force)
+             max_steps=args.max_steps, force=args.force, freefem_bin=args.freefem_bin)
         for ratio in ratios
     ]
 

@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -49,11 +50,16 @@ def sanitize_label(ratio):
     return "r" + s.replace(".", "p").replace("-", "neg")
 
 
-def freefem_binary():
-    exe = shutil.which("FreeFem++")
-    if exe is None:
-        sys.exit("FreeFem++ not found on PATH -- run this where FreeFEM is installed.")
-    return exe
+def freefem_binary(freefem_bin=None):
+    # Resolution order: explicit --freefem-bin flag, then FREEFEM_BIN env var
+    # (handy to export once rather than pass every invocation), then PATH.
+    # Needed because FreeFEM installs are commonly a from-source/home-directory
+    # build on remote/cluster machines, not something on $PATH.
+    candidate = freefem_bin or os.environ.get("FREEFEM_BIN") or shutil.which("FreeFem++")
+    if candidate is None:
+        sys.exit("FreeFem++ not found -- pass --freefem-bin /path/to/FreeFem++, "
+                 "set FREEFEM_BIN, or add it to PATH.")
+    return candidate
 
 
 def reinit_run_dir(run_dir: Path, force: bool):
@@ -68,8 +74,8 @@ def reinit_run_dir(run_dir: Path, force: bool):
     run_dir.mkdir(parents=True, exist_ok=True)
 
 
-def run_freefem(script_name, extra_args, log_fh):
-    exe = freefem_binary()
+def run_freefem(script_name, extra_args, log_fh, freefem_bin=None):
+    exe = freefem_binary(freefem_bin)
     cmd = [exe, "-nw", script_name] + extra_args
     log_fh.write(f"{ts()} $ {' '.join(cmd)}\n")
     log_fh.flush()
@@ -114,7 +120,7 @@ def finalize(status_path, log_fh, label, ratio, status, row, n_steps, start_time
 def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             deviation_eps=DEFAULT_DEVIATION_EPS, recover_eps=DEFAULT_RECOVER_EPS,
             recover_hold_time=DEFAULT_RECOVER_HOLD_TIME, max_steps=DEFAULT_MAX_STEPS,
-            force=False):
+            force=False, freefem_bin=None):
     run_dir = SCRIPT_DIR / base_dir / label
     reinit_run_dir(run_dir, force)
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
@@ -129,7 +135,7 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
     with log_path.open("w") as log_fh:
         log_fh.write(f"{ts()} starting ratio={ratio} label={label}\n")
 
-        rc = run_freefem(INIT_SCRIPT, ["-outprefix", out_prefix], log_fh)
+        rc = run_freefem(INIT_SCRIPT, ["-outprefix", out_prefix], log_fh, freefem_bin)
         if rc != 0:
             return finalize(status_path, log_fh, label, ratio, "init_failed",
                              None, 0, start_time)
@@ -140,7 +146,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
         n_steps = 0
 
         while True:
-            rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix], log_fh)
+            rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix],
+                              log_fh, freefem_bin)
             n_steps += 1
             if rc != 0:
                 return finalize(status_path, log_fh, label, ratio, "crashed",
@@ -223,11 +230,17 @@ def main():
     p.add_argument("--force", action="store_true",
                    help="Delete any existing run directory for this label "
                         "instead of moving it aside")
+    p.add_argument("--freefem-bin", default=None,
+                   help="Path to the FreeFem++ executable (default: $FREEFEM_BIN "
+                        "env var, else whatever 'FreeFem++' resolves to on PATH). "
+                        "Needed when FreeFEM isn't on PATH, e.g. a from-source "
+                        "build under your home directory on a remote machine.")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
     run_one(args.ratio, label, args.base_dir, args.runaway_tmax, args.deviation_eps,
-            args.recover_eps, args.recover_hold_time, args.max_steps, args.force)
+            args.recover_eps, args.recover_hold_time, args.max_steps, args.force,
+            args.freefem_bin)
 
 
 if __name__ == "__main__":
