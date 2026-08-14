@@ -14,10 +14,17 @@
 
 include "../shared/hts_mesh_module_3d_slit.idp"
 include "../shared/hts_materials.idp"
+include "getARGV.idp"
+
+// currentRatio/outPrefix let run_transient.py drive this script without
+// editing it: defaults reproduce today's exact hardcoded behavior when
+// invoked with no extra flags.
+real currentRatio = getARGV("-ratio", 0.7);
+string outPrefix  = getARGV("-outprefix", "");
 
 real Tcold = 77.0;
 real IcRebcoActual = JcT(77.0)*tSc*coreWidth;
-real I0Target = 0.7 * IcRebcoActual;
+real I0Target = currentRatio * IcRebcoActual;
 
 real shellAreaFull = width*yB7 - coreWidth*(yB6-yB1);
 real leftCoreWidth  = (zSlitCenter-slitR) - zB1;
@@ -142,23 +149,23 @@ int maxStepsThisRun = 1;
 
 real t = 0.0;
 {
-  ifstream fchk("ckpt_3d_slit_transient.txt");
+  ifstream fchk(outPrefix+"ckpt_3d_slit_transient.txt");
   fchk >> t;
   for (int i=0;i<T.n;i++) fchk >> T[][i];
   cout << "Resumed at t="<<t<<"s Tmax="<<T[].max << endl;
 }
 
 {
-  ofstream fout("transient_3d_slit.csv", append);
+  ofstream fout(outPrefix+"transient_3d_slit.csv", append);
   if (t <= 1e-12) fout << "t,I0,Tmax,TmaxLeft,TmaxRight,fracLeft\n";
 
-  ofstream fdiag("diagnostics_3d_slit.csv", append);
-  int diagFileCheck = exec("test -s diagnostics_3d_slit.csv");
+  ofstream fdiag(outPrefix+"diagnostics_3d_slit.csv", append);
+  int diagFileCheck = exec("test -s "+outPrefix+"diagnostics_3d_slit.csv");
   bool diagCsvHasHeader = (diagFileCheck == 0);
   // Metadata is static and cheap -- just rewrite it every invocation so it's
   // always present/current, regardless of when this feature was added
   // relative to an in-progress run's t value.
-  writeDiagnosticsMetadata("diagnostics_positions_3d_slit.csv");
+  writeDiagnosticsMetadata(outPrefix+"diagnostics_positions_3d_slit.csv");
   if (!diagCsvHasHeader) {
     fdiag << "t,I0,Tmax,fracLeft,V_CL_plus,V_CL_minus";
     for (int i=0;i<nTapsPerSide;i++) fdiag << ",V1_" << (i+1);
@@ -293,7 +300,7 @@ real t = 0.0;
 }
 
 {
-  ofstream fchkOut("ckpt_3d_slit_transient.txt");
+  ofstream fchkOut(outPrefix+"ckpt_3d_slit_transient.txt");
   fchkOut.precision(12);
   fchkOut << t << "\n";
   for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";

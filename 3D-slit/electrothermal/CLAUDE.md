@@ -62,3 +62,40 @@ Substitute the matching init/step pair for the `steady_verify` or
 `transient_3d_slit.csv`, `diagnostics_3d_slit.csv`,
 `diagnostics_positions_3d_slit.csv` (same schema as `Bfield/`'s, minus
 real B-field values).
+
+## Continuous-solve wrapper (`run_transient.py` / `sweep_transient.py`)
+
+Only `step_3d_slit_transient_diag.edp` and
+`init_3d_slit_transient_checkpoint.edp` are wrapper-aware — the
+`steady_verify`/`heater_onesided` scenarios still need manual
+re-invocation as documented above.
+
+- **`getARGV` is used here for the first time anywhere in this repo**
+  (`real currentRatio = getARGV("-ratio", 0.7); string outPrefix =
+  getARGV("-outprefix", "");`). Defaults reproduce today's exact
+  hardcoded behavior, so plain `FreeFem++ -nw step_3d_slit_transient_diag.edp`
+  with no flags is unaffected. **Requires `include "getARGV.idp"`** near
+  the top of any file that calls it — confirmed by direct testing:
+  `getARGV` doesn't work without it. Both wrapper-aware `.edp` files here
+  already have it; if you copy this pattern into a new script, don't
+  forget it.
+- `outPrefix` is prepended to **every** output/checkpoint filename in
+  both files, including `int diagFileCheck = exec("test -s "+outPrefix+
+  "diagnostics_3d_slit.csv");` — this line uses the same literal
+  filename as the `ofstream fdiag(...)` two lines above it but is easy
+  to miss if re-templating by hand, since it's inside a shell `exec()`
+  call, not a stream constructor.
+- The wrapper's stop-condition thresholds (900K runaway, 0.01 deviation/
+  0.002 recovery epsilon on `fracLeft`, 0.1s hold time) are first-pass
+  placeholders — nobody has calibrated them against a real `fracLeft`
+  trajectory yet. Sanity-check them against real output before trusting
+  a long unattended sweep (see the plan's verification checklist).
+- The wrapper has **no rate-of-change/plateau fallback** for a run where
+  `fracLeft` asymptotes just outside `recover-eps` without fully
+  returning to parity — deliberately deferred rather than guessing at a
+  second heuristic with no real data. If a real run shows this pattern,
+  that's the first extension point.
+- "Stopping" means the wrapper simply doesn't launch the next
+  invocation — there's no mid-solve signal-based kill, since each
+  invocation is already a short, complete process with no internal
+  iteration loop to interrupt.

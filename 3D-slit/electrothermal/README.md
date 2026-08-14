@@ -57,3 +57,35 @@ Written to this directory, plain CSV, no display required (`-nw`):
 
 Plot with `../shared/plot_slit_transient.py transient_3d_slit.csv` and
 `../shared/plot_diagnostics_3d_slit.py diagnostics_3d_slit.csv`.
+
+## Automated continuous-solve wrapper
+
+`run_transient.py` and `sweep_transient.py` automate the canonical
+transient scenario above: no manual re-invocation, automatic
+checkpoint/CSV reinitialization at the start of every run, and automatic
+stop-condition detection (current split settled back near 50/50, thermal
+runaway, or the scenario's own `tEnd` reached) instead of eyeballing
+`transient_3d_slit.csv` by hand. See `CLAUDE.md` for the stop-condition
+thresholds, their current (unvalidated) status, and the `getARGV`
+parameterization these scripts rely on.
+
+```bash
+cd 3D-slit/electrothermal
+
+# One current level, to completion
+python3 run_transient.py --ratio 0.70
+
+# Sweep several current levels (colleague-handoff dataset), one
+# independent runs/<label>/ directory per level
+python3 sweep_transient.py --ratios 0.5,0.6,0.7,0.8,0.9,1.0
+```
+
+Output lands in `runs/<label>/` (label auto-derived from the ratio, e.g.
+`r0p70`): the usual checkpoint/CSVs (via `-outprefix`), plus
+`run.log` (one line per invocation) and `status.json` (final outcome —
+`settled`, `runaway`, `crashed`, `numerical_divergence`,
+`reached_end_deviated`/`reached_end_no_deviation`, or
+`max_steps_exceeded`). `sweep_transient.py` aggregates every ratio's
+`status.json` into `runs/summary.csv`. Re-running a label moves the
+existing directory aside (`runs/<label>.bak.<timestamp>/`) rather than
+deleting it — pass `--force` to delete instead. `runs/` is gitignored.

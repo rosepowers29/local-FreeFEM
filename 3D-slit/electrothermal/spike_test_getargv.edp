@@ -1,0 +1,16 @@
+// ============================================================
+// spike_test_getargv.edp -- DISPOSABLE verification script.
+// Confirms getARGV's exact syntax/behavior on this FreeFEM install
+// before trusting it in step_3d_slit_transient_diag.edp /
+// init_3d_slit_transient_checkpoint.edp. Safe to delete once confirmed.
+//
+// Run:
+//   FreeFem++ -nw spike_test_getargv.edp -ratio 0.85 -outprefix foo/
+// Expect stdout to show: ratio=0.85 outprefix=foo/
+// ============================================================
+
+include "getARGV.idp"
+
+real r = getARGV("-ratio", 0.7);
+string p = getARGV("-outprefix", "default/");
+cout << "ratio=" << r << " outprefix=" << p << endl;
