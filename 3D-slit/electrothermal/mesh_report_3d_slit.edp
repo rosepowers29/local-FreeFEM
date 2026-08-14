@@ -1,4 +1,4 @@
-include "hts_mesh_module_3d_slit.idp"
+include "../shared/hts_mesh_module_3d_slit.idp"
 cout << "3D slit mesh: nv=" << Th3.nv << "  nt=" << Th3.nt << "  nbe=" << Th3.nbe << endl;
 
 {

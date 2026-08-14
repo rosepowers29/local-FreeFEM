@@ -1,8 +1,8 @@
-include "hts_mesh_module_3d_slit.idp"
+include "../shared/hts_mesh_module_3d_slit.idp"
 fespace Vh3(Th3, P1);
 Vh3 T = 77.0;
 {
-  ofstream fchkOut("ckpt_3d_slit_heater.txt");
+  ofstream fchkOut("ckpt_3d_slit.txt");
   fchkOut.precision(12);
   fchkOut << 0 << "\n";
   for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";

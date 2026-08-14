@@ -37,21 +37,21 @@ func real interp1(real[int] &T, real[int] &V, int nn, real Tq){
 }
 
 // ---- load every table (row counts match `wc -l` on each file) ----
-real[int] TcpAg(71),   VcpAg(71);      int ncpAg   = loadTable("data/cp_ag.txt",   71, TcpAg, VcpAg);
-real[int] TcpBuf(132), VcpBuf(132);    int ncpBuf  = loadTable("data/cp_buff.txt", 132, TcpBuf, VcpBuf);
-real[int] TcpCu(16),   VcpCu(16);      int ncpCu   = loadTable("data/cp_cu.txt",   16, TcpCu, VcpCu);
-real[int] TcpHast(43), VcpHast(43);    int ncpHast = loadTable("data/cp_hast.txt", 43, TcpHast, VcpHast);
-real[int] TcpSc(34),   VcpSc(34);      int ncpSc   = loadTable("data/cp_rebco.txt",34, TcpSc, VcpSc);
+real[int] TcpAg(71),   VcpAg(71);      int ncpAg   = loadTable("../shared/data/cp_ag.txt",   71, TcpAg, VcpAg);
+real[int] TcpBuf(132), VcpBuf(132);    int ncpBuf  = loadTable("../shared/data/cp_buff.txt", 132, TcpBuf, VcpBuf);
+real[int] TcpCu(16),   VcpCu(16);      int ncpCu   = loadTable("../shared/data/cp_cu.txt",   16, TcpCu, VcpCu);
+real[int] TcpHast(43), VcpHast(43);    int ncpHast = loadTable("../shared/data/cp_hast.txt", 43, TcpHast, VcpHast);
+real[int] TcpSc(34),   VcpSc(34);      int ncpSc   = loadTable("../shared/data/cp_rebco.txt",34, TcpSc, VcpSc);
 
-real[int] TkAg(29),    VkAg(29);       int nkAg    = loadTable("data/k_ag.txt",    29, TkAg, VkAg);
-real[int] TkBuf(23),   VkBuf(23);      int nkBuf   = loadTable("data/k_buff.txt",  23, TkBuf, VkBuf);
-real[int] TkCu(16),    VkCu(16);       int nkCu    = loadTable("data/k_cu.txt",    16, TkCu, VkCu);
-real[int] TkHast(47),  VkHast(47);     int nkHast  = loadTable("data/k_hast.txt",  47, TkHast, VkHast);
-real[int] TkSc(13),    VkSc(13);       int nkSc    = loadTable("data/k_rebco.txt", 13, TkSc, VkSc);
+real[int] TkAg(29),    VkAg(29);       int nkAg    = loadTable("../shared/data/k_ag.txt",    29, TkAg, VkAg);
+real[int] TkBuf(23),   VkBuf(23);      int nkBuf   = loadTable("../shared/data/k_buff.txt",  23, TkBuf, VkBuf);
+real[int] TkCu(16),    VkCu(16);       int nkCu    = loadTable("../shared/data/k_cu.txt",    16, TkCu, VkCu);
+real[int] TkHast(47),  VkHast(47);     int nkHast  = loadTable("../shared/data/k_hast.txt",  47, TkHast, VkHast);
+real[int] TkSc(13),    VkSc(13);       int nkSc    = loadTable("../shared/data/k_rebco.txt", 13, TkSc, VkSc);
 
-real[int] TrhoCu(16),   VrhoCu(16);    int nrhoCu   = loadTable("data/rho_cu.txt", 16, TrhoCu, VrhoCu); // real measured data (note: possible anomaly at 273/300K, see discussion)
-real[int] TrhoHast(39), VrhoHast(39);  int nrhoHast = loadTable("data/rho_hast.txt", 39, TrhoHast, VrhoHast);
-real[int] TrhoAg(19),   VrhoAg(19);    int nrhoAg   = loadTable("data/rho_silver.txt", 19, TrhoAg, VrhoAg);
+real[int] TrhoCu(16),   VrhoCu(16);    int nrhoCu   = loadTable("../shared/data/rho_cu.txt", 16, TrhoCu, VrhoCu); // real measured data (note: possible anomaly at 273/300K, see discussion)
+real[int] TrhoHast(39), VrhoHast(39);  int nrhoHast = loadTable("../shared/data/rho_hast.txt", 39, TrhoHast, VrhoHast);
+real[int] TrhoAg(19),   VrhoAg(19);    int nrhoAg   = loadTable("../shared/data/rho_silver.txt", 19, TrhoAg, VrhoAg);
 
 // ---- convenience wrappers: property(T) for each material ----
 func real cpAg(real T)   { return interp1(TcpAg,   VcpAg,   ncpAg,   T); }

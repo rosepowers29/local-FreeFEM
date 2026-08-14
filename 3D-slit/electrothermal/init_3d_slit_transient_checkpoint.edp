@@ -1,0 +1,21 @@
+include "../shared/hts_mesh_module_3d_slit.idp"
+fespace Vh3(Th3, P1);
+Vh3 T = 77.0;
+// nxs must match the value used in the step scripts (60) -- this writes
+// zero-initialized E-field arrays alongside t and T, matching the
+// checkpoint format step_3d_slit_transient_bfield.edp now expects (see
+// that file for why: computeSelfFieldB's lagged design requires these
+// arrays to actually persist across script invocations, not just T).
+// The plain (non-bfield) step scripts don't read these extra values at
+// all, so this format change is harmless for them.
+int nxs = 60;
+{
+  ofstream fchkOut("ckpt_3d_slit_transient.txt");
+  fchkOut.precision(12);
+  fchkOut << 0.0 << "\n";
+  for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+  for (int i=0;i<=nxs;i++) fchkOut << 0.0 << "\n";   // Earr
+  for (int i=0;i<=nxs;i++) fchkOut << 0.0 << "\n";   // ElArr
+  for (int i=0;i<=nxs;i++) fchkOut << 0.0 << "\n";   // ErArr
+}
+cout << "Initialized, T.n=" << T.n << endl;

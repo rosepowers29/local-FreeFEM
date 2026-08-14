@@ -1,4 +1,4 @@
-include "hts_mesh_module_3d_slit.idp"
+include "../shared/hts_mesh_module_3d_slit.idp"
 fespace Vh3(Th3, P1);
 Vh3 T;
 {

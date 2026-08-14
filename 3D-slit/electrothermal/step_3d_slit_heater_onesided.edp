@@ -14,8 +14,8 @@
 // solve involved), so it's redone from scratch each Picard iteration.
 // ============================================================
 
-include "hts_mesh_module_3d_slit.idp"
-include "hts_materials.idp"
+include "../shared/hts_mesh_module_3d_slit.idp"
+include "../shared/hts_materials.idp"
 
 real Tcold = 77.0;
 real IcRebcoActual = JcT(77.0)*tSc*coreWidth;

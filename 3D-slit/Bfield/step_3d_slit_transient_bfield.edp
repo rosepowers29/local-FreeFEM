@@ -1,5 +1,5 @@
 // ============================================================
-// step_3d_slit_transient.edp
+// step_3d_slit_transient_bfield.edp
 // Full transient scenario WITH the slit: ramp current to 0.7*Ic over
 // 0.5s, then apply the 2mm x 2mm / 13W / 10ms spot heater on the LEFT
 // side only (z=width/4), then observe recovery or runaway -- and
@@ -12,8 +12,8 @@
 // involved in this sub-solve).
 // ============================================================
 
-include "hts_mesh_module_3d_slit.idp"
-include "hts_materials.idp"
+include "../shared/hts_mesh_module_3d_slit.idp"
+include "../shared/hts_materials.idp"
 
 real Tcold = 77.0;
 real IcRebcoActual = JcT(77.0)*tSc*coreWidth;
@@ -63,9 +63,9 @@ func real kOf(int rg, real Tl){
 func real sourceOfFull(int rg, real Ef, real Tl){
   if (rg==1) return Ef^2/rhoCu(Tl);
   if (rg==2 || rg==6) return Ef^2/rhoAg(Tl);
-  if (rg==3) return Ef^2/rhoHast(Tl);
+  if (rg==3) return Ef^2/rhoHast(Tl);   // Hastelloy: now a genuine parallel branch, not excluded
   if (rg==5) return sigmaSc(Ef,Tl)*Ef^2;
-  return 0.0;
+  return 0.0;   // region 4 (buffer) remains excluded -- see bfield_3d_slit.idp header note
 }
 func real rhoCpOf(int rg, real Tl){
   if (rg==1) return rhomCu*cpCu(Tl);
@@ -76,46 +76,12 @@ func real rhoCpOf(int rg, real Tl){
   return 1.0;   // region 7 (slit): nominal small value for well-posedness
 }
 
-func real ItotFull(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT){
-  return shellAreaFull*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
-       + tSub*coreWidth*(E/rhoHast(THast))
-       + tSc*coreWidth*sigmaSc(E,Tsc)*E + tAgT*coreWidth*(E/rhoAg(TagT));
-}
-func real solveEFull(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget){
-  if (Itarget <= 0.0) return 0.0;
-  real Ehi0=4.0; int guard=0;
-  while (ItotFull(Ehi0,TcuShell,TagB,THast,Tsc,TagT) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
-  real logElo=log(1e-30), logEhi=log(Ehi0);
-  for(int it=0;it<50;it++){
-    real logEmid=0.5*(logElo+logEhi);
-    real Emid=exp(logEmid);
-    if (ItotFull(Emid,TcuShell,TagB,THast,Tsc,TagT) < Itarget) logElo=logEmid; else logEhi=logEmid;
-  }
-  real Ef=exp(0.5*(logElo+logEhi));
-  real relErr=abs(ItotFull(Ef,TcuShell,TagB,THast,Tsc,TagT)-Itarget)/max(Itarget,1e-30);
-  assert(relErr<=1e-3);
-  return Ef;
-}
-func real ItotHalf(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT, real shellA, real cw){
-  return shellA*(E/rhoCu(TcuShell)) + tAgB*cw*(E/rhoAg(TagB))
-       + tSub*cw*(E/rhoHast(THast))
-       + tSc*cw*sigmaSc(E,Tsc)*E + tAgT*cw*(E/rhoAg(TagT));
-}
-func real solveEHalf(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget, real shellA, real cw){
-  if (Itarget <= 0.0) return 0.0;
-  real Ehi0=4.0; int guard=0;
-  while (ItotHalf(Ehi0,TcuShell,TagB,THast,Tsc,TagT,shellA,cw) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
-  real logElo=log(1e-30), logEhi=log(Ehi0);
-  for(int it=0;it<50;it++){
-    real logEmid=0.5*(logElo+logEhi);
-    real Emid=exp(logEmid);
-    if (ItotHalf(Emid,TcuShell,TagB,THast,Tsc,TagT,shellA,cw) < Itarget) logElo=logEmid; else logEhi=logEmid;
-  }
-  real Ef=exp(0.5*(logElo+logEhi));
-  real relErr=abs(ItotHalf(Ef,TcuShell,TagB,THast,Tsc,TagT,shellA,cw)-Itarget)/max(Itarget,1e-30);
-  assert(relErr<=1e-3);
-  return Ef;
-}
+// (The non-B-aware ItotFull/solveEFull/ItotHalf/solveEHalf that used to
+// live here were dead code -- never called; the actual solve uses only
+// the B-aware solveEFullB/solveEHalfB from bfield_3d_slit.idp. Removed
+// rather than left stale, since leaving them would mean an un-fixed
+// duplicate missing the Hastelloy branch below sitting right next to
+// the real implementation.)
 
 int nxs = 60;
 real[int] xSample(nxs+1), Earr(nxs+1), ElArr(nxs+1), ErArr(nxs+1);
@@ -126,7 +92,7 @@ func real ErFun(real xx){ return interp1(xSample, ErArr, nxs+1, xx); }
 
 // Diagnostics (voltage taps / RTDs / Hall-probe placeholders) -- must be
 // included after Efun/ElFun/ErFun above, per that file's header comment.
-include "diagnostics_3d_slit.idp"
+include "../shared/diagnostics_3d_slit.idp"
 real[int] diagVL(nTapsPerSide), diagVR(nTapsPerSide);
 
 fespace Vh3(Th3, P1);
@@ -138,13 +104,37 @@ Ph3 kfun, source, rhocpfun;
 real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yHastMid=0.5*(yB2+yB3), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
 real zLeftRep = width/4, zRightRep = 3*width/4;
 
+// Self-field B computation (Kim-model Jc(B,T) feedback) -- must be
+// included after Efun/ElFun/ErFun AND after Vh3 T exists (bfield_3d_slit.idp's
+// computeSelfFieldB references the mesh field T directly), per its own
+// header comment. FreeFEM resolves identifiers at parse time even inside
+// func bodies not yet called, so this really does need to come after the
+// Vh3 T declaration above, not just before it's first USED.
+include "bfield_3d_slit.idp"
+real[int] Bleft(nxs+1), Bright(nxs+1);
+
 int maxStepsThisRun = 1;
 
+// CHECKPOINT FORMAT CHANGE: now also persists Earr/ElArr/ErArr, not just
+// t and T. This is required for computeSelfFieldB's lagged design to
+// actually work: it reads these arrays BEFORE this step's electrical
+// solve overwrites them, expecting last step's converged values. Without
+// persisting them, every fresh script invocation saw freshly-zero-
+// initialized arrays instead, and B was silently 0 forever regardless of
+// the real current/heating state -- a real bug, not a physics effect,
+// caught by exactly that symptom (uniformly zero B at every Hall probe
+// reading). Checkpoints from before this fix do NOT have this data --
+// re-run init_3d_slit_transient_checkpoint.edp for a fresh start rather
+// than resuming an old checkpoint with this script; there's no valid B
+// history in an old checkpoint to recover anyway (B was always 0 there).
 real t = 0.0;
 {
   ifstream fchk("ckpt_3d_slit_transient.txt");
   fchk >> t;
   for (int i=0;i<T.n;i++) fchk >> T[][i];
+  for (int i=0;i<=nxs;i++) fchk >> Earr[i];
+  for (int i=0;i<=nxs;i++) fchk >> ElArr[i];
+  for (int i=0;i<=nxs;i++) fchk >> ErArr[i];
   cout << "Resumed at t="<<t<<"s Tmax="<<T[].max << endl;
 }
 
@@ -170,8 +160,18 @@ real t = 0.0;
 
   int step = 0;
   while (t < tEnd-1e-12 && step < maxStepsThisRun){
+    real tStepStart = clock();
     real I0w = I0ofT(t);
 
+    // Self-field B, computed from the CURRENT (about-to-be-overwritten)
+    // Earr/ElArr/ErArr and T -- i.e. the previous timestep's converged
+    // state -- then held fixed through this timestep's bisection below
+    // (the "lagged" coupling decision).
+    real tBstart = clock();
+    computeSelfFieldB(Bleft, Bright, nxs+1);
+    real tBfield = clock() - tBstart;
+
+    real tElecStart = clock();
     // electrical: single channel outside slit range, split L/R inside.
     // WITHIN the slit, El(x)/Er(x) are resolved PER-x (matching the
     // outside-slit treatment) rather than sampled once at a single
@@ -183,7 +183,7 @@ real t = 0.0;
       if (xx < xSlitStart || xx > xSlitEnd){
         real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep), THast=T(xx,yHastMid,zLeftRep),
              Tsc=T(xx,yScmid,zLeftRep), TagT=T(xx,yAgTmid,zLeftRep);
-        Earr[i] = solveEFull(TcuShell,TagB,THast,Tsc,TagT, I0w);
+        Earr[i] = solveEFullB(TcuShell,TagB,THast,Tsc,TagT, I0w, Bleft[i]);
         ElArr[i] = 0; ErArr[i] = 0;
       } else {
         Earr[i] = 0;
@@ -217,8 +217,8 @@ real t = 0.0;
       real Il = fracLeft*I0w;
       real sum = 0.0;
       for (int i=iSlitLo;i<iSlitHi;i++){
-        real Ea = solveEHalf(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth);
-        real Eb = solveEHalf(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth);
+        real Ea = solveEHalfB(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, Bleft[i]);
+        real Eb = solveEHalfB(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, Bleft[i+1]);
         sum += 0.5*(Ea+Eb)*(xSample[i+1]-xSample[i]);
       }
       return sum;
@@ -227,8 +227,8 @@ real t = 0.0;
       real Ir = (1-fracLeft)*I0w;
       real sum = 0.0;
       for (int i=iSlitLo;i<iSlitHi;i++){
-        real Ea = solveEHalf(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth);
-        real Eb = solveEHalf(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth);
+        real Ea = solveEHalfB(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, Bright[i]);
+        real Eb = solveEHalfB(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, Bright[i+1]);
         sum += 0.5*(Eb+Ea)*(xSample[i+1]-xSample[i]);
       }
       return sum;
@@ -247,15 +247,17 @@ real t = 0.0;
     real fracLeft = 0.5*(flo+fhi);
     real IlFinal = fracLeft*I0w, IrFinal = (1-fracLeft)*I0w;
     for (int i=iSlitLo;i<=iSlitHi;i++){
-      ElArr[i] = solveEHalf(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth);
-      ErArr[i] = solveEHalf(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth);
+      ElArr[i] = solveEHalfB(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, Bleft[i]);
+      ErArr[i] = solveEHalfB(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, Bright[i]);
     }
+    real tElectrical = clock() - tElecStart;
 
     real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
     real TmaxRight = T(xHeatC,yCuTop,zRightRep);
     cout << "t="<<t<<"s I0="<<I0w<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
     fout << t << "," << I0w << "," << T[].max << "," << TmaxLeft << "," << TmaxRight << "," << fracLeft << "\n";
 
+    real tDiagStart = clock();
     diagAllTapVoltages(diagVL, diagVR);
     real VclPlus = 0.0;
     real VclMinus = diagVcum(Lx, -1);   // == diagVcum(Lx,+1) by the slit's equal-voltage-drop closure condition
@@ -264,7 +266,10 @@ real t = 0.0;
     for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVR[i];
     for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagLeft);
     for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagRight);
-    fdiag << "," << hallNotModeled << "," << hallNotModeled << "\n";
+    real BatHallLeft = interp1(xSample, Bleft, nxs+1, xHall);
+    real BatHallRight = interp1(xSample, Bright, nxs+1, xHall);
+    fdiag << "," << BatHallLeft << "," << BatHallRight << "\n";
+    real tDiag = clock() - tDiagStart;
 
     real dt = dtCapped(t);
     if (dt <= 1e-9) break;
@@ -272,6 +277,7 @@ real t = 0.0;
     real qHeaterNow = 0.0;
     if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
 
+    real tFieldsStart = clock();
     Ph3 inSlitRange = (x>=xSlitStart)*(x<=xSlitEnd);
     source = (1-inSlitRange)*sourceOfFull(region, Efun(x), T)
            + inSlitRange*( (z<zSlitCenter)*sourceOfFull(region, ElFun(x), T)
@@ -279,12 +285,20 @@ real t = 0.0;
     Told = T;
     kfun = kOf(region, Told);
     rhocpfun = rhoCpOf(region, Told);
+    real tFields = clock() - tFieldsStart;
 
+    real tHeatStart = clock();
     solve heatStep(T, w) =
         int3d(Th3)( rhocpfun*T*w/dt + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
       - int3d(Th3)( rhocpfun*Told*w/dt + source*w )
       - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
       + on(2, 4, T=Tcold);
+    real tHeatSolve = clock() - tHeatStart;
+
+    real tStepTotal = clock() - tStepStart;
+    cout << "TIMING (s): Bfield=" << tBfield << "  electrical=" << tElectrical
+         << "  diagnostics=" << tDiag << "  fieldAssign=" << tFields << "  heatSolve=" << tHeatSolve
+         << "  ||  stepTotal=" << tStepTotal << endl;
 
     t += dt;
     for (int i=0;i<4;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
@@ -297,5 +311,8 @@ real t = 0.0;
   fchkOut.precision(12);
   fchkOut << t << "\n";
   for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+  for (int i=0;i<=nxs;i++) fchkOut << Earr[i] << "\n";
+  for (int i=0;i<=nxs;i++) fchkOut << ElArr[i] << "\n";
+  for (int i=0;i<=nxs;i++) fchkOut << ErArr[i] << "\n";
 }
 cout << "Saved checkpoint at t="<<t<<"s" << endl;

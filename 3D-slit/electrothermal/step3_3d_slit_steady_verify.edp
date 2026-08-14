@@ -13,8 +13,8 @@
 // near-zero conductivity and zero Joule heating.
 // ============================================================
 
-include "hts_mesh_module_3d_slit.idp"
-include "hts_materials.idp"
+include "../shared/hts_mesh_module_3d_slit.idp"
+include "../shared/hts_materials.idp"
 
 real Tcold = 77.0;
 real shellArea = width*yB7 - coreWidth*(yB6-yB1);
