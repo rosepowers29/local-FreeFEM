@@ -72,13 +72,26 @@ parameterization these scripts rely on.
 ```bash
 cd 3D-slit/electrothermal
 
-# One current level, to completion
-python3 run_transient.py --ratio 0.70
+# One current level, to completion -- wrap in nohup/screen/tmux: a single
+# ratio can take hours, and an SSH/session drop kills a plain foreground
+# invocation with no error and no status.json (this has happened).
+nohup python3 run_transient.py --ratio 0.70 > r0p70_console.log 2>&1 &
 
 # Sweep several current levels (colleague-handoff dataset), one
-# independent runs/<label>/ directory per level
-python3 sweep_transient.py --ratios 0.5,0.6,0.7,0.8,0.9,1.0
+# independent runs/<label>/ directory per level -- same nohup caveat
+nohup python3 sweep_transient.py --ratios 0.5,0.6,0.7,0.8,0.9,1.0 \
+    > sweep_console.log 2>&1 &
 ```
+
+**Always background any single-ratio or sweep invocation** (`nohup`,
+`screen`, or `tmux`) — a dropped SSH session kills a foreground
+`FreeFem++`/`run_transient.py` process outright, with no exception, no
+error, and no `status.json`. If a run stops producing new lines in
+`run.log` with no corresponding `status.json`, that's the signature to
+look for: check `tail run.log` for whether the last line is a clean
+`FINISHED status=...` (real stop) or trails off mid-invocation with no
+error message (killed externally) — then `--resume` (see `CLAUDE.md`),
+backgrounded this time.
 
 If `FreeFem++` isn't on `PATH` (common for a from-source/home-directory
 install on a remote machine), point the wrapper at it instead of relying
@@ -89,8 +102,40 @@ Output lands in `runs/<label>/` (label auto-derived from the ratio, e.g.
 `r0p70`): the usual checkpoint/CSVs (via `-outprefix`), plus
 `run.log` (one line per invocation) and `status.json` (final outcome —
 `settled`, `runaway`, `crashed`, `numerical_divergence`,
-`reached_end_deviated`/`reached_end_no_deviation`, or
-`max_steps_exceeded`). `sweep_transient.py` aggregates every ratio's
+`reached_end_deviated`/`reached_end_no_deviation`,
+`plateaued_off_parity`, or `max_steps_exceeded`, plus a `trend` field —
+`converging`/`plateaued`/`diverging`/`null` — for any run that ended
+still off-parity). `sweep_transient.py` aggregates every ratio's
 `status.json` into `runs/summary.csv`. Re-running a label moves the
 existing directory aside (`runs/<label>.bak.<timestamp>/`) rather than
 deleting it — pass `--force` to delete instead. `runs/` is gitignored.
+
+## HDF5 handoff export
+
+`export_sweep_hdf5.py` converts a completed sweep's CSVs into a single
+HDF5 file for handing off — FreeFEM's own HDF5 support
+(`load "iohdf5"`/`savehdf5sol`) is a mesh/field visualization exporter,
+not a fit for this tabular time-series data, so this is a Python (h5py)
+post-processing step instead. Requires `h5py`
+(`pip install h5py --break-system-packages` if not already present).
+
+```bash
+cd 3D-slit/electrothermal
+python3 export_sweep_hdf5.py                 # auto-discovers every runs/*/status.json
+python3 export_sweep_hdf5.py --labels r0p5,r0p7,r0p8,r0p9,r0p95,r0p99
+```
+
+Writes `runs/sweep.h5` with one group per label, e.g. `/r0p70`:
+- group attributes = that run's `status.json` fields (`ratio`, `status`,
+  `trend`, `n_steps`, `wall_clock_seconds`, `final_t`, `final_Tmax`,
+  `final_fracLeft`)
+- `/r0p70/transient/<column>` — one dataset per `transient_3d_slit.csv` column
+- `/r0p70/diagnostics/<column>` — one dataset per `diagnostics_3d_slit.csv` column
+- `/r0p70/positions/<column>` — one dataset per
+  `diagnostics_positions_3d_slit.csv` column (string columns as
+  variable-length UTF-8 — read them back with `.asstr()`, e.g.
+  `f['r0p70/positions/channel'].asstr()[:]`, or you'll get raw `bytes`)
+
+A run missing `diagnostics_3d_slit.csv`/positions (shouldn't happen for
+this workflow, but e.g. an old run predating that feature) just skips
+that subgroup rather than failing the whole export.
