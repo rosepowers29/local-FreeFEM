@@ -134,7 +134,11 @@ Writes `runs/sweep.h5` with one group per label, e.g. `/r0p70`:
 - `/r0p70/positions/<column>` — one dataset per
   `diagnostics_positions_3d_slit.csv` column (string columns as
   variable-length UTF-8 — read them back with `.asstr()`, e.g.
-  `f['r0p70/positions/channel'].asstr()[:]`, or you'll get raw `bytes`)
+  `f['r0p70/positions/channel'].asstr()[:]`, or you'll get raw `bytes`).
+  A column that's numeric except for the metadata CSV's `"n/a"`
+  placeholders (e.g. `z_m` for `V_CL_plus`/`V_CL_minus`, which have no
+  discrete z-position) stays `float64`, with those entries as `NaN`,
+  rather than demoting the whole column to strings.
 
 A run missing `diagnostics_3d_slit.csv`/positions (shouldn't happen for
 this workflow, but e.g. an old run predating that feature) just skips

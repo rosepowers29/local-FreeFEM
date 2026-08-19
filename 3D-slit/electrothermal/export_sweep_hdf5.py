@@ -48,6 +48,19 @@ def discover_labels(base_dir: Path):
     return sorted(p.parent.name for p in base_dir.glob("*/status.json"))
 
 
+MISSING_TOKENS = {"", "n/a", "na", "-", "nan"}
+
+
+def parse_float_or_missing(value):
+    # diagnostics_positions_3d_slit.csv writes "n/a" for channels with no
+    # discrete z-position (e.g. V_CL_plus/V_CL_minus, current-lead reference
+    # taps) -- treat that as NaN rather than letting one placeholder value
+    # demote an otherwise-numeric column (e.g. z_m) to strings entirely.
+    if value.strip().lower() in MISSING_TOKENS:
+        return float("nan")
+    return float(value)
+
+
 def read_csv_columns(csv_path: Path):
     with csv_path.open() as f:
         rows = list(csv.DictReader(f))
@@ -57,9 +70,9 @@ def read_csv_columns(csv_path: Path):
     for col in rows[0].keys():
         values = [r[col] for r in rows]
         try:
-            columns[col] = np.array([float(v) for v in values], dtype="f8")
+            columns[col] = np.array([parse_float_or_missing(v) for v in values], dtype="f8")
         except ValueError:
-            # Not uniformly numeric (e.g. positions' channel/type/side/notes)
+            # Genuinely non-numeric (e.g. positions' channel/type/side/notes)
             columns[col] = np.array(values, dtype=h5py.string_dtype(encoding="utf-8"))
     return columns
 
