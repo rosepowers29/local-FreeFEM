@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +38,13 @@ DEFAULT_DEVIATION_EPS = 0.01
 DEFAULT_RECOVER_EPS = 0.002
 DEFAULT_RECOVER_HOLD_TIME = 0.1
 DEFAULT_MAX_STEPS = 500
+# Calibrated against a real run (ratio=0.70): deviation relaxed smoothly
+# from a peak of ~0.474 to ~0.016 with a decay time constant of ~0.75s,
+# still clearly converging (slope ~0.013/s) at tEnd -- nowhere near flat.
+# trend-eps is set well below that so a genuinely-still-converging run
+# like that one is never misclassified as plateaued.
+DEFAULT_TREND_WINDOW = 0.3
+DEFAULT_TREND_EPS = 0.001
 
 
 def ts():
@@ -105,7 +113,24 @@ def read_last_row(csv_path: Path):
     return dict(zip(header, last))
 
 
-def finalize(status_path, log_fh, label, ratio, status, row, n_steps, start_time):
+def classify_trend(trend_buffer, trend_eps):
+    # trend_buffer holds (t, deviation) pairs spanning the last
+    # trend-window seconds. Slope of deviation (not fracLeft directly) so
+    # sign is unambiguous regardless of which side the split leans toward.
+    if len(trend_buffer) < 2:
+        return None
+    t0, d0 = trend_buffer[0]
+    t1, d1 = trend_buffer[-1]
+    if t1 - t0 <= 0:
+        return None
+    slope = (d1 - d0) / (t1 - t0)
+    if abs(slope) < trend_eps:
+        return "plateaued"
+    return "diverging" if slope > 0 else "converging"
+
+
+def finalize(status_path, log_fh, label, ratio, status, row, n_steps, start_time,
+             trend=None):
     elapsed = time.monotonic() - start_time
     summary = {
         "label": label,
@@ -116,6 +141,7 @@ def finalize(status_path, log_fh, label, ratio, status, row, n_steps, start_time
         "final_t": float(row["t"]) if row else None,
         "final_Tmax": float(row["Tmax"]) if row else None,
         "final_fracLeft": float(row["fracLeft"]) if row else None,
+        "trend": trend,
     }
     log_fh.write(f"{ts()} FINISHED status={status} n_steps={n_steps} elapsed={elapsed:.1f}s\n")
     status_path.write_text(json.dumps(summary, indent=2))
@@ -124,12 +150,33 @@ def finalize(status_path, log_fh, label, ratio, status, row, n_steps, start_time
     return summary
 
 
+def load_resume_state(csv_path, deviation_eps, trend_window):
+    # Reconstructs what an interrupted run_one() would have been tracking
+    # in memory, from the CSV rows a prior (killed) invocation already
+    # wrote. recover_since is deliberately NOT reconstructed -- if the
+    # split was already within recover-eps right when the process died,
+    # resuming just requires observing that closeness continue for
+    # recover-hold-time again, rather than trusting a state we have no
+    # persisted record of. Slightly conservative, never a false positive.
+    rows = []
+    with csv_path.open() as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return 0, None, False, deque()
+    prev_t = float(rows[-1]["t"])
+    has_deviated = any(abs(float(r["fracLeft"]) - 0.5) > deviation_eps for r in rows)
+    trend_buffer = deque((float(r["t"]), abs(float(r["fracLeft"]) - 0.5)) for r in rows)
+    while trend_buffer and prev_t - trend_buffer[0][0] > trend_window:
+        trend_buffer.popleft()
+    return len(rows), prev_t, has_deviated, trend_buffer
+
+
 def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             deviation_eps=DEFAULT_DEVIATION_EPS, recover_eps=DEFAULT_RECOVER_EPS,
             recover_hold_time=DEFAULT_RECOVER_HOLD_TIME, max_steps=DEFAULT_MAX_STEPS,
-            force=False, freefem_bin=None):
+            force=False, freefem_bin=None, trend_window=DEFAULT_TREND_WINDOW,
+            trend_eps=DEFAULT_TREND_EPS, resume=False):
     run_dir = SCRIPT_DIR / base_dir / label
-    reinit_run_dir(run_dir, force)
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
     out_prefix = f"{base_dir}/{label}/"
@@ -138,19 +185,33 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
     status_path = run_dir / "status.json"
     csv_path = run_dir / TRANSIENT_CSV
 
+    if resume:
+        ckpt_path = run_dir / "ckpt_3d_slit_transient.txt"
+        if not ckpt_path.exists():
+            sys.exit(f"--resume given but no checkpoint found at {ckpt_path} -- "
+                     f"nothing to resume. Omit --resume to start fresh (this "
+                     f"will move aside/delete {run_dir} as usual).")
+        n_steps, prev_t, has_deviated, trend_buffer = load_resume_state(
+            csv_path, deviation_eps, trend_window)
+        print(f"[run_transient] resuming label={label} from t={prev_t}, "
+              f"{n_steps} step(s) already recorded")
+        log_mode = "a"
+    else:
+        reinit_run_dir(run_dir, force)
+        n_steps, prev_t, has_deviated, trend_buffer = 0, None, False, deque()
+        log_mode = "w"
+    recover_since = None
+
     start_time = time.monotonic()
-    with log_path.open("w") as log_fh:
-        log_fh.write(f"{ts()} starting ratio={ratio} label={label}\n")
+    with log_path.open(log_mode) as log_fh:
+        log_fh.write(f"{ts()} {'resuming' if resume else 'starting'} "
+                      f"ratio={ratio} label={label}\n")
 
-        rc = run_freefem(INIT_SCRIPT, ["-outprefix", out_prefix], log_fh, freefem_bin)
-        if rc != 0:
-            return finalize(status_path, log_fh, label, ratio, "init_failed",
-                             None, 0, start_time)
-
-        prev_t = None
-        has_deviated = False
-        recover_since = None
-        n_steps = 0
+        if not resume:
+            rc = run_freefem(INIT_SCRIPT, ["-outprefix", out_prefix], log_fh, freefem_bin)
+            if rc != 0:
+                return finalize(status_path, log_fh, label, ratio, "init_failed",
+                                 None, 0, start_time)
 
         while True:
             rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix],
@@ -197,15 +258,37 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             else:
                 recover_since = None
 
+            # Trend of the deviation magnitude over the trailing trend-window
+            # of simulated time -- used to tell "still relaxing toward parity,
+            # just needs more time than tEnd allows" apart from "genuinely
+            # stuck at a new, off-center equilibrium" apart from "still
+            # getting worse." Deliberately separate from the strict settled
+            # check above: settled needs to actually BE close to 0.5, this
+            # only asks whether it's still MOVING.
+            trend_buffer.append((t, deviation))
+            while trend_buffer and t - trend_buffer[0][0] > trend_window:
+                trend_buffer.popleft()
+            trend = classify_trend(trend_buffer, trend_eps) if has_deviated else None
+
+            # Early exit: no strict-tolerance recovery, but the trend has
+            # genuinely flattened (not just slowed) -- further steps are
+            # unlikely to add new information, so don't burn more wall-clock
+            # time grinding out to tEnd. A still-converging run (trend==
+            # "converging") never hits this; it keeps running.
+            if (has_deviated and deviation >= recover_eps and trend == "plateaued"
+                    and t - trend_buffer[0][0] >= trend_window):
+                return finalize(status_path, log_fh, label, ratio,
+                                 "plateaued_off_parity", row, n_steps, start_time, trend)
+
             if prev_t is not None and t <= prev_t + 1e-12:
                 status = "reached_end_deviated" if has_deviated else "reached_end_no_deviation"
                 return finalize(status_path, log_fh, label, ratio, status,
-                                 row, n_steps, start_time)
+                                 row, n_steps, start_time, trend)
             prev_t = t
 
             if n_steps >= max_steps:
                 return finalize(status_path, log_fh, label, ratio,
-                                 "max_steps_exceeded", row, n_steps, start_time)
+                                 "max_steps_exceeded", row, n_steps, start_time, trend)
 
 
 def main():
@@ -234,9 +317,25 @@ def main():
     p.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS,
                    help=f"Safety cap on invocations for this ratio "
                         f"(default: {DEFAULT_MAX_STEPS})")
+    p.add_argument("--trend-window", type=float, default=DEFAULT_TREND_WINDOW,
+                   help=f"Simulated seconds of trailing history used to classify "
+                        f"a still-deviated run as converging/plateaued/diverging "
+                        f"(default: {DEFAULT_TREND_WINDOW})")
+    p.add_argument("--trend-eps", type=float, default=DEFAULT_TREND_EPS,
+                   help=f"|d(deviation)/dt| below which the trend counts as "
+                        f"plateaued rather than still converging/diverging "
+                        f"(default: {DEFAULT_TREND_EPS})")
     p.add_argument("--force", action="store_true",
                    help="Delete any existing run directory for this label "
                         "instead of moving it aside")
+    p.add_argument("--resume", action="store_true",
+                   help="Continue an existing, interrupted run for this label in "
+                        "place (e.g. after a machine reboot/maintenance killed a "
+                        "prior invocation) instead of reinitializing. Requires the "
+                        "run directory's checkpoint to already exist; skips the "
+                        "init script and reconstructs deviation/trend state from "
+                        "the existing CSV. wall_clock_seconds in status.json then "
+                        "reflects only time since this resume, not the full run.")
     p.add_argument("--freefem-bin", default=None,
                    help="Path to the FreeFem++ executable (default: $FREEFEM_BIN "
                         "env var, else whatever 'FreeFem++' resolves to on PATH). "
@@ -247,7 +346,7 @@ def main():
     label = args.label or sanitize_label(args.ratio)
     run_one(args.ratio, label, args.base_dir, args.runaway_tmax, args.deviation_eps,
             args.recover_eps, args.recover_hold_time, args.max_steps, args.force,
-            args.freefem_bin)
+            args.freefem_bin, args.trend_window, args.trend_eps, args.resume)
 
 
 if __name__ == "__main__":

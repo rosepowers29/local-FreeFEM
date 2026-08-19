@@ -37,6 +37,8 @@ def main():
     p.add_argument("--recover-eps", type=float, default=rt.DEFAULT_RECOVER_EPS)
     p.add_argument("--recover-hold-time", type=float, default=rt.DEFAULT_RECOVER_HOLD_TIME)
     p.add_argument("--max-steps", type=int, default=rt.DEFAULT_MAX_STEPS)
+    p.add_argument("--trend-window", type=float, default=rt.DEFAULT_TREND_WINDOW)
+    p.add_argument("--trend-eps", type=float, default=rt.DEFAULT_TREND_EPS)
     p.add_argument("--force", action="store_true")
     p.add_argument("--freefem-bin", default=None,
                    help="Path to the FreeFem++ executable (default: $FREEFEM_BIN "
@@ -54,7 +56,8 @@ def main():
         dict(ratio=ratio, label=rt.sanitize_label(ratio), base_dir=args.base_dir,
              runaway_tmax=args.runaway_tmax, deviation_eps=args.deviation_eps,
              recover_eps=args.recover_eps, recover_hold_time=args.recover_hold_time,
-             max_steps=args.max_steps, force=args.force, freefem_bin=args.freefem_bin)
+             max_steps=args.max_steps, force=args.force, freefem_bin=args.freefem_bin,
+             trend_window=args.trend_window, trend_eps=args.trend_eps)
         for ratio in ratios
     ]
 
@@ -74,7 +77,7 @@ def main():
     summary_path = SCRIPT_DIR / args.base_dir / "summary.csv"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ["label", "ratio", "status", "n_steps", "wall_clock_seconds",
-                  "final_t", "final_Tmax", "final_fracLeft"]
+                  "final_t", "final_Tmax", "final_fracLeft", "trend"]
     with summary_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

@@ -104,6 +104,21 @@ re-invocation as documented above.
   then `$FREEFEM_BIN` env var, then `PATH`. Needed in practice: a
   from-source/home-directory FreeFEM install on a remote machine is
   common and usually isn't on `PATH`.
+- **`--resume`**: continues an interrupted run (e.g. a remote-machine
+  reboot/maintenance killing a mid-sweep invocation) in place instead of
+  reinitializing — skips `reinit_run_dir`/the init script, and
+  reconstructs `has_deviated`/the trend buffer/step count from the
+  existing `transient_3d_slit.csv` (`load_resume_state`). `recover_since`
+  is deliberately NOT reconstructed — if the split was already within
+  `recover-eps` right when the process died, resuming just requires
+  observing that closeness hold for `recover-hold-time` again rather
+  than trusting unrecorded state. `wall_clock_seconds` in `status.json`
+  after a resume reflects only time since that resume, not the full run.
+  Requires the label's checkpoint to already exist; errors out clearly
+  otherwise. **Without `--resume`, re-running a label always
+  reinitializes** — safe for a fresh run, destructive to in-progress
+  wall-clock investment for an interrupted one, so don't reach for the
+  plain (no-flag) form to continue something that got killed mid-run.
 - **No output for minutes at a time is normal, not a hang.** Each
   invocation rebuilds the mesh from scratch and solves one timestep —
   minutes, not seconds, per root `CLAUDE.md`. `run_transient.py` streams
