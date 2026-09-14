@@ -42,6 +42,10 @@ def main():
     p.add_argument("--steps-per-invocation", type=int, default=rt.DEFAULT_STEPS_PER_INVOCATION,
                    help="Physical timesteps advanced per FreeFEM invocation -- "
                         "see run_transient.py --help / CLAUDE.md.")
+    p.add_argument("--ramp-rate", type=float, default=rt.DEFAULT_RAMP_RATE,
+                   help="Target current ramp rate in A/s -- see run_transient.py --help.")
+    p.add_argument("--ramp-dt", type=float, default=rt.DEFAULT_RAMP_DT,
+                   help="Timestep during the ramp phase -- see run_transient.py --help.")
     p.add_argument("--force", action="store_true")
     p.add_argument("--freefem-bin", default=None,
                    help="Path to the FreeFem++ executable (default: $FREEFEM_BIN "
@@ -61,7 +65,8 @@ def main():
              recover_eps=args.recover_eps, recover_hold_time=args.recover_hold_time,
              max_steps=args.max_steps, force=args.force, freefem_bin=args.freefem_bin,
              trend_window=args.trend_window, trend_eps=args.trend_eps,
-             steps_per_invocation=args.steps_per_invocation)
+             steps_per_invocation=args.steps_per_invocation,
+             ramp_rate=args.ramp_rate, ramp_dt=args.ramp_dt)
         for ratio in ratios
     ]
 

@@ -53,6 +53,11 @@ DEFAULT_TREND_EPS = 0.001
 # physical step, not once per invocation, so crash-safety/--resume behavior
 # is unaffected by raising this.
 DEFAULT_STEPS_PER_INVOCATION = 20
+# 0.0 is a sentinel meaning "use the .edp's original fixed 0.5s ramp
+# duration" -- set >0 (target A/s) to derive Tramp = I0Target/ramp_rate
+# instead, for the collaborator-requested slow-ramp scenario.
+DEFAULT_RAMP_RATE = 0.0
+DEFAULT_RAMP_DT = 0.05
 
 
 def ts():
@@ -184,7 +189,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             recover_hold_time=DEFAULT_RECOVER_HOLD_TIME, max_steps=DEFAULT_MAX_STEPS,
             force=False, freefem_bin=None, trend_window=DEFAULT_TREND_WINDOW,
             trend_eps=DEFAULT_TREND_EPS, resume=False,
-            steps_per_invocation=DEFAULT_STEPS_PER_INVOCATION):
+            steps_per_invocation=DEFAULT_STEPS_PER_INVOCATION,
+            ramp_rate=DEFAULT_RAMP_RATE, ramp_dt=DEFAULT_RAMP_DT):
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -224,7 +230,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
 
         while True:
             rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix,
-                                            "-steps-per-invocation", str(steps_per_invocation)],
+                                            "-steps-per-invocation", str(steps_per_invocation),
+                                            "-ramprate", str(ramp_rate), "-rampdt", str(ramp_dt)],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
             # once steps_per_invocation > 1 -- each invocation now advances up
@@ -364,13 +371,22 @@ def main():
                         f"--max-steps, which caps total invocations for this "
                         f"ratio as a safety net. See CLAUDE.md for the "
                         f"mesh-vs-solve profiling this should be tuned against.")
+    p.add_argument("--ramp-rate", type=float, default=DEFAULT_RAMP_RATE,
+                   help="Target current ramp rate in A/s (default: "
+                        f"{DEFAULT_RAMP_RATE}, meaning use the .edp's original "
+                        "fixed 0.5s ramp duration). >0 derives the ramp "
+                        "duration as I0Target/ramp-rate instead.")
+    p.add_argument("--ramp-dt", type=float, default=DEFAULT_RAMP_DT,
+                   help=f"Timestep used during the ramp phase specifically "
+                        f"(default: {DEFAULT_RAMP_DT}, today's exact value). "
+                        f"See CLAUDE.md before coarsening this for real data.")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
     run_one(args.ratio, label, args.base_dir, args.runaway_tmax, args.deviation_eps,
             args.recover_eps, args.recover_hold_time, args.max_steps, args.force,
             args.freefem_bin, args.trend_window, args.trend_eps, args.resume,
-            args.steps_per_invocation)
+            args.steps_per_invocation, args.ramp_rate, args.ramp_dt)
 
 
 if __name__ == "__main__":

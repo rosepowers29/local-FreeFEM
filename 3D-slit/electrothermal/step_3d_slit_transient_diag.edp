@@ -45,7 +45,22 @@ real zHeatLo = zHeatC-1e-3, zHeatHi = zHeatC+1e-3;
 real heaterPower = 13.0;
 real qHeater = heaterPower/(2e-3*2e-3);
 
-real Tramp = 0.5, tPulseStart = Tramp, tPulseDur = 0.01, tPulseEnd = tPulseStart+tPulseDur;
+// rampRateTarget (-ramprate, A/s): if >0, Tramp is derived so the ramp
+// proceeds at this target rate instead of the original fixed 0.5s
+// duration. Default 0.0 preserves today's exact behavior when unflagged.
+// rampDt (-rampdt, s): dt used during the ramp phase specifically.
+// Default 0.05 is today's exact value. Both exist to test/exploit that
+// the ramp phase is thermally quasi-static (every run so far shows Tmax
+// flat at 77.0K throughout ramp, heater not yet active) -- see CLAUDE.md
+// for the verification this should be checked against before trusting a
+// coarsened rampDt for real sweep data, especially once rampRateTarget
+// makes Tramp much longer (a slow, collaborator-requested ~20 A/s ramp
+// would otherwise multiply ramp-phase step count 2.5x-4.3x at fixed dt).
+real rampRateTarget = getARGV("-ramprate", 0.0);
+real rampDt = getARGV("-rampdt", 0.05);
+real Tramp = 0.5;
+if (rampRateTarget > 0.0) Tramp = I0Target/rampRateTarget;
+real tPulseStart = Tramp, tPulseDur = 0.01, tPulseEnd = tPulseStart+tPulseDur;
 real tEnd = tPulseEnd + 1.5;
 
 func real I0ofT(real tt){
@@ -54,7 +69,7 @@ func real I0ofT(real tt){
 }
 real[int] phaseBounds = [Tramp, tPulseStart, tPulseEnd, tEnd];
 func real dtRaw(real tt){
-  if (tt < Tramp) return 0.05;
+  if (tt < Tramp) return rampDt;
   if (tt < tPulseEnd) return 0.002;
   if (tt > tPulseEnd + 0.2) return 0.02;
   return 0.01;
