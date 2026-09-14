@@ -143,3 +143,29 @@ Writes `runs/sweep.h5` with one group per label, e.g. `/r0p70`:
 A run missing `diagnostics_3d_slit.csv`/positions (shouldn't happen for
 this workflow, but e.g. an old run predating that feature) just skips
 that subgroup rather than failing the whole export.
+
+## Sweep analysis (from the HDF5 file alone)
+
+`analyze_sweep_hdf5.py` reads `runs/sweep.h5` directly — no per-run CSVs
+required, so this works even if only the handoff file itself made it
+onto a given machine. Requires `h5py` and `matplotlib`.
+
+```bash
+cd 3D-slit/electrothermal
+python3 analyze_sweep_hdf5.py                      # all labels in runs/sweep.h5
+python3 analyze_sweep_hdf5.py --labels r0p7,r0p95  # subset
+python3 analyze_sweep_hdf5.py --with-animation      # also regenerate the slow per-ratio GIFs
+```
+
+Writes to `runs/analysis/`:
+- `chart_summary_fracleft_vs_t.png` / `chart_summary_tmax_vs_t.png` —
+  every ratio's trajectory overlaid on shared axes, colored low-to-high
+  ratio, labeled with each run's final `status`.
+- `chart_summary_final_state.png` — final `|fracLeft-0.5|` and final
+  `Tmax` vs. ratio, colored by outcome — the settled/runaway boundary in
+  one picture.
+- `<label>/chart_slit_transient_*.png`, `<label>/chart_diagnostics_*.png`
+  — the same per-run diagnostic charts `../shared/plot_slit_transient.py`
+  and `../shared/plot_diagnostics_3d_slit.py` produce from CSVs, just
+  fed HDF5-sourced data directly (this script imports and calls those
+  modules' plotting functions rather than duplicating them).

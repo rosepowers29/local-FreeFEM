@@ -130,3 +130,42 @@ re-invocation as documented above.
   expected behavior. `--max-steps N` bounds how many timesteps run, not
   how long each one takes — a "5-step smoke test" is still on the order
   of many minutes, not instant.
+
+## Sweep analysis (`analyze_sweep_hdf5.py`)
+
+Reads `runs/sweep.h5` (the `export_sweep_hdf5.py` output) directly --
+deliberately doesn't touch `runs/<label>/*.csv` at all, since only the
+HDF5 handoff file is guaranteed to exist on a given machine (e.g. after
+scp'ing just the final file off the remote box). It imports
+`../shared/plot_slit_transient.py` and
+`../shared/plot_diagnostics_3d_slit.py` and calls their plotting
+functions directly against dicts built from HDF5 datasets -- same
+column dicts those scripts build internally from `csv.DictReader`, just
+a different loader -- rather than writing the arrays back out to temp
+CSVs or duplicating the plotting logic. If either shared script's
+plotting function signatures change, update the call sites here too.
+The cross-ratio summary plots (fracLeft/Tmax overlaid across ratios,
+final settled/runaway boundary) are new logic specific to this script
+-- there is no equivalent for single-run CSVs since there's nothing to
+compare across.
+
+**`status` alone is not a fit for legend labels.** `reached_end_deviated`
+only means "ran to tEnd still off 50/50" -- it conflates three different
+physical outcomes (still asymptotically recovering, stuck at a new
+off-center equilibrium, or trending toward runaway but hadn't crossed
+the threshold yet) that only the trend classifier
+(`run_transient.classify_trend`, see above) actually distinguishes.
+`outcome_label()` resolves this before anything reaches a plot: it maps
+`reached_end_deviated`/`plateaued_off_parity` through the stored `trend`
+field to `"recovering (asymptotic)"` / `"plateaued off-parity"` /
+`"diverging (pre-runaway)"`. **The trend classifier was added to
+`run_transient.py` after several of this sweep's runs (0.5/0.7/0.8/
+0.9xIc) had already finished**, so their `status.json` predates the
+`trend` field entirely -- `recompute_trend()` reruns the exact same
+classifier against the trailing `trend-window` of the full time series
+already sitting in the HDF5 file, so old and new runs get consistently
+labeled without re-running anything. Confirmed by direct computation:
+all four of those runs classify as `converging`. If you add a new
+outcome to `run_transient.py`'s state machine, add it to
+`OUTCOME_LABELS`/`OUTCOME_COLORS` here too or it'll fall back to
+whatever raw string `status` holds.
