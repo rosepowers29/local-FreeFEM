@@ -304,16 +304,17 @@ real t = 0.0;
     kfun = kOf(region, Told);
     rhocpfun = rhoCpOf(region, Told);
 
-    // solver=CG, eps=1e-6: EXPERIMENTAL, see CLAUDE.md for the full trail.
-    // Round 1 (solver=CG, default eps) measured on the real remote install:
-    // correct (Tmax/fracLeft matched the pre-CG baseline exactly) but
-    // SLOWER -- 126.2s vs. the original unspecified-solver's 116.5s --
-    // because unpreconditioned CG took 10,293 iterations to reach a
-    // residual of 1.5e-32, ~26 orders of magnitude past what a FEM solve
-    // actually needs. This round loosens eps to something FEM-appropriate
-    // to see if that recovers a real win; if not, revert to no solver=
-    // clause at all rather than keep tuning blind.
-    solve heatStep(T, w, solver=CG, eps=1e-6) =
+    // solver= deliberately unspecified (FreeFEM default). Tried solver=CG
+    // (measured 126.2s vs this default's 116.5s -- 8% slower, 10,293
+    // unpreconditioned iterations to reach an unnecessarily tight residual
+    // of 1.5e-32) and solver=CG,eps=1e-6 (identical iteration count/residual/
+    // timing to the decimal -- eps had no measurable effect, falsifying the
+    // "just a loose tolerance away" theory). Reverted rather than keep
+    // tuning blind without FreeFEM solver internals expertise to explain
+    // why eps didn't take effect. See CLAUDE.md for the full trail and
+    // where to pick this back up if revisited (preconditioning, or a
+    // different direct solver).
+    solve heatStep(T, w) =
         int3d(Th3)( rhocpfun*T*w/dt + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
       - int3d(Th3)( rhocpfun*Told*w/dt + source*w )
       - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )

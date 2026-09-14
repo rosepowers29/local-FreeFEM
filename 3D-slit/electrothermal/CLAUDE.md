@@ -213,21 +213,30 @@ showed why: 10,293 unpreconditioned CG iterations to reach a residual of
 actually needs (discretization error alone dwarfs that). That's a
 tolerance problem, not necessarily proof CG is a bad fit for this system.
 
-**Round 2 (current state, unverified):** loosened to
-`solve heatStep(T, w, solver=CG, eps=1e-6)` to test whether a
-FEM-appropriate tolerance recovers a real speedup without materially
-changing the solution. Verify the same way as round 1: compare the new
-`pdeSolve` timing against both `116.5s` (original) and `126.2s` (round
-1), and confirm `Tmax`/`fracLeft` still match at t=0. **If this still
-isn't a clear win, revert to no `solver=`/`eps=` clause at all** (the
-original, unmodified statement) rather than continue tuning blind --
-the heterogeneous coefficients across the 7 material regions (orders of
-magnitude apart, e.g. buffer's placeholder `sigmaBuf=1e-10 S/m`) could
-mean this system is just poorly conditioned for unpreconditioned CG
-regardless of tolerance, in which case a preconditioner or a different
-direct solver would be the next thing to try -- but that's a bigger
-lift than a one-line parameter change and shouldn't be pursued
-speculatively without more evidence.
+**Round 2 (measured, same machine): `eps=1e-6` had zero effect.**
+`solve heatStep(T, w, solver=CG, eps=1e-6)` produced an *identical*
+result to round 1 -- same 10,293 iterations, same `1.47727e-32`
+residual, same ~125s timing, to the decimal. This falsifies the "just
+needs a looser tolerance" theory; either `eps=` isn't controlling
+convergence the way assumed for this FreeFEM version/solver
+combination, or something else pins this at nearly machine precision
+regardless. **Reverted to no `solver=`/`eps=` clause at all** (the
+original statement) rather than continue tuning blind without deeper
+FreeFEM solver-internals expertise -- two rounds of real remote-machine
+time spent for no measured gain is the signal to stop, not keep
+guessing.
+
+**Conclusion: the PDE solve (~116.5s/step, unmodified default solver)
+is a real, currently-unavoided cost.** If revisited later, the next
+things to try would be an explicit preconditioner (the 7 material
+regions have coefficients orders of magnitude apart -- e.g. buffer's
+placeholder `sigmaBuf=1e-10 S/m` -- which plausibly explains why
+unpreconditioned CG needed 10k+ iterations) or a different *direct*
+solver (`solver=UMFPACK`/`solver=MUMPS` if available) rather than
+another iterative-solver guess. Until then, the validated levers for
+wall-clock are `-steps-per-invocation` (saves the ~14s mesh-rebuild cost
+per invocation avoided) and parallelizing across current ratios
+(Condor) -- both already understood, unlike solver tuning.
 
 - **No output for minutes at a time is normal, not a hang.** Each
   invocation rebuilds the mesh from scratch and solves one timestep —
