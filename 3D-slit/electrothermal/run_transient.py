@@ -45,6 +45,14 @@ DEFAULT_MAX_STEPS = 500
 # like that one is never misclassified as plateaued.
 DEFAULT_TREND_WINDOW = 0.3
 DEFAULT_TREND_EPS = 0.001
+# First-pass value, not yet calibrated against real mesh-build-vs-solve
+# profiling data (see CLAUDE.md) -- amortizes the mesh-rebuild-per-invocation
+# cost (the mesh is rebuilt from scratch on every FreeFEM process launch)
+# across this many physical timesteps per invocation instead of just 1.
+# Safe regardless of the exact value: the .edp now checkpoints after every
+# physical step, not once per invocation, so crash-safety/--resume behavior
+# is unaffected by raising this.
+DEFAULT_STEPS_PER_INVOCATION = 20
 
 
 def ts():
@@ -175,7 +183,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             deviation_eps=DEFAULT_DEVIATION_EPS, recover_eps=DEFAULT_RECOVER_EPS,
             recover_hold_time=DEFAULT_RECOVER_HOLD_TIME, max_steps=DEFAULT_MAX_STEPS,
             force=False, freefem_bin=None, trend_window=DEFAULT_TREND_WINDOW,
-            trend_eps=DEFAULT_TREND_EPS, resume=False):
+            trend_eps=DEFAULT_TREND_EPS, resume=False,
+            steps_per_invocation=DEFAULT_STEPS_PER_INVOCATION):
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -214,8 +223,14 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                                  None, 0, start_time)
 
         while True:
-            rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix],
+            rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix,
+                                            "-steps-per-invocation", str(steps_per_invocation)],
                               log_fh, freefem_bin)
+            # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
+            # once steps_per_invocation > 1 -- each invocation now advances up
+            # to `steps_per_invocation` real timesteps internally (see
+            # CLAUDE.md). transient_3d_slit.csv still has one row per physical
+            # timestep regardless; only this counter's meaning changes.
             n_steps += 1
             if rc != 0:
                 return finalize(status_path, log_fh, label, ratio, "crashed",
@@ -341,12 +356,21 @@ def main():
                         "env var, else whatever 'FreeFem++' resolves to on PATH). "
                         "Needed when FreeFEM isn't on PATH, e.g. a from-source "
                         "build under your home directory on a remote machine.")
+    p.add_argument("--steps-per-invocation", type=int, default=DEFAULT_STEPS_PER_INVOCATION,
+                   help=f"Physical timesteps advanced per FreeFEM invocation, "
+                        f"amortizing the mesh-rebuild cost paid on every process "
+                        f"launch across this many steps (default: "
+                        f"{DEFAULT_STEPS_PER_INVOCATION}). Not the same as "
+                        f"--max-steps, which caps total invocations for this "
+                        f"ratio as a safety net. See CLAUDE.md for the "
+                        f"mesh-vs-solve profiling this should be tuned against.")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
     run_one(args.ratio, label, args.base_dir, args.runaway_tmax, args.deviation_eps,
             args.recover_eps, args.recover_hold_time, args.max_steps, args.force,
-            args.freefem_bin, args.trend_window, args.trend_eps, args.resume)
+            args.freefem_bin, args.trend_window, args.trend_eps, args.resume,
+            args.steps_per_invocation)
 
 
 if __name__ == "__main__":

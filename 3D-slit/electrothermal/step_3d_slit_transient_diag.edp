@@ -12,8 +12,13 @@
 // involved in this sub-solve).
 // ============================================================
 
+real tInvocationStart = clock();
+
+real tMeshStart = clock();
 include "../shared/hts_mesh_module_3d_slit.idp"
+real tMeshDone = clock();
 include "../shared/hts_materials.idp"
+real tMaterialsDone = clock();
 include "getARGV.idp"
 
 // currentRatio/outPrefix let run_transient.py drive this script without
@@ -21,6 +26,8 @@ include "getARGV.idp"
 // invoked with no extra flags.
 real currentRatio = getARGV("-ratio", 0.7);
 string outPrefix  = getARGV("-outprefix", "");
+cout << "[profile] meshBuild=" << (tMeshDone-tMeshStart) << "s materialsLoad="
+     << (tMaterialsDone-tMeshDone) << "s" << endl;
 
 real Tcold = 77.0;
 real IcRebcoActual = JcT(77.0)*tSc*coreWidth;
@@ -145,7 +152,13 @@ Ph3 kfun, source, rhocpfun;
 real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yHastMid=0.5*(yB2+yB3), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
 real zLeftRep = width/4, zRightRep = 3*width/4;
 
-int maxStepsThisRun = 1;
+// Defaults to 1 (today's exact behavior, unflagged). run_transient.py
+// passes a larger value via -steps-per-invocation to amortize the
+// mesh-rebuild-per-invocation cost (see CLAUDE.md) across several
+// timesteps -- CSV/diagnostics rows are still written every step
+// regardless, and the checkpoint is now written every step too (see the
+// checkpoint block below), so no time-resolution or crash-safety is lost.
+int maxStepsThisRun = getARGV("-steps-per-invocation", 1);
 
 real t = 0.0;
 {
@@ -178,6 +191,7 @@ real t = 0.0;
   int step = 0;
   while (t < tEnd-1e-12 && step < maxStepsThisRun){
     real I0w = I0ofT(t);
+    real tElecStart = clock();
 
     // electrical: single channel outside slit range, split L/R inside.
     // WITHIN the slit, El(x)/Er(x) are resolved PER-x (matching the
@@ -258,6 +272,8 @@ real t = 0.0;
       ErArr[i] = solveEHalf(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth);
     }
 
+    real tElecDone = clock();
+
     real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
     real TmaxRight = T(xHeatC,yCuTop,zRightRep);
     cout << "t="<<t<<"s I0="<<I0w<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
@@ -279,6 +295,7 @@ real t = 0.0;
     real qHeaterNow = 0.0;
     if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
 
+    real tSolveStart = clock();
     Ph3 inSlitRange = (x>=xSlitStart)*(x<=xSlitEnd);
     source = (1-inSlitRange)*sourceOfFull(region, Efun(x), T)
            + inSlitRange*( (z<zSlitCenter)*sourceOfFull(region, ElFun(x), T)
@@ -292,17 +309,29 @@ real t = 0.0;
       - int3d(Th3)( rhocpfun*Told*w/dt + source*w )
       - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
       + on(2, 4, T=Tcold);
+    real tSolveDone = clock();
+    cout << "[profile] step=" << step << " elecSplit=" << (tElecDone-tElecStart)
+         << "s pdeSolve=" << (tSolveDone-tSolveStart) << "s" << endl;
 
     t += dt;
     for (int i=0;i<4;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
     step++;
+
+    // Checkpoint after EVERY step, not just once at invocation end -- so a
+    // crash/preemption partway through a multi-step invocation
+    // (maxStepsThisRun>1, via -steps-per-invocation) leaves the checkpoint
+    // in sync with the CSV rows already written, instead of lagging behind
+    // them and causing --resume to re-write duplicate/overlapping t values.
+    // Mesh-rebuild amortization (the reason for maxStepsThisRun>1) is
+    // unaffected -- the mesh is only built once per invocation regardless
+    // of how often this (cheap) checkpoint file is rewritten.
+    {
+      ofstream fchkOut(outPrefix+"ckpt_3d_slit_transient.txt");
+      fchkOut.precision(12);
+      fchkOut << t << "\n";
+      for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+    }
   }
 }
-
-{
-  ofstream fchkOut(outPrefix+"ckpt_3d_slit_transient.txt");
-  fchkOut.precision(12);
-  fchkOut << t << "\n";
-  for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
-}
 cout << "Saved checkpoint at t="<<t<<"s" << endl;
+cout << "[profile] totalInvocation=" << (clock()-tInvocationStart) << "s" << endl;

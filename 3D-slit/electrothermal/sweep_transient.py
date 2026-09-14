@@ -39,6 +39,9 @@ def main():
     p.add_argument("--max-steps", type=int, default=rt.DEFAULT_MAX_STEPS)
     p.add_argument("--trend-window", type=float, default=rt.DEFAULT_TREND_WINDOW)
     p.add_argument("--trend-eps", type=float, default=rt.DEFAULT_TREND_EPS)
+    p.add_argument("--steps-per-invocation", type=int, default=rt.DEFAULT_STEPS_PER_INVOCATION,
+                   help="Physical timesteps advanced per FreeFEM invocation -- "
+                        "see run_transient.py --help / CLAUDE.md.")
     p.add_argument("--force", action="store_true")
     p.add_argument("--freefem-bin", default=None,
                    help="Path to the FreeFem++ executable (default: $FREEFEM_BIN "
@@ -57,7 +60,8 @@ def main():
              runaway_tmax=args.runaway_tmax, deviation_eps=args.deviation_eps,
              recover_eps=args.recover_eps, recover_hold_time=args.recover_hold_time,
              max_steps=args.max_steps, force=args.force, freefem_bin=args.freefem_bin,
-             trend_window=args.trend_window, trend_eps=args.trend_eps)
+             trend_window=args.trend_window, trend_eps=args.trend_eps,
+             steps_per_invocation=args.steps_per_invocation)
         for ratio in ratios
     ]
 

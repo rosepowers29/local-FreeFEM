@@ -119,6 +119,83 @@ re-invocation as documented above.
   reinitializes** — safe for a fresh run, destructive to in-progress
   wall-clock investment for an interrupted one, so don't reach for the
   plain (no-flag) form to continue something that got killed mid-run.
+- **`-steps-per-invocation` / `--steps-per-invocation`** (default 20):
+  physical timesteps advanced per FreeFEM invocation, instead of the
+  original hardcoded 1. This exists because every invocation is a brand
+  new process, so `hts_mesh_module_3d_slit.idp`'s `cube(100,29,28)`
+  mesh (~487K tetrahedra) plus its per-element slit region-labeling pass
+  gets rebuilt from scratch on every single call regardless of how many
+  physical steps run inside it -- raising this amortizes that one-time
+  cost across more steps for free. **This is a first-pass default, not
+  yet calibrated against real mesh-vs-solve timing data** -- see the
+  profiling instrumentation below; tune it once you have real numbers
+  from the target machine.
+  - Not the same flag as `--max-steps`, which caps total *invocations*
+    for a ratio as an outer safety net -- easy to confuse, deliberately
+    different names.
+  - `transient_3d_slit.csv`/`diagnostics_3d_slit.csv` still get one row
+    per physical timestep regardless of this setting -- no time
+    resolution is lost. What changes is `n_steps` in `status.json`:
+    once this is >1, `n_steps` counts *invocations*, not physical
+    timesteps, so `n_steps` will undercount actual CSV rows by roughly
+    this factor. `wall_clock_seconds` is unaffected (still real elapsed
+    time).
+  - **Checkpoint safety**: the `.edp` now writes
+    `ckpt_3d_slit_transient.txt` after *every* physical step, not once
+    at the end of the invocation (this was a real correctness fix, not
+    just a nice-to-have -- with the old once-per-invocation write, a
+    crash/Condor-preemption partway through a multi-step invocation
+    would leave the CSV further ahead than the checkpoint, and
+    `--resume` would then re-write duplicate/overlapping `t` rows into
+    the CSV). Rewriting the checkpoint every step is cheap (a small text
+    file); the mesh -- the actual target of this optimization -- is
+    still only built once per invocation.
+  - **Verification before trusting a long run**: run one small smoke
+    test (`--steps-per-invocation 5 --max-steps 2 --label stepstest`)
+    and confirm `transient_3d_slit.csv` has the expected ~10 rows with
+    monotonically increasing `t` and no duplicates, and that a
+    `--resume` after killing it mid-invocation doesn't produce
+    duplicate/overlapping `t` rows either. `getARGV`'s `int` overload
+    (`getARGV("-steps-per-invocation", 1)`) is assumed to work the same
+    way its `real`/`string` overloads were confirmed to on this repo's
+    remote install -- not independently verified yet.
+
+## Profiling instrumentation (mesh-rebuild vs. solve cost)
+
+`step_3d_slit_transient_diag.edp` prints `[profile] ...` lines to stdout
+(and therefore `run.log`) on every invocation, added specifically to
+answer "is the per-invocation mesh rebuild actually worth optimizing" --
+CLAUDE.md's own testing discipline is to measure this kind of thing
+rather than assume it:
+- `[profile] meshBuild=...s materialsLoad=...s` -- once per invocation,
+  right after the mesh/materials `include`s. `meshBuild` is the
+  `cube()` call plus the slit region-labeling pass in
+  `hts_mesh_module_3d_slit.idp`; this is the cost `-steps-per-invocation`
+  amortizes.
+- `[profile] step=N elecSplit=...s pdeSolve=...s` -- once per physical
+  step. **`N` resets to 0 at the start of every invocation** (it's the
+  `.edp`'s local loop counter, not a global timestep index) -- with
+  `-steps-per-invocation 20`, expect `step=0` through `step=19` to
+  repeat in every invocation's `run.log` block, not keep climbing.
+  `elecSplit` is the per-x current-split bisection (nested bisections
+  over ~60 x-samples, non-trivial -- worth measuring separately from the
+  FEM solve rather than assuming the PDE solve dominates). `pdeSolve` is
+  just the `solve heatStep(...)` call.
+- `[profile] totalInvocation=...s` -- once per invocation, wall time
+  for the whole process including FreeFEM startup overhead not captured
+  by the other three (so `meshBuild + N*(elecSplit+pdeSolve)` will be
+  somewhat less than this).
+
+Uses FreeFEM's built-in `clock()` (CPU time, not wall clock -- fine for
+comparing relative costs within one invocation, but note it won't
+reflect I/O wait or multi-core effects if the underlying solver is
+threaded). Run a few invocations with `-steps-per-invocation` at its
+default and check whether `meshBuild` is actually a meaningful fraction
+of `totalInvocation` before investing further (e.g. mesh caching via
+`savemesh`/`readmesh3`) -- if it turns out `pdeSolve` or `elecSplit`
+dominates instead, amortizing the mesh won't move the needle much and
+effort should go there instead.
+
 - **No output for minutes at a time is normal, not a hang.** Each
   invocation rebuilds the mesh from scratch and solves one timestep —
   minutes, not seconds, per root `CLAUDE.md`. `run_transient.py` streams

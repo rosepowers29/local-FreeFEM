@@ -93,6 +93,16 @@ look for: check `tail run.log` for whether the last line is a clean
 error message (killed externally) — then `--resume` (see `CLAUDE.md`),
 backgrounded this time.
 
+**`--steps-per-invocation N`** (default 20) runs N physical timesteps per
+FreeFEM invocation instead of 1, amortizing the mesh-rebuild cost every
+process launch otherwise pays from scratch. CSV rows are still written
+every physical step (no data resolution lost) and the checkpoint is now
+written every step too (no crash-safety lost) — see `CLAUDE.md` for the
+full mechanics, the profiling instrumentation (`[profile] ...` lines in
+`run.log`) this default should eventually be tuned against, and why
+`n_steps` in `status.json` now means invocation count rather than
+physical-timestep count once this is above 1.
+
 If `FreeFem++` isn't on `PATH` (common for a from-source/home-directory
 install on a remote machine), point the wrapper at it instead of relying
 on shell aliases: `--freefem-bin /path/to/FreeFem++`, or set it once via
