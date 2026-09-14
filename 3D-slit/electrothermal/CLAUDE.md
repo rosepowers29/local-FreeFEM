@@ -200,26 +200,34 @@ This inverted the original hypothesis: mesh-rebuild amortization
 (`-steps-per-invocation`) is real but secondary; **the 87,870-DOF linear
 solve inside `solve heatStep(...)` is the actual bottleneck.**
 
-**`solver=CG` experiment (current state, unverified):** the bilinear
-form (`rhocpfun*T*w/dt + kfun*grad(T)*grad(w)`) is symmetric
-positive-definite, but the statement previously specified no `solver=`
-at all, falling back to FreeFEM's generic default -- a likely mismatch
-for an SPD system of this size. Added `solver=CG` to
-`solve heatStep(T, w, solver=CG)`. This is a pure linear-algebra change
-(same discretization, same equations) but is **not yet verified** for
-either speedup or correctness on the target machine. Before trusting it:
-1. Compare the new `pdeSolve` timing against the `116.5s` baseline above
-   for the same first step of the same ratio.
-2. Compare `Tmax`/`fracLeft` in `transient_3d_slit.csv` row-for-row
-   against a checkpoint produced by the pre-`solver=CG` version, for the
-   same ratio -- FreeFEM's default CG convergence tolerance should be
-   tight enough not to visibly change results, but that's an assumption
-   to confirm, not take on faith.
-3. If CG converges poorly or not at all (heterogeneous coefficients
-   across 7 regions could hurt conditioning), FreeFEM will either error
-   out or silently return a poorly-converged solution -- watch for
-   `Tmax`/`fracLeft` diverging from the known-good baseline trajectory,
-   not just a clean exit code.
+**`solver=CG` experiment -- round 1 result (measured, on the real remote
+install, ratio=0.7, step 0): a regression.** The bilinear form
+(`rhocpfun*T*w/dt + kfun*grad(T)*grad(w)`) is symmetric positive-definite,
+and the statement previously specified no `solver=` at all (generic
+default). `solve heatStep(T, w, solver=CG)` gave the *correct* answer
+(`Tmax=77 TmaxL=77 TmaxR=77 fracLeft=0.5` at t=0, matching the
+pre-change baseline exactly) but was **slower**: `pdeSolve=126.238s` vs.
+the `116.5s` baseline, an ~8% regression. FreeFEM's own `GC:` log line
+showed why: 10,293 unpreconditioned CG iterations to reach a residual of
+`1.47727e-32` -- roughly 26 orders of magnitude past what a FEM solve
+actually needs (discretization error alone dwarfs that). That's a
+tolerance problem, not necessarily proof CG is a bad fit for this system.
+
+**Round 2 (current state, unverified):** loosened to
+`solve heatStep(T, w, solver=CG, eps=1e-6)` to test whether a
+FEM-appropriate tolerance recovers a real speedup without materially
+changing the solution. Verify the same way as round 1: compare the new
+`pdeSolve` timing against both `116.5s` (original) and `126.2s` (round
+1), and confirm `Tmax`/`fracLeft` still match at t=0. **If this still
+isn't a clear win, revert to no `solver=`/`eps=` clause at all** (the
+original, unmodified statement) rather than continue tuning blind --
+the heterogeneous coefficients across the 7 material regions (orders of
+magnitude apart, e.g. buffer's placeholder `sigmaBuf=1e-10 S/m`) could
+mean this system is just poorly conditioned for unpreconditioned CG
+regardless of tolerance, in which case a preconditioner or a different
+direct solver would be the next thing to try -- but that's a bigger
+lift than a one-line parameter change and shouldn't be pursued
+speculatively without more evidence.
 
 - **No output for minutes at a time is normal, not a hang.** Each
   invocation rebuilds the mesh from scratch and solves one timestep —
