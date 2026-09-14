@@ -189,12 +189,37 @@ rather than assume it:
 Uses FreeFEM's built-in `clock()` (CPU time, not wall clock -- fine for
 comparing relative costs within one invocation, but note it won't
 reflect I/O wait or multi-core effects if the underlying solver is
-threaded). Run a few invocations with `-steps-per-invocation` at its
-default and check whether `meshBuild` is actually a meaningful fraction
-of `totalInvocation` before investing further (e.g. mesh caching via
-`savemesh`/`readmesh3`) -- if it turns out `pdeSolve` or `elecSplit`
-dominates instead, amortizing the mesh won't move the needle much and
-effort should go there instead.
+threaded).
+
+**Measured on the real remote install (ratio=0.7, step 0):**
+`meshBuild=13.99s`, `materialsLoad=0.0015s`, `elecSplit=0.0027s`,
+`pdeSolve=116.5s`. The PDE solve is completely dominant -- ~89% of even
+this first step's total (which includes the one-time mesh cost), and
+effectively 100% of every later step within a multi-step invocation.
+This inverted the original hypothesis: mesh-rebuild amortization
+(`-steps-per-invocation`) is real but secondary; **the 87,870-DOF linear
+solve inside `solve heatStep(...)` is the actual bottleneck.**
+
+**`solver=CG` experiment (current state, unverified):** the bilinear
+form (`rhocpfun*T*w/dt + kfun*grad(T)*grad(w)`) is symmetric
+positive-definite, but the statement previously specified no `solver=`
+at all, falling back to FreeFEM's generic default -- a likely mismatch
+for an SPD system of this size. Added `solver=CG` to
+`solve heatStep(T, w, solver=CG)`. This is a pure linear-algebra change
+(same discretization, same equations) but is **not yet verified** for
+either speedup or correctness on the target machine. Before trusting it:
+1. Compare the new `pdeSolve` timing against the `116.5s` baseline above
+   for the same first step of the same ratio.
+2. Compare `Tmax`/`fracLeft` in `transient_3d_slit.csv` row-for-row
+   against a checkpoint produced by the pre-`solver=CG` version, for the
+   same ratio -- FreeFEM's default CG convergence tolerance should be
+   tight enough not to visibly change results, but that's an assumption
+   to confirm, not take on faith.
+3. If CG converges poorly or not at all (heterogeneous coefficients
+   across 7 regions could hurt conditioning), FreeFEM will either error
+   out or silently return a poorly-converged solution -- watch for
+   `Tmax`/`fracLeft` diverging from the known-good baseline trajectory,
+   not just a clean exit code.
 
 - **No output for minutes at a time is normal, not a hang.** Each
   invocation rebuilds the mesh from scratch and solves one timestep —

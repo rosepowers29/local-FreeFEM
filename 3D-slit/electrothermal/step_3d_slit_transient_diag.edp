@@ -304,7 +304,17 @@ real t = 0.0;
     kfun = kOf(region, Told);
     rhocpfun = rhoCpOf(region, Told);
 
-    solve heatStep(T, w) =
+    // solver=CG: the bilinear form here (mass/dt + diffusion) is symmetric
+    // positive-definite, but this statement previously specified no solver
+    // at all -- profiling on the real remote install showed the unspecified
+    // default costing 116.5s for this 87,870-DOF system, ~89% of total
+    // per-step time (vs. 14s one-time mesh rebuild), so a generic
+    // (presumably LU-family) solver is a strong suspect for being
+    // mismatched to the SPD structure here. EXPERIMENTAL -- not yet
+    // verified for speed or correctness on the target machine; compare
+    // pdeSolve timing and Tmax/T-field output against the prior behavior
+    // before trusting this for real data (see CLAUDE.md).
+    solve heatStep(T, w, solver=CG) =
         int3d(Th3)( rhocpfun*T*w/dt + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
       - int3d(Th3)( rhocpfun*Told*w/dt + source*w )
       - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
