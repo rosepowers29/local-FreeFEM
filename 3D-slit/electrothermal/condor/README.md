@@ -53,11 +53,27 @@ for what's meant to be a quick sanity check.
    # then log in (--password-stdin keeps the token out of shell history)
    echo <your-token> | docker login ghcr.io -u rosepowers29 --password-stdin
 
-   docker build -t ghcr.io/rosepowers29/local-freefem-electrothermal:latest .
-   docker push ghcr.io/rosepowers29/local-freefem-electrothermal:latest
+   docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+       -t ghcr.io/rosepowers29/local-freefem-electrothermal:latest --push .
    # or, if your pool wants a .sif instead of a Docker reference:
    apptainer build image.sif docker://ghcr.io/rosepowers29/local-freefem-electrothermal:latest
    ```
+   **`--platform linux/amd64` is required if you build on anything other
+   than an x86_64 machine (e.g. an Apple Silicon Mac).** Without it,
+   `docker build` defaults to the *host* architecture regardless of what
+   the base image supports -- this bit us once already: building on an
+   ARM64 Mac silently produced and pushed an `arm64` image even though
+   `freefem/freefem` is amd64-only, which Condor's Apptainer/Singularity
+   execute nodes then rejected with `FATAL: ... no child with platform
+   linux/amd64 in index ...` (a real error, not a fluke -- verified with
+   `docker buildx imagetools inspect` before and after the fix). Condor
+   execute nodes are essentially always x86_64, so `--platform
+   linux/amd64` is what you want regardless of your own machine's
+   architecture. `--provenance=false --sbom=false` additionally avoids
+   embedding build-attestation manifests in the pushed image index --
+   a separate, known compatibility issue for some Apptainer/Singularity
+   versions' manifest-list parsing, worth avoiding defensively even
+   though the platform fix above was this session's actual root cause.
    After the first push, go to the package's GitHub page (Package
    settings -> Change visibility) and make it **public** -- new GHCR
    packages default to private, and Condor execute nodes have no
