@@ -10,7 +10,12 @@ universe        = container
 # version -- if it instead expects `universe = docker` (Docker-only) or
 # vanilla universe + `+SingularityImage`/`+SingularityBind` (Apptainer-
 # only), ask pool admins which applies and swap this block accordingly.
-container_image = docker://<your-registry>/<your-image>:<tag>
+container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal:latest
+
+# The published image is amd64-only (confirmed: no aarch64 variant) --
+# guarantee it never lands on a non-x86_64 execute node, in case this
+# pool has any in the mix.
+requirements = (Arch == "X86_64")
 
 executable      = condor_run_ratio.sh
 # --ramp-rate/--ramp-dt: validated safe together (see ../CLAUDE.md) --
