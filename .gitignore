@@ -3,3 +3,8 @@
 *.DS_store
 *.gif
 3D-slit/electrothermal/runs/
+3D-slit/electrothermal/condor/payload.tar.gz
+3D-slit/electrothermal/condor/_payload_build/
+3D-slit/electrothermal/condor/ratios.txt
+3D-slit/electrothermal/condor/work/
+3D-slit/electrothermal/condor/logs/

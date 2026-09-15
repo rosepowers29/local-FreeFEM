@@ -1,0 +1,37 @@
+# Condor submit file: one job per current ratio, ratio-level parallelism
+# (embarrassingly parallel -- each ratio is fully independent, isolated
+# into its own runs/<label>/ by run_transient.py already). See
+# condor/README.md before submitting a real sweep with this.
+
+universe        = container
+# Unified container syntax (HTCondor 9.0+): container_image accepts both
+# a Docker reference (docker://registry/image:tag) and a local Apptainer/
+# Singularity .sif path. UNVERIFIED against this pool's actual HTCondor
+# version -- if it instead expects `universe = docker` (Docker-only) or
+# vanilla universe + `+SingularityImage`/`+SingularityBind` (Apptainer-
+# only), ask pool admins which applies and swap this block accordingly.
+container_image = docker://<your-registry>/<your-image>:<tag>
+
+executable      = condor_run_ratio.sh
+# --ramp-rate/--ramp-dt: validated safe together (see ../CLAUDE.md) --
+# never raise --ramp-rate without also raising --ramp-dt, or every job
+# pays the 2.5x-4.3x ramp-phase step-count penalty this was meant to avoid.
+arguments       = $(ratio) $(label) --ramp-rate 20 --ramp-dt 999
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files    = payload.tar.gz
+transfer_output_files   = work/runs/$(label)
+
+# First-pass guesses, NOT measured against a real job on this pool -- run
+# one job, check its actual usage (condor_q -long, or the job's .log
+# after completion), and tune before trusting a full unattended sweep.
+request_cpus   = 1
+request_memory = 4096M
+request_disk   = 2048M
+
+output = logs/$(label).out
+error  = logs/$(label).err
+log    = logs/$(label).log
+
+queue ratio,label from ratios.txt

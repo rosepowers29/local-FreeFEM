@@ -235,8 +235,47 @@ unpreconditioned CG needed 10k+ iterations) or a different *direct*
 solver (`solver=UMFPACK`/`solver=MUMPS` if available) rather than
 another iterative-solver guess. Until then, the validated levers for
 wall-clock are `-steps-per-invocation` (saves the ~14s mesh-rebuild cost
-per invocation avoided) and parallelizing across current ratios
-(Condor) -- both already understood, unlike solver tuning.
+per invocation avoided), the ramp-dt coarsening below, and parallelizing
+across current ratios (Condor -- see `condor/README.md`) -- all already
+understood, unlike solver tuning.
+
+## Ramp rate / ramp-dt (`-ramprate`/`-rampdt`, `--ramp-rate`/`--ramp-dt`) -- validated
+
+Added for a collaborator-requested slow ~20 A/s current ramp (replacing
+the original fixed 0.5s ramp duration, which implied 311-616 A/s
+depending on ratio). `-ramprate` (A/s, default 0.0 = today's fixed 0.5s
+Tramp) derives `Tramp = I0Target/ramprate` instead when set >0.
+`-rampdt` (default 0.05, today's exact value) sets the timestep used
+only during the ramp phase, independently of `-ramprate`.
+
+**Why `-rampdt` matters once `-ramprate` is used**: at a fixed
+0.05s ramp-phase dt, a 20 A/s ramp needs 2.5x-4.3x more ramp-phase steps
+than today's ramp (more for higher ratios, since a higher I0Target needs
+longer to reach at a fixed rate, computed against the real
+`IcRebcoActual~=310.96A` backed out of this repo's sweep data). Every
+one of those extra steps costs a full ~116.5s PDE solve.
+
+**Validated on the real remote install (ratio=0.7, ramprate=20 ->
+Tramp=10.8836s):** compared `rampDt=1.0s` (~11 steps) against
+`rampDt=999` (single step covering the entire ramp). Result: **identical**
+at the ramp-end row (t=10.8836): `Tmax=77 TmaxLeft=77 TmaxRight=77
+fracLeft=0.5` in both. Rows just after (already into the pulse phase)
+differ only at the 4th-5th significant digit (e.g. `fracLeft=0.0383638`
+vs `0.038363`) -- floating-point/solver-ordering noise, not a
+time-discretization error, since both runs enter the pulse phase from
+the exact same uniform-77.0K state. **The entire ramp phase can be
+collapsed to a single step regardless of duration.** This fully
+neutralizes the wall-clock cost of slowing the ramp -- total steps per
+ratio returns to roughly the original ~90-100 (1 collapsed ramp step +
+the ~90 pulse/post-pulse/late-phase steps, which are unaffected by
+ramp rate) instead of scaling with ramp duration.
+
+**For production runs, `-ramprate`/`--ramp-rate` and `-rampdt`/
+`--ramp-dt` do NOT auto-couple** -- they're independent flags. Using
+`--ramp-rate 20` without also raising `--ramp-dt` well above the
+resulting `Tramp` (e.g. `--ramp-dt 999`, safe per the validation above)
+silently pays the full 2.5x-4.3x step-count penalty this section exists
+to avoid. Always set both together for the slow-ramp scenario.
 
 - **No output for minutes at a time is normal, not a hang.** Each
   invocation rebuilds the mesh from scratch and solves one timestep —

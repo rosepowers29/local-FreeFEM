@@ -103,6 +103,17 @@ full mechanics, the profiling instrumentation (`[profile] ...` lines in
 `n_steps` in `status.json` now means invocation count rather than
 physical-timestep count once this is above 1.
 
+**`--ramp-rate A_PER_S --ramp-dt SECONDS`** — for a slower current ramp
+(e.g. a collaborator-requested ~20 A/s instead of the original fixed
+0.5s ramp): `--ramp-rate` sets the target rate (0 = original 0.5s ramp,
+the default), `--ramp-dt` sets the timestep used only during the ramp
+phase. **Always set both together** — validated safe (see `CLAUDE.md`)
+to collapse the entire ramp into a single step regardless of duration by
+setting `--ramp-dt` comfortably larger than the resulting ramp duration
+(e.g. `--ramp-dt 999`); leaving `--ramp-dt` at its default `0.05` while
+raising `--ramp-rate` pays a 2.5x-4.3x step-count penalty for no reason.
+Example: `--ramp-rate 20 --ramp-dt 999`.
+
 If `FreeFem++` isn't on `PATH` (common for a from-source/home-directory
 install on a remote machine), point the wrapper at it instead of relying
 on shell aliases: `--freefem-bin /path/to/FreeFem++`, or set it once via
@@ -119,6 +130,14 @@ still off-parity). `sweep_transient.py` aggregates every ratio's
 `status.json` into `runs/summary.csv`. Re-running a label moves the
 existing directory aside (`runs/<label>.bak.<timestamp>/`) rather than
 deleting it — pass `--force` to delete instead. `runs/` is gitignored.
+
+## Condor sweep (ratio-level parallelism)
+
+`condor/` has a from-scratch, untested-but-buildable Condor submission
+setup for running many ratios in parallel on CPU slots -- one job per
+ratio, packaged for sandboxed (no shared-filesystem) execute nodes via a
+container. See `condor/README.md` for the full setup and known
+limitations before using it for a real sweep.
 
 ## HDF5 handoff export
 
