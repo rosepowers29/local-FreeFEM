@@ -94,9 +94,15 @@ for what's meant to be a quick sanity check.
      hours (~90-100 steps x ~116.5s/step PDE solve floor, see
      `../CLAUDE.md`'s profiling section) -- some pools require special
      queueing/walltime flags for jobs this long.
-3. `sweep.sub` already points at
-   `ghcr.io/rosepowers29/local-freefem-electrothermal:latest` -- update
-   it only if you push under a different name/tag.
+3. `sweep.sub` pins the image to the specific digest validated in this
+   session (`@sha256:8b39db74c15...`), not the mutable `:latest` tag --
+   deliberate, so a big batch sitting in queue for hours can't silently
+   end up split across two different image versions if the image gets
+   rebuilt mid-sweep. **If you rebuild and push a new image**, get the
+   new digest with `docker buildx imagetools inspect
+   ghcr.io/rosepowers29/local-freefem-electrothermal:latest` and update
+   `container_image` in `sweep.sub` to match -- don't just leave the old
+   digest pinned by accident.
 
 ## Per-sweep steps
 

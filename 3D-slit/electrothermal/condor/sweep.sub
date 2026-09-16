@@ -10,7 +10,7 @@ universe        = container
 # version -- if it instead expects `universe = docker` (Docker-only) or
 # vanilla universe + `+SingularityImage`/`+SingularityBind` (Apptainer-
 # only), ask pool admins which applies and swap this block accordingly.
-container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal:latest
+container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal@sha256:8b39db74c15d90180fb623cda03211d434ce619cd3786c3abbd37de930aed37c
 
 # The published image is amd64-only (confirmed: no aarch64 variant) --
 # guarantee it never lands on a non-x86_64 execute node, in case this
@@ -38,5 +38,12 @@ request_disk   = 2048M
 output = logs/$(label).out
 error  = logs/$(label).err
 log    = logs/$(label).log
+# Without these, Condor buffers stdout/stderr and only writes them once
+# the job exits -- given a single ratio takes on the order of hours (see
+# README.md), that makes `logs/$(label).out` useless for checking on a
+# still-running job. With them, it updates live, same rationale as
+# run_transient.py's own streaming fix for the analogous local problem.
+stream_output = True
+stream_error  = True
 
 queue ratio,label from ratios.txt
