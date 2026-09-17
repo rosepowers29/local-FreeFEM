@@ -109,8 +109,8 @@ for what's meant to be a quick sanity check.
 ```bash
 cd 3D-slit/electrothermal/condor
 ./make_payload.sh                                     # packages payload.tar.gz
-python3 make_ratios_list.py 0.9 0.925 0.95             # writes ratio,label pairs
-python3 make_ratios_list.py 0.9 0.925 0.95 > ratios.txt
+python3 make_ratios_list.py 0.9 0.925 0.95 > ratios.txt        # explicit list
+python3 make_ratios_list.py --range 0.90 0.95 0.005 > ratios.txt  # or a range (inclusive stop)
 mkdir -p logs
 condor_submit sweep.sub
 condor_q                                               # watch progress
