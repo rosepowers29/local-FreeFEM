@@ -37,6 +37,17 @@ DEFAULT_RUNAWAY_TMAX = 900.0
 DEFAULT_DEVIATION_EPS = 0.01
 DEFAULT_RECOVER_EPS = 0.002
 DEFAULT_RECOVER_HOLD_TIME = 0.1
+# Real bug caught by inspecting a "settled" result's own Tmax (ratio=0.91,
+# 20A/s ramp sweep): fracLeft can return to ~0.5 not because the quench
+# recovered, but because BOTH sides have gone symmetrically resistive in a
+# full-tape thermal runaway -- Tmax was 870K (climbing ~650K/s, nowhere
+# near turning over) when the deviation-only check declared "settled".
+# 90.0 = Tc (matches plot_slit_transient.py's --tc default and the REBCO
+# Tc used throughout this repo) -- every genuine recovery seen in real
+# data so far has stayed under ~85K; anything at/above Tc is definitely
+# non-superconducting and not a safe "settled" state regardless of how
+# symmetric the current split looks.
+DEFAULT_SETTLE_TMAX_MAX = 90.0
 DEFAULT_MAX_STEPS = 500
 # Calibrated against a real run (ratio=0.70): deviation relaxed smoothly
 # from a peak of ~0.474 to ~0.016 with a decay time constant of ~0.75s,
@@ -190,7 +201,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             force=False, freefem_bin=None, trend_window=DEFAULT_TREND_WINDOW,
             trend_eps=DEFAULT_TREND_EPS, resume=False,
             steps_per_invocation=DEFAULT_STEPS_PER_INVOCATION,
-            ramp_rate=DEFAULT_RAMP_RATE, ramp_dt=DEFAULT_RAMP_DT):
+            ramp_rate=DEFAULT_RAMP_RATE, ramp_dt=DEFAULT_RAMP_DT,
+            settle_tmax_max=DEFAULT_SETTLE_TMAX_MAX):
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -271,7 +283,11 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             if deviation > deviation_eps:
                 has_deviated = True
 
-            if has_deviated and deviation < recover_eps:
+            # Both deviation AND tmax must be satisfied -- deviation alone
+            # is not sufficient (see DEFAULT_SETTLE_TMAX_MAX above): a
+            # symmetric full-tape runaway can pass the deviation check
+            # while very much not being safe.
+            if has_deviated and deviation < recover_eps and tmax < settle_tmax_max:
                 if recover_since is None:
                     recover_since = t
                 elif t - recover_since >= recover_hold_time:
@@ -336,6 +352,12 @@ def main():
     p.add_argument("--recover-hold-time", type=float, default=DEFAULT_RECOVER_HOLD_TIME,
                    help=f"Simulated seconds the split must stay recovered "
                         f"before declaring settled (default: {DEFAULT_RECOVER_HOLD_TIME})")
+    p.add_argument("--settle-tmax-max", type=float, default=DEFAULT_SETTLE_TMAX_MAX,
+                   help=f"Tmax (K) must ALSO be below this for a run to be "
+                        f"declared settled, not just a recovered current split "
+                        f"-- a symmetric full-tape runaway can otherwise pass the "
+                        f"deviation-only check (default: {DEFAULT_SETTLE_TMAX_MAX}, "
+                        f"i.e. Tc)")
     p.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS,
                    help=f"Safety cap on invocations for this ratio "
                         f"(default: {DEFAULT_MAX_STEPS})")
@@ -386,7 +408,8 @@ def main():
     run_one(args.ratio, label, args.base_dir, args.runaway_tmax, args.deviation_eps,
             args.recover_eps, args.recover_hold_time, args.max_steps, args.force,
             args.freefem_bin, args.trend_window, args.trend_eps, args.resume,
-            args.steps_per_invocation, args.ramp_rate, args.ramp_dt)
+            args.steps_per_invocation, args.ramp_rate, args.ramp_dt,
+            args.settle_tmax_max)
 
 
 if __name__ == "__main__":

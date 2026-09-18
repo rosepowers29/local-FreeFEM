@@ -45,9 +45,27 @@ import plot_slit_transient as pst
 import plot_diagnostics_3d_slit as pds
 import run_transient as rt
 
-PULSE_START = 0.5
-PULSE_DUR = 0.01
+PULSE_START = 0.5   # fallback only -- see detect_pulse_start()
+PULSE_DUR = 0.01    # fixed regardless of ramp scenario (tPulseDur in the .edp)
 TC = 90.0
+
+
+def detect_pulse_start(transient, default=PULSE_START):
+    # Pulse start == Tramp, which is fixed at 0.5s only when --ramp-rate
+    # is unused -- a slow-ramp run (--ramp-rate 20, say) has a different
+    # Tramp per ratio (I0Target/ramp_rate), so a hardcoded PULSE_START
+    # would shade the wrong region entirely for those runs. Detected
+    # directly from the run's own I0(t) plateau instead of assumed, so
+    # this stays correct for both the fixed- and variable-ramp scenarios
+    # without needing to know which one produced this data.
+    t, I0 = transient.get("t"), transient.get("I0")
+    if t is None or I0 is None or len(I0) == 0:
+        return default
+    i0max = np.max(I0)
+    if i0max <= 0:
+        return default
+    idx = int(np.argmax(I0 >= 0.999 * i0max))
+    return float(t[idx])
 
 # raw `status` values that need no further interpretation to be meaningful
 # on a plot legend -- everything else (reached_end_deviated,
@@ -75,6 +93,8 @@ OUTCOME_COLORS = {
     "plateaued off-parity": "tab:purple",
     "diverging (pre-runaway)": "tab:orange",
     "runaway": "tab:red",
+    "falsely settled (still runaway)": "darkred",
+    "falsely recovering (still runaway)": "firebrick",
     "no deviation": "tab:blue",
     "crashed": "black",
     "init failed": "black",
@@ -82,6 +102,17 @@ OUTCOME_COLORS = {
     "no data": "black",
     "max steps exceeded": "gray",
 }
+
+# Real bug (caught by inspecting a "settled" result's own Tmax, ratio=0.91
+# in the 20A/s ramp sweep): run_transient.py's settled check used to look
+# only at fracLeft, so a symmetric full-tape runaway (both sides going
+# resistive together, re-symmetrizing the current split while Tmax climbs
+# unchecked) could pass it. Fixed in run_transient.py going forward
+# (settle_tmax_max, default 90.0 == Tc) -- this constant lets already-
+# collected "settled" results from before that fix get relabeled here too,
+# rather than either trusting a known-wrong label or silently discarding
+# old data.
+SETTLE_TMAX_SAFE = rt.DEFAULT_SETTLE_TMAX_MAX
 
 
 def recompute_trend(t, frac_left, trend_window=rt.DEFAULT_TREND_WINDOW, trend_eps=rt.DEFAULT_TREND_EPS):
@@ -105,6 +136,27 @@ def effective_trend(run):
     return recompute_trend(run["transient"]["t"], run["transient"]["fracLeft"])
 
 
+# Second instance of the exact same confound that produced the "settled"
+# bug (see SETTLE_TMAX_SAFE above): classify_trend() only ever looks at
+# |fracLeft-0.5|, so a symmetric full-tape runaway re-symmetrizing the
+# current split reads as "converging" (deviation shrinking) even while
+# Tmax is still climbing hundreds of K/s. Caught by direct inspection of
+# the granular 0.90-0.911 sweep: r0p904-r0p911 all carry
+# status=reached_end_deviated / trend=converging (-> "recovering
+# (asymptotic)") despite Tmax still rising at ~645-652 K/s at the last
+# recorded row -- not remotely recovering. classify_trend() is reused
+# here on raw Tmax instead of |fracLeft-0.5|; its slope-sign convention
+# (positive slope -> "diverging") happens to mean exactly the right thing
+# for Tmax too (still heating up), no change to the function needed.
+def recompute_tmax_trend(t, tmax, trend_window=rt.DEFAULT_TREND_WINDOW, trend_eps=rt.DEFAULT_TREND_EPS):
+    if len(t) < 2:
+        return None
+    final_t = t[-1]
+    mask = (final_t - t) <= trend_window
+    buf = list(zip(t[mask], tmax[mask]))
+    return rt.classify_trend(buf, trend_eps)
+
+
 def outcome_label(run):
     # `status` alone conflates "still off-parity at tEnd" with three very
     # different physical stories (still asymptotically recovering /
@@ -112,10 +164,16 @@ def outcome_label(run):
     # this resolves that using the trend classifier before it ever reaches
     # a legend, rather than showing the ambiguous raw status string.
     status = run["status"]
+    if status == "settled" and run.get("final_Tmax", 0.0) >= SETTLE_TMAX_SAFE:
+        return "falsely settled (still runaway)"
     if status in OUTCOME_LABELS:
         return OUTCOME_LABELS[status]
     if status in ("reached_end_deviated", "plateaued_off_parity"):
         trend = effective_trend(run)
+        if (trend in ("converging", "plateaued")
+                and run.get("final_Tmax", 0.0) >= SETTLE_TMAX_SAFE
+                and recompute_tmax_trend(run["transient"]["t"], run["transient"]["Tmax"]) == "diverging"):
+            return "falsely recovering (still runaway)"
         return TREND_LABELS.get(trend, status)
     return status
 
@@ -171,20 +229,69 @@ def ratio_color(ratio, ratios):
     return plt.get_cmap("plasma")(0.15 + 0.75 * frac)
 
 
-def make_summary_timeseries(runs, outpath, col, ylabel, title):
+# Above this many runs, a one-legend-entry-per-ratio legend (the original
+# design, fine for the 6- and 20-ratio sweeps this was built against)
+# stops being legend-sized and starts being large enough to cover the
+# entire plot -- confirmed visually on the 108-ratio granular sweep, where
+# it rendered as a multi-column block blotting out the whole figure. Past
+# this threshold, swap to a colorbar (ratio is already continuously color-
+# mapped via ratio_color/plasma, so this loses no information) and skip
+# the per-line legend entirely.
+MANY_RUNS_LEGEND_CUTOFF = 20
+
+
+def compute_zoom_xlim(runs, pre_margin=0.5, post_margin=0.5):
+    # The flat pre-pulse soak (everything sitting at ~77-80K) can eat most
+    # of a fixed-width time axis once ratios span a wide range (pulse start
+    # itself varies by ratio once --ramp-rate is used, e.g. 10.9s-23.3s
+    # across the 0.7-1.5xIc granular sweep) -- cropping to just before the
+    # earliest pulse through just after the latest run's last recorded row
+    # stretches the actual rise/fall dynamics across the full plot width
+    # instead of squeezing them into a corner. Computed from the data
+    # rather than hardcoded so this stays correct for any sweep's actual
+    # ramp/pulse timing, not just this one.
+    pulse_starts = [detect_pulse_start(r["transient"]) for r in runs]
+    final_ts = [r["transient"]["t"][-1] for r in runs]
+    return max(0.0, min(pulse_starts) - pre_margin), max(final_ts) + post_margin
+
+
+def make_summary_timeseries(runs, outpath, col, ylabel, title, log_y=False, xlim=None):
     fig, ax = plt.subplots(figsize=(10, 6))
     ratios = [r["ratio"] for r in runs]
+    many_runs = len(runs) > MANY_RUNS_LEGEND_CUTOFF
     for r in sorted(runs, key=lambda r: r["ratio"]):
         color = ratio_color(r["ratio"], ratios)
+        label = None if many_runs else f"{r['ratio']:.2f}xIc ({outcome_label(r)})"
         ax.plot(r["transient"]["t"], r["transient"][col], color=color, linewidth=1.4,
-                label=f"{r['ratio']:.2f}xIc ({outcome_label(r)})")
+                label=label)
     if col == "fracLeft":
         ax.axhline(0.5, color="gray", linestyle="--", alpha=0.5)
-    ax.axvspan(PULSE_START, PULSE_START + PULSE_DUR, color="red", alpha=0.08, label="heater pulse")
+    # A single shared shaded band only makes sense if every ratio's pulse
+    # actually fires at the same time -- true for the fixed-Tramp scenario,
+    # false once --ramp-rate varies Tramp (and therefore the pulse time)
+    # per ratio. Drawing one band in that case would shade the wrong
+    # region for every ratio except whichever's pulse happens to match it.
+    pulse_starts = [detect_pulse_start(r["transient"]) for r in runs]
+    if max(pulse_starts) - min(pulse_starts) < 1e-6:
+        ax.axvspan(pulse_starts[0], pulse_starts[0] + PULSE_DUR, color="red", alpha=0.08,
+                   label="heater pulse")
+    else:
+        print(f"  (pulse timing varies by ratio in this sweep -- not shown as a "
+              f"shared band on {outpath.name})")
     ax.set_xlabel("time [s]")
     ax.set_ylabel(ylabel)
     ax.set_title(title, fontsize=13)
-    ax.legend(loc="best", fontsize=8, ncol=2)
+    if log_y:
+        ax.set_yscale("log")
+    if xlim:
+        ax.set_xlim(xlim)
+    if many_runs:
+        sm = plt.cm.ScalarMappable(cmap="plasma",
+                                    norm=plt.Normalize(vmin=min(ratios), vmax=max(ratios)))
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label="transport current ratio (I0 / Ic)")
+    else:
+        ax.legend(loc="best", fontsize=8, ncol=2)
     fig.tight_layout()
     fig.savefig(outpath, dpi=150)
     plt.close(fig)
@@ -217,11 +324,12 @@ def per_ratio_plots(run, outdir, with_animation):
     outdir.mkdir(parents=True, exist_ok=True)
     label = run["label"]
     data = run["transient"]
-    pulse_end = PULSE_START + PULSE_DUR
+    pulse_start = detect_pulse_start(data)
+    pulse_end = pulse_start + PULSE_DUR
 
-    pst.make_full_timeline_plot(data, PULSE_START, pulse_end, TC,
+    pst.make_full_timeline_plot(data, pulse_start, pulse_end, TC,
                                  outdir / "chart_slit_transient_full.png", label)
-    pst.make_zoom_plot(data, PULSE_START, pulse_end, TC, 0.002, 0.08,
+    pst.make_zoom_plot(data, pulse_start, pulse_end, TC, 0.002, 0.08,
                         outdir / "chart_slit_transient_zoom.png", label)
 
     diag, positions = run["diagnostics"], run["positions"]
@@ -234,23 +342,23 @@ def per_ratio_plots(run, outdir, with_animation):
 
     pds.make_multiseries_plot(diag, taps_left, taps_right, "Voltage tap reading",
                                f"{label}: All Voltage Taps", outdir / "chart_diagnostics_voltages.png",
-                               PULSE_START, pulse_end, unit_scale=1e6, unit_label=" [µV]")
+                               pulse_start, pulse_end, unit_scale=1e6, unit_label=" [µV]")
     pds.make_multiseries_plot(diag, rtd_left, rtd_right, "RTD temperature",
                                f"{label}: All RTD Sensors", outdir / "chart_diagnostics_temperatures.png",
-                               PULSE_START, pulse_end, unit_scale=1.0, unit_label=" [K]")
+                               pulse_start, pulse_end, unit_scale=1.0, unit_label=" [K]")
 
     has_bfield = pds.bfield_is_real(diag)
     bfield_scale, bfield_label = (1.0, " [T]")
     if has_bfield:
         bfield_scale, bfield_label = pds.auto_bfield_unit(diag)
         _Lx, _width, xHeater = pds.get_geometry(positions)
-        pds.make_bfield_plot(diag, outdir / "chart_diagnostics_bfield.png", PULSE_START, pulse_end,
+        pds.make_bfield_plot(diag, outdir / "chart_diagnostics_bfield.png", pulse_start, pulse_end,
                               bfield_scale, bfield_label, xHeater)
     else:
         print(f"  [{label}] H1/H2 still -999 sentinel -- skipping bfield chart (expected, no-B-field workflow)")
 
     pds.make_lr_comparison_plot(diag, taps_left, taps_right, rtd_left, rtd_right,
-                                 outdir / "chart_diagnostics_lr_comparison.png", PULSE_START, pulse_end,
+                                 outdir / "chart_diagnostics_lr_comparison.png", pulse_start, pulse_end,
                                  include_bfield=has_bfield, bfield_unit_scale=bfield_scale,
                                  bfield_unit_label=bfield_label)
 
@@ -258,10 +366,10 @@ def per_ratio_plots(run, outdir, with_animation):
         Lx, width, xHeater = pds.get_geometry(positions)
         pds.make_animation(diag, taps_left, taps_right, Lx, width, xHeater,
                             f"{label}: Voltage Tap Evolution", "Voltage [µV]",
-                            outdir / "anim_diagnostics_voltage.gif", PULSE_START, pulse_end, unit_scale=1e6)
+                            outdir / "anim_diagnostics_voltage.gif", pulse_start, pulse_end, unit_scale=1e6)
         pds.make_animation(diag, rtd_left, rtd_right, Lx, width, xHeater,
                             f"{label}: RTD Temperature Evolution", "Temperature [K]",
-                            outdir / "anim_diagnostics_temperature.gif", PULSE_START, pulse_end, unit_scale=1.0)
+                            outdir / "anim_diagnostics_temperature.gif", pulse_start, pulse_end, unit_scale=1.0)
 
 
 def main():
@@ -295,6 +403,18 @@ def main():
                              "Current fraction on heated side", "fracLeft(t) Across Transport Current Ratios")
     make_summary_timeseries(runs, outdir / "chart_summary_tmax_vs_t.png", "Tmax",
                              "Tmax [K]", "Tmax(t) Across Transport Current Ratios")
+    # log-y: recoveries (Tmax drifting a few K around ~80K) and runaways
+    # (Tmax climbing hundreds of K/s up past 1000K) sit at wildly different
+    # scales -- linear axis on chart_summary_tmax_vs_t.png flattens every
+    # recovering ratio into an indistinguishable line near the bottom. Log
+    # scale keeps both regimes' shapes visible in the same window.
+    make_summary_timeseries(runs, outdir / "chart_summary_tmax_vs_t_log.png", "Tmax",
+                             "Tmax [K] (log scale)", "Tmax(t) Across Transport Current Ratios (log scale)",
+                             log_y=True)
+    zoom_xlim = compute_zoom_xlim(runs)
+    make_summary_timeseries(runs, outdir / "chart_summary_tmax_vs_t_zoom.png", "Tmax",
+                             "Tmax [K]", "Tmax(t) Across Transport Current Ratios (zoomed)",
+                             xlim=zoom_xlim)
     make_final_state_plot(runs, outdir / "chart_summary_final_state.png")
     print(f"  wrote {outdir}/chart_summary_*.png")
 

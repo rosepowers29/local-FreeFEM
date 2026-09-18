@@ -36,6 +36,9 @@ def main():
     p.add_argument("--deviation-eps", type=float, default=rt.DEFAULT_DEVIATION_EPS)
     p.add_argument("--recover-eps", type=float, default=rt.DEFAULT_RECOVER_EPS)
     p.add_argument("--recover-hold-time", type=float, default=rt.DEFAULT_RECOVER_HOLD_TIME)
+    p.add_argument("--settle-tmax-max", type=float, default=rt.DEFAULT_SETTLE_TMAX_MAX,
+                   help="Tmax must also be below this to count as settled -- "
+                        "see run_transient.py --help.")
     p.add_argument("--max-steps", type=int, default=rt.DEFAULT_MAX_STEPS)
     p.add_argument("--trend-window", type=float, default=rt.DEFAULT_TREND_WINDOW)
     p.add_argument("--trend-eps", type=float, default=rt.DEFAULT_TREND_EPS)
@@ -63,6 +66,7 @@ def main():
         dict(ratio=ratio, label=rt.sanitize_label(ratio), base_dir=args.base_dir,
              runaway_tmax=args.runaway_tmax, deviation_eps=args.deviation_eps,
              recover_eps=args.recover_eps, recover_hold_time=args.recover_hold_time,
+             settle_tmax_max=args.settle_tmax_max,
              max_steps=args.max_steps, force=args.force, freefem_bin=args.freefem_bin,
              trend_window=args.trend_window, trend_eps=args.trend_eps,
              steps_per_invocation=args.steps_per_invocation,
