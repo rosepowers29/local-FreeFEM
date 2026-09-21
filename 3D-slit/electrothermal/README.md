@@ -112,7 +112,13 @@ to collapse the entire ramp into a single step regardless of duration by
 setting `--ramp-dt` comfortably larger than the resulting ramp duration
 (e.g. `--ramp-dt 999`); leaving `--ramp-dt` at its default `0.05` while
 raising `--ramp-rate` pays a 2.5x-4.3x step-count penalty for no reason.
-Example: `--ramp-rate 20 --ramp-dt 999`.
+Example: `--ramp-rate 20 --ramp-dt 999`. **Only validated for `--ratio<=1`**
+— above that, the ramp's own current crosses Ic before the heater pulse
+fires, and collapsing that portion caused two real crashes (`CLAUDE.md`
+has the full story). `--ramp-dt-above-ic` (default `0.002`) automatically
+keeps that portion fine-stepped regardless of `--ramp-dt`, so this is
+safe by default without extra flags — no action needed unless you want
+to tune it.
 
 If `FreeFem++` isn't on `PATH` (common for a from-source/home-directory
 install on a remote machine), point the wrapper at it instead of relying

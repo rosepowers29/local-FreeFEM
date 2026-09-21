@@ -58,8 +58,29 @@ real qHeater = heaterPower/(2e-3*2e-3);
 // would otherwise multiply ramp-phase step count 2.5x-4.3x at fixed dt).
 real rampRateTarget = getARGV("-ramprate", 0.0);
 real rampDt = getARGV("-rampdt", 0.05);
+// rampDtAboveIc (-rampdt-aboveic): dt used for whatever portion of the
+// ramp has I0(t) already above Ic. The "quasi-static" assumption rampDt
+// exploits was only ever validated at currentRatio=0.7, where I0(t) never
+// reaches Ic during the ramp -- see CLAUDE.md. At currentRatio>1 (first
+// hit in a 202-ratio batch reaching up to 1.9xIc), I0(t) crosses Ic
+// *during* the ramp itself, well before the heater pulse, and collapsing
+// that portion into one huge step (rampDt=999-style) asks a single
+// linear solve -- with coefficients frozen at the step's starting
+// (superconducting, 77K) temperature -- to capture a violent resistive
+// transition it can't actually resolve. Confirmed directly: two runs
+// (r1p36 at 1.36xIc, r1p83 at 1.83xIc) blew up to Tmax~1e65-1e228 within
+// that single collapsed ramp step (see CLAUDE.md). Default 0.002 matches
+// the pulse phase's resolution, the only other timescale in this model
+// where similarly fast resistive transitions are already resolved
+// without incident.
+real rampDtAboveIc = getARGV("-rampdt-aboveic", 0.002);
 real Tramp = 0.5;
 if (rampRateTarget > 0.0) Tramp = I0Target/rampRateTarget;
+// tCrossIc: when I0(t)=I0Target*(tt/Tramp) first reaches IcRebcoActual.
+// For currentRatio<=1, I0(t) never reaches Ic during the ramp, so this
+// equals Tramp exactly and dtRaw below is unchanged from validated
+// behavior (tt<tCrossIc covers the whole ramp, same as tt<Tramp did).
+real tCrossIc = (currentRatio > 1.0) ? Tramp/currentRatio : Tramp;
 real tPulseStart = Tramp, tPulseDur = 0.01, tPulseEnd = tPulseStart+tPulseDur;
 real tEnd = tPulseEnd + 1.5;
 
@@ -67,16 +88,17 @@ func real I0ofT(real tt){
   if (tt < Tramp) return I0Target*(tt/Tramp);
   return I0Target;
 }
-real[int] phaseBounds = [Tramp, tPulseStart, tPulseEnd, tEnd];
+real[int] phaseBounds = [tCrossIc, Tramp, tPulseStart, tPulseEnd, tEnd];
 func real dtRaw(real tt){
-  if (tt < Tramp) return rampDt;
+  if (tt < tCrossIc) return rampDt;
+  if (tt < Tramp) return rampDtAboveIc;
   if (tt < tPulseEnd) return 0.002;
   if (tt > tPulseEnd + 0.2) return 0.02;
   return 0.01;
 }
 func real dtCapped(real tt){
   real d = dtRaw(tt);
-  for (int i=0;i<4;i++) if (tt < phaseBounds[i]-1e-9 && tt+d > phaseBounds[i]) d = phaseBounds[i]-tt;
+  for (int i=0;i<5;i++) if (tt < phaseBounds[i]-1e-9 && tt+d > phaseBounds[i]) d = phaseBounds[i]-tt;
   return d;
 }
 
@@ -174,6 +196,14 @@ real zLeftRep = width/4, zRightRep = 3*width/4;
 // regardless, and the checkpoint is now written every step too (see the
 // checkpoint block below), so no time-resolution or crash-safety is lost.
 int maxStepsThisRun = getARGV("-steps-per-invocation", 1);
+// tmaxCutoff: once Tmax passes this, run_transient.py's own runaway_tmax
+// check (same default, threaded in via -tmaxcutoff so the two never drift
+// apart) will call the run over as soon as it sees the next CSV row --
+// but that check only runs BETWEEN invocations, so without this, an
+// invocation already past the threshold on step 3 of 20 still grinds out
+// steps 4-20 for nothing. Blind on purpose: once Tmax is this high the
+// outcome is already decided, no trend analysis needed to justify stopping.
+real tmaxCutoff = getARGV("-tmaxcutoff", 900.0);
 
 real t = 0.0;
 {
@@ -204,7 +234,7 @@ real t = 0.0;
   }
 
   int step = 0;
-  while (t < tEnd-1e-12 && step < maxStepsThisRun){
+  while (t < tEnd-1e-12 && step < maxStepsThisRun && T[].max < tmaxCutoff){
     real I0w = I0ofT(t);
     real tElecStart = clock();
 
@@ -339,7 +369,7 @@ real t = 0.0;
          << "s pdeSolve=" << (tSolveDone-tSolveStart) << "s" << endl;
 
     t += dt;
-    for (int i=0;i<4;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
+    for (int i=0;i<5;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
     step++;
 
     // Checkpoint after EVERY step, not just once at invocation end -- so a
@@ -358,5 +388,8 @@ real t = 0.0;
     }
   }
 }
+if (T[].max >= tmaxCutoff) cout << "Tmax cutoff " << tmaxCutoff << "K reached (Tmax="
+     << T[].max << "K) -- stopping early, " << (maxStepsThisRun-step)
+     << " step(s) skipped this invocation" << endl;
 cout << "Saved checkpoint at t="<<t<<"s" << endl;
 cout << "[profile] totalInvocation=" << (clock()-tInvocationStart) << "s" << endl;

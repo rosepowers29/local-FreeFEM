@@ -82,6 +82,25 @@ OUTCOME_LABELS = {
     "no_data": "no data",
     "max_steps_exceeded": "max steps exceeded",
 }
+# Statuses meaning "the process never produced trustworthy physics" --
+# e.g. "crashed" was seen for the first time in a 202-ratio batch that
+# pushed ratio up to 1.9xIc: two runs (r1p36, r1p83) hit a real numerical
+# overflow (Tmax finite but ~1e65-1e228 -- floating-point garbage from an
+# unstable solve, not real physics) in the last row(s) written before
+# FreeFEM's own exit code went nonzero. That garbage was still sitting in
+# the raw transient CSV, so a cross-ratio *time-series* plot (which reads
+# the raw arrays directly, unlike outcome_label()) rendered it and blew
+# the shared y-axis out to 10^239, flattening every real ratio's curve
+# into a flat line near the bottom. Filtered out of cross-ratio summary
+# plots entirely -- per-ratio plots still run for these labels, since a
+# crashed run's last real rows are legitimate debugging information.
+NO_TRUSTWORTHY_PHYSICS = {"crashed", "init_failed", "numerical_divergence", "no_data"}
+
+
+def has_trustworthy_physics(run):
+    return run["status"] not in NO_TRUSTWORTHY_PHYSICS
+
+
 TREND_LABELS = {
     "converging": "recovering (asymptotic)",
     "plateaued": "plateaued off-parity",
@@ -297,13 +316,37 @@ def make_summary_timeseries(runs, outpath, col, ylabel, title, log_y=False, xlim
     plt.close(fig)
 
 
+def _final_state_values(r):
+    # export_sweep_hdf5.py writes a missing status.json field (e.g. a
+    # "crashed" run's final_Tmax/final_fracLeft, never recorded because
+    # it died before finalize()) as "" -- h5py attrs have no None -- so
+    # this can't just be assumed numeric. Returns None if either value
+    # isn't usable, rather than letting a bad subtraction crash the whole
+    # summary plot over one run's missing data.
+    frac, tmax = r.get("final_fracLeft"), r.get("final_Tmax")
+    try:
+        return float(frac), float(tmax)
+    except (TypeError, ValueError):
+        return None
+
+
 def make_final_state_plot(runs, outpath):
     fig, axes = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
     labels = {r["label"]: outcome_label(r) for r in runs}
+    skipped = []
     for r in sorted(runs, key=lambda r: r["ratio"]):
+        vals = _final_state_values(r)
+        if vals is None:
+            skipped.append(r["label"])
+            continue
+        frac, tmax = vals
         c = OUTCOME_COLORS.get(labels[r["label"]], "gray")
-        axes[0].scatter(r["ratio"], abs(r["final_fracLeft"] - 0.5), color=c, s=70, zorder=3)
-        axes[1].scatter(r["ratio"], r["final_Tmax"], color=c, s=70, zorder=3)
+        axes[0].scatter(r["ratio"], abs(frac - 0.5), color=c, s=70, zorder=3)
+        axes[1].scatter(r["ratio"], tmax, color=c, s=70, zorder=3)
+    if skipped:
+        print(f"  chart_summary_final_state.png: skipping {len(skipped)} run(s) with no "
+              f"final state recorded (status={{{', '.join(sorted({labels[l] for l in skipped}))}}}): "
+              f"{', '.join(skipped)}")
     axes[0].set_ylabel("final |fracLeft - 0.5|")
     axes[0].axhline(0, color="gray", linestyle=":", alpha=0.5)
     axes[1].set_ylabel("final Tmax [K]")
@@ -399,23 +442,28 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
 
     print("Cross-ratio summary plots...")
-    make_summary_timeseries(runs, outdir / "chart_summary_fracleft_vs_t.png", "fracLeft",
+    trustworthy = [r for r in runs if has_trustworthy_physics(r)]
+    excluded = [r["label"] for r in runs if r not in trustworthy]
+    if excluded:
+        print(f"  excluding {len(excluded)} run(s) with no trustworthy physics "
+              f"(status in {sorted(NO_TRUSTWORTHY_PHYSICS)}): {', '.join(excluded)}")
+    make_summary_timeseries(trustworthy, outdir / "chart_summary_fracleft_vs_t.png", "fracLeft",
                              "Current fraction on heated side", "fracLeft(t) Across Transport Current Ratios")
-    make_summary_timeseries(runs, outdir / "chart_summary_tmax_vs_t.png", "Tmax",
+    make_summary_timeseries(trustworthy, outdir / "chart_summary_tmax_vs_t.png", "Tmax",
                              "Tmax [K]", "Tmax(t) Across Transport Current Ratios")
     # log-y: recoveries (Tmax drifting a few K around ~80K) and runaways
     # (Tmax climbing hundreds of K/s up past 1000K) sit at wildly different
     # scales -- linear axis on chart_summary_tmax_vs_t.png flattens every
     # recovering ratio into an indistinguishable line near the bottom. Log
     # scale keeps both regimes' shapes visible in the same window.
-    make_summary_timeseries(runs, outdir / "chart_summary_tmax_vs_t_log.png", "Tmax",
+    make_summary_timeseries(trustworthy, outdir / "chart_summary_tmax_vs_t_log.png", "Tmax",
                              "Tmax [K] (log scale)", "Tmax(t) Across Transport Current Ratios (log scale)",
                              log_y=True)
-    zoom_xlim = compute_zoom_xlim(runs)
-    make_summary_timeseries(runs, outdir / "chart_summary_tmax_vs_t_zoom.png", "Tmax",
+    zoom_xlim = compute_zoom_xlim(trustworthy)
+    make_summary_timeseries(trustworthy, outdir / "chart_summary_tmax_vs_t_zoom.png", "Tmax",
                              "Tmax [K]", "Tmax(t) Across Transport Current Ratios (zoomed)",
                              xlim=zoom_xlim)
-    make_final_state_plot(runs, outdir / "chart_summary_final_state.png")
+    make_final_state_plot(trustworthy, outdir / "chart_summary_final_state.png")
     print(f"  wrote {outdir}/chart_summary_*.png")
 
     print("Per-ratio diagnostic plots...")

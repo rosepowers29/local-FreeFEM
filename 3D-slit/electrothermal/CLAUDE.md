@@ -264,11 +264,13 @@ differ only at the 4th-5th significant digit (e.g. `fracLeft=0.0383638`
 vs `0.038363`) -- floating-point/solver-ordering noise, not a
 time-discretization error, since both runs enter the pulse phase from
 the exact same uniform-77.0K state. **The entire ramp phase can be
-collapsed to a single step regardless of duration.** This fully
-neutralizes the wall-clock cost of slowing the ramp -- total steps per
-ratio returns to roughly the original ~90-100 (1 collapsed ramp step +
-the ~90 pulse/post-pulse/late-phase steps, which are unaffected by
-ramp rate) instead of scaling with ramp duration.
+collapsed to a single step regardless of duration -- for currentRatio<=1.**
+This fully neutralizes the wall-clock cost of slowing the ramp -- total
+steps per ratio returns to roughly the original ~90-100 (1 collapsed ramp
+step + the ~90 pulse/post-pulse/late-phase steps, which are unaffected by
+ramp rate) instead of scaling with ramp duration. **This validation did
+NOT cover currentRatio>1 and turned out not to generalize there -- see
+"Ramp collapse breaks down above Ic" below, added after two real crashes.**
 
 **For production runs, `-ramprate`/`--ramp-rate` and `-rampdt`/
 `--ramp-dt` do NOT auto-couple** -- they're independent flags. Using
@@ -288,6 +290,97 @@ to avoid. Always set both together for the slow-ramp scenario.
   expected behavior. `--max-steps N` bounds how many timesteps run, not
   how long each one takes — a "5-step smoke test" is still on the order
   of many minutes, not instant.
+
+### Ramp collapse breaks down above Ic
+
+**Real crash, root-caused by reading the raw run.log (not guessed):** a
+202-ratio batch reaching up to 1.9xIc produced two `status=crashed` runs
+-- `r1p36` (1.36xIc) and `r1p83` (1.83xIc). Both blew up to `Tmax` on the
+order of `1e65`-`1e228` (floating-point garbage, not real physics) within
+a *single* step, and in both cases that step's `t` jumped from 0 straight
+to that ratio's `Tramp` -- i.e. the collapsed ramp step from the
+validation above, at the ratio where it stops applying.
+
+**Why (mechanism -- and a real correction, see caveat below)**:
+`I0(t) = I0Target*(t/Tramp)` ramps linearly, so for `currentRatio>1`,
+`I0(t)` crosses `Ic` at `t = Tramp/currentRatio` -- *during* the ramp,
+before the heater pulse ever fires. The original validation only ever
+ran at `ratio=0.7`, where `I0(t)` never reaches `Ic` during the ramp at
+all, so collapsing that phase into one step is safe: the tape stays
+superconducting the whole time, regardless of step size. Above `Ic`,
+one huge step (`rampDt=999`-style) asks a single linear solve -- with
+coefficients evaluated at the step's *starting* 77K, superconducting
+temperature -- to capture a resistive transition that actually happens
+partway through. The matrix conditioning collapses (`r1p36`: UMFPACK
+out-of-memory; `r1p83`: the resulting garbage temperatures cascade for a
+few more steps until a material-property table lookup goes out of
+bounds).
+
+**Caveat -- this does NOT scale smoothly with ratio, checked
+exhaustively.** The user asked whether this invalidates any other
+already-collected data. Checked the ramp-end `Tmax` (the exact row where
+both crashes occurred) for all 90 ratio>1 runs in the batch, not just a
+sample: **only `r1p36`/`r1p83` show a corrupted value; all 88 others --
+including ratios both below and above them (1.35, 1.4, 1.5, 1.7, 1.82,
+1.84, 1.9, ...) -- land at exactly `Tmax=77.0`, bit-identical to the
+pre-ramp initial condition.** So this is NOT "further above Ic is
+progressively less stable" -- if it were, ratios further from 1.0 than
+1.36/1.83 should have failed too, and they didn't. It looks more like a
+narrow numerical edge case (plausible candidate: the current-split
+bisection, `elecSplit`, doubles a candidate E-field up to a fixed 40
+iterations to bracket the target current -- a fixed-iteration-count
+search is exactly the kind of thing that can fail for isolated inputs
+without failing for smoothly-nearby ones) rather than a physically
+scaling instability. Not confirmed against real FreeFEM execution --
+flagged as an open question, not asserted as solved. Practical upshot:
+the other 88 ratio>1 runs' results stand as collected; only `r1p36`/
+`r1p83` need rerunning.
+
+**At the time of this crash, no Tmax safety check existed anywhere that
+could have caught it.** `step_3d_slit_transient_diag.edp`'s own step loop
+had no Tmax-based exit at all (only `t>=tEnd`, `step>=maxStepsThisRun`,
+`dt<=1e-9`). `run_transient.py`'s `runaway_tmax` check (900K default)
+only ran *after* a full invocation returned -- and the explosion already
+happened *inside* that one collapsed step, before Python ever got a
+chance to look. Lowering that Python-side threshold would not have
+prevented either crash. (This gap is now closed -- see `-tmaxcutoff`
+below -- but it would not have helped here either, since the blowup
+happened within a single step, not across several.)
+
+**Fix (implemented): `rampDtAboveIc` / `-rampdt-aboveic` /
+`--ramp-dt-above-ic`** (default `0.002`, matching the pulse phase's
+already-validated resolution). `tCrossIc = Tramp/currentRatio` (equals
+`Tramp` exactly, i.e. no-op, for `currentRatio<=1`) is now a phase
+boundary alongside `Tramp`/`tPulseStart`/`tPulseEnd`/`tEnd` --
+`dtCapped()` can no longer step across it, so the above-Ic portion of
+the ramp always takes fine steps regardless of how coarse `--ramp-dt`
+is set. Below `Ic`, behavior is byte-for-byte unchanged from the
+validated ratio<=1 case. **Not yet re-validated against real hardware
+output** (no FreeFEM access in this environment) -- before trusting a
+big batch at ratio>1 again, smoke-test one ratio known to have crashed
+before (e.g. `--ratio 1.36 --ramp-rate 20 --ramp-dt 999 --max-steps 3`)
+and confirm it no longer blows up and that ratio<=1 output is unchanged
+from a pre-fix run.
+
+### In-invocation Tmax cutoff (`-tmaxcutoff` / `runaway_tmax`)
+
+Separate from the ramp-collapse crash above: once a run is genuinely in
+thermal runaway, letting `step_3d_slit_transient_diag.edp` grind through
+the rest of its `-steps-per-invocation` batch (default 20) burns real
+wall-clock for no reason -- the outcome is already decided the instant
+Tmax first exceeds `run_transient.py`'s `runaway_tmax` (900K default),
+since that check already forces the run over with no further data
+collected. The gap was that the check only ran *between* invocations,
+not inside the `.edp`'s own step loop -- an invocation already past
+threshold on physical step 3 of 20 still ran steps 4-20 before Python's
+next look. Fixed by adding `real tmaxCutoff = getARGV("-tmaxcutoff",
+900.0)` and `&& T[].max < tmaxCutoff` to the step loop's own condition;
+`run_transient.py` passes `-tmaxcutoff str(runaway_tmax)` so the two
+thresholds can't drift apart. Deliberately blind (no trend/turning-point
+logic) -- by 900K the outcome needs no further justification to cut,
+and no downstream analysis (the voltage/Tmax turning-point work in
+`analyze_voltage_diagnostics.py`, which happens far earlier, around
+~85K) depends on rows collected past this point anyway.
 
 ## Sweep analysis (`analyze_sweep_hdf5.py`)
 

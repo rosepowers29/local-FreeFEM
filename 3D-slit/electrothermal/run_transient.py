@@ -69,6 +69,12 @@ DEFAULT_STEPS_PER_INVOCATION = 20
 # instead, for the collaborator-requested slow-ramp scenario.
 DEFAULT_RAMP_RATE = 0.0
 DEFAULT_RAMP_DT = 0.05
+# dt used for whatever portion of the ramp already has I0(t) above Ic --
+# see step_3d_slit_transient_diag.edp's rampDtAboveIc comment. Only
+# matters once currentRatio>1 (I0(t) crosses Ic during the ramp itself);
+# for ratio<=1 this has no effect regardless of its value. 0.002 matches
+# the .edp's own default and the pulse phase's resolution.
+DEFAULT_RAMP_DT_ABOVE_IC = 0.002
 
 
 def ts():
@@ -202,6 +208,7 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             trend_eps=DEFAULT_TREND_EPS, resume=False,
             steps_per_invocation=DEFAULT_STEPS_PER_INVOCATION,
             ramp_rate=DEFAULT_RAMP_RATE, ramp_dt=DEFAULT_RAMP_DT,
+            ramp_dt_above_ic=DEFAULT_RAMP_DT_ABOVE_IC,
             settle_tmax_max=DEFAULT_SETTLE_TMAX_MAX):
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
@@ -243,7 +250,9 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
         while True:
             rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix,
                                             "-steps-per-invocation", str(steps_per_invocation),
-                                            "-ramprate", str(ramp_rate), "-rampdt", str(ramp_dt)],
+                                            "-ramprate", str(ramp_rate), "-rampdt", str(ramp_dt),
+                                            "-rampdt-aboveic", str(ramp_dt_above_ic),
+                                            "-tmaxcutoff", str(runaway_tmax)],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
             # once steps_per_invocation > 1 -- each invocation now advances up
@@ -402,6 +411,11 @@ def main():
                    help=f"Timestep used during the ramp phase specifically "
                         f"(default: {DEFAULT_RAMP_DT}, today's exact value). "
                         f"See CLAUDE.md before coarsening this for real data.")
+    p.add_argument("--ramp-dt-above-ic", type=float, default=DEFAULT_RAMP_DT_ABOVE_IC,
+                   help=f"Timestep used for whatever portion of the ramp already has I0(t) "
+                        f"above Ic (default: {DEFAULT_RAMP_DT_ABOVE_IC}) -- only matters "
+                        f"once --ratio>1. See CLAUDE.md / step_3d_slit_transient_diag.edp's "
+                        f"rampDtAboveIc comment: --ramp-dt alone is unsafe there.")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
@@ -409,7 +423,7 @@ def main():
             args.recover_eps, args.recover_hold_time, args.max_steps, args.force,
             args.freefem_bin, args.trend_window, args.trend_eps, args.resume,
             args.steps_per_invocation, args.ramp_rate, args.ramp_dt,
-            args.settle_tmax_max)
+            args.ramp_dt_above_ic, args.settle_tmax_max)
 
 
 if __name__ == "__main__":

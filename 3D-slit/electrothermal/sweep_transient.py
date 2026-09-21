@@ -49,6 +49,9 @@ def main():
                    help="Target current ramp rate in A/s -- see run_transient.py --help.")
     p.add_argument("--ramp-dt", type=float, default=rt.DEFAULT_RAMP_DT,
                    help="Timestep during the ramp phase -- see run_transient.py --help.")
+    p.add_argument("--ramp-dt-above-ic", type=float, default=rt.DEFAULT_RAMP_DT_ABOVE_IC,
+                   help="Timestep for the above-Ic portion of the ramp (ratio>1 only) -- "
+                        "see run_transient.py --help.")
     p.add_argument("--force", action="store_true")
     p.add_argument("--freefem-bin", default=None,
                    help="Path to the FreeFem++ executable (default: $FREEFEM_BIN "
@@ -70,7 +73,8 @@ def main():
              max_steps=args.max_steps, force=args.force, freefem_bin=args.freefem_bin,
              trend_window=args.trend_window, trend_eps=args.trend_eps,
              steps_per_invocation=args.steps_per_invocation,
-             ramp_rate=args.ramp_rate, ramp_dt=args.ramp_dt)
+             ramp_rate=args.ramp_rate, ramp_dt=args.ramp_dt,
+             ramp_dt_above_ic=args.ramp_dt_above_ic)
         for ratio in ratios
     ]
 
