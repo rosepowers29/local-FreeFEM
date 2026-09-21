@@ -387,9 +387,9 @@ real t = 0.0;
       for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
     }
   }
+  if (T[].max >= tmaxCutoff) cout << "Tmax cutoff " << tmaxCutoff << "K reached (Tmax="
+       << T[].max << "K) -- stopping early, " << (maxStepsThisRun-step)
+       << " step(s) skipped this invocation" << endl;
 }
-if (T[].max >= tmaxCutoff) cout << "Tmax cutoff " << tmaxCutoff << "K reached (Tmax="
-     << T[].max << "K) -- stopping early, " << (maxStepsThisRun-step)
-     << " step(s) skipped this invocation" << endl;
 cout << "Saved checkpoint at t="<<t<<"s" << endl;
 cout << "[profile] totalInvocation=" << (clock()-tInvocationStart) << "s" << endl;
