@@ -326,15 +326,81 @@ including ratios both below and above them (1.35, 1.4, 1.5, 1.7, 1.82,
 pre-ramp initial condition.** So this is NOT "further above Ic is
 progressively less stable" -- if it were, ratios further from 1.0 than
 1.36/1.83 should have failed too, and they didn't. It looks more like a
-narrow numerical edge case (plausible candidate: the current-split
-bisection, `elecSplit`, doubles a candidate E-field up to a fixed 40
-iterations to bracket the target current -- a fixed-iteration-count
-search is exactly the kind of thing that can fail for isolated inputs
-without failing for smoothly-nearby ones) rather than a physically
-scaling instability. Not confirmed against real FreeFEM execution --
-flagged as an open question, not asserted as solved. Practical upshot:
-the other 88 ratio>1 runs' results stand as collected; only `r1p36`/
-`r1p83` need rerunning.
+narrow numerical edge case rather than a physically scaling instability.
+Practical upshot: the other 88 ratio>1 runs' results stand as collected;
+only `r1p36`/`r1p83` need rerunning.
+
+**Root cause, confirmed (supersedes the earlier `elecSplit`-bisection
+guess below this line in git history -- that theory turned out wrong,
+see the fix section above for `-tmaxcutoff`/`rampDtAboveIc` and the
+section below for the actual mechanism).** It is NOT the electrical
+model at all. Reproduced directly: a 202-ratio Condor batch (`--ramp-rate
+20`, stretching `Tramp` to ~16-23s instead of the original fixed 0.5s)
+produced `r1p474` "finishing" in 141.5s while numeric neighbors `r1p470`/
+`r1p481` ran 20+ hours and got held on Condor's wall-time limit. Reading
+`r1p474`'s raw log: its giant collapsed first step (`I0w=0`, zero current,
+zero heat source, pure diffusion from a uniform 77K field, `elecSplit=
+0.0025s` -- confirming no electrical bisection was even touched) produced
+`min -5.6e119 max 3.7e113` straight out of `solve heatStep`. `r1p470`/
+`r1p481` ran the *identical kind* of solve, at their own slightly
+different collapsed-`dt` value, and got the correct `77 -> 77`. Same
+"isolated input, smooth neighbors fine" signature as `r1p36`/`r1p83`,
+now caught with nothing but a linear diffusion solve and zero current
+involved -- ruling out `elecSplit` entirely.
+
+**Confirmed from FreeFEM's own source** (cloned `FreeFem-sources` tag
+`v4.12`, matching the installed version, via `docker run freefem/freefem`
++ `apt`/`git`, per the user's suggestion to go straight to source rather
+than keep guessing): `heatStep`'s `solve` statement never passes a `sym=`
+flag, and `Data_Sparse_Solver`'s default constructor sets `sym(0)`
+(`src/femlib/VirtualSolver.hpp:93`) -- so even though the bilinear form
+is genuinely SPD (already established by the `solver=CG` experiment
+above), FreeFEM solves it as a **general, non-symmetric** system.
+`src/femlib/SparseLinearSolver.hpp:115-122` registers the built-in
+solvers by priority:
+```cpp
+addsolver<SolverGMRES<Z,K>>("GMRES",10, 3);
+#ifdef HAVE_LIBUMFPACK
+  addsolver<VirtualSolverUMFPACK<Z,K>>("UMFPACK",100, 1); // default "SparseSolver" (general)
+  addsolver<VirtualSolverCHOLMOD<Z,K>>("CHOLMOD",99,  2); // default "SparseSolverSym" (symmetric)
+#endif
+```
+UMFPACK (priority 100) wins the general slot every unspecified-`solver=`
+call makes; CHOLMOD is registered right alongside it for the symmetric
+slot but is never reached, since `sym` defaults false. **This matches
+already-observed evidence exactly**: `r1p36`'s original crash literally
+printed `"UMFPACK out-of-memory"` -- the solver naming itself in the
+log, not an inference. UMFPACK is a **direct sparse LU factorization**,
+not iterative -- exactly the class of solver that can either fail loudly
+(pathological pivoting/fill-in -> OOM, `r1p36`) or fail silently (a
+technically-completed but numerically garbage factorization, `r1p474`)
+on an isolated ill-conditioned matrix while succeeding fine on a
+near-identical neighbor. This project's own material tables are exactly
+the kind of input that produces that ill-conditioning at large collapsed
+`dt` (coefficients spanning many orders of magnitude -- e.g. buffer's
+placeholder `sigmaBuf=1e-10 S/m`, ~4 orders below even Hastelloy's real
+value). **Next step being evaluated: an explicit symmetric solve
+(`sym=1`, routing to CHOLMOD) instead of accepting the UMFPACK default**
+-- not yet validated against real FreeFEM execution at the time of
+writing.
+
+**Separate bug this surfaced, independent of the solver question:**
+`fout << ... << T[].max << ...` (the CSV row write, `:325`) happens
+*before* `solve heatStep` (`:362`) runs for that same step -- so a CSV
+row's `Tmax` column is always one physical step stale relative to what
+the checkpoint ends up holding for that same `t`. Combined with
+`-tmaxcutoff` (see above) writing zero new CSV rows once it fires,
+`run_transient.py` never sees the blown-up `Tmax` in the CSV at all --
+it only sees `t` stall between invocations, and returns
+**`reached_end_no_deviation`**, a falsely benign label for what was
+actually `Tmax` diverging to `1e113`. Any run hitting this exact failure
+mode (giant-step UMFPACK blowup + immediate `-tmaxcutoff` trip) will be
+silently mislabeled in `status.json`/the HDF5 export as ordinary
+"reached end, no deviation" data rather than flagged as diverged --
+worth auditing existing Condor results for this signature (`n_steps`
+very low for a ratio that should need many, paired with a suspiciously
+short `wall_clock_seconds`) before trusting a `reached_end_*` label at
+face value for any large-`dt`-ramp run.
 
 **At the time of this crash, no Tmax safety check existed anywhere that
 could have caught it.** `step_3d_slit_transient_diag.edp`'s own step loop

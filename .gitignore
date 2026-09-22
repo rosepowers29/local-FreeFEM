@@ -5,6 +5,8 @@
 3D-slit/electrothermal/runs/
 3D-slit/electrothermal/condor/payload.tar.gz
 3D-slit/electrothermal/condor/_payload_build/
+3D-slit/electrothermal/condor/symtest_payload.tar.gz
+3D-slit/electrothermal/condor/_symtest_payload_build/
 3D-slit/electrothermal/condor/ratios.txt
 3D-slit/electrothermal/condor/work/
 3D-slit/electrothermal/condor/logs/

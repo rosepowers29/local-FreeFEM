@@ -1,0 +1,67 @@
+# Condor submit file: A/B test of the heatStep sym=1 experiment (CHOLMOD)
+# vs. today's default (sym=0, UMFPACK) -- see ../CLAUDE.md's "Ramp
+# collapse breaks down above Ic" section for the full background. Each
+# job runs BOTH variants back to back for one ratio, one collapsed step,
+# and prints both "Solve: min/max" results for direct comparison in a
+# single streamed .out (logs/<label>.out).
+#
+# Before submitting: run ./make_symtest_payload.sh here first, to build
+# symtest_payload.tar.gz (bundles both step_3d_slit_transient_diag.edp
+# and the sym=1 variant). Then: condor_submit symtest.sub
+#
+# Three cases, chosen to cover both known failure instances:
+#   r1p474 -- the Condor-discovered blowup (needs --ramp-rate 20, which
+#             is what stretches Tramp long enough to expose it).
+#   r1p36, r1p83 -- the ORIGINAL two crashes from before --ramp-rate
+#             existed (Tramp stays the fixed 0.5s default; only
+#             --ramp-dt 999 is needed to collapse the ramp). The
+#             baseline (sym=0) pass for these two is EXPECTED to
+#             possibly crash/OOM again -- that's reproducing the
+#             original bug, not a job failure. See symtest_run_ratio.sh.
+#
+# First-pass resource guesses, same caveat as sweep.sub: not measured
+# against a real job on this pool yet. r1p36's known OOM history means
+# this job may need MORE memory than a normal sweep job, not less --
+# check actual usage on the first real submission before trusting these.
+
+universe        = container
+container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal@sha256:8b39db74c15d90180fb623cda03211d434ce619cd3786c3abbd37de930aed37c
+requirements    = (Arch == "X86_64")
+
+executable      = symtest_run_ratio.sh
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files    = symtest_payload.tar.gz
+
+request_cpus   = 1
+request_memory = 4096M
+request_disk   = 2048M
+
+log    = logs/$(label).log
+stream_output = True
+stream_error  = True
+
+# --- r1p474: the Condor-discovered blowup, needs --ramp-rate 20 ---
+label     = r1p474
+arguments = 1.474 $(label) -ramprate 20.0 -rampdt 999.0
+output    = logs/$(label).out
+error     = logs/$(label).err
+transfer_output_files = work/runs/$(label)_baseline, work/runs/$(label)_sym
+queue
+
+# --- r1p36: original crash, no --ramp-rate (fixed 0.5s Tramp) ---
+label     = r1p36
+arguments = 1.36 $(label) -rampdt 999.0
+output    = logs/$(label).out
+error     = logs/$(label).err
+transfer_output_files = work/runs/$(label)_baseline, work/runs/$(label)_sym
+queue
+
+# --- r1p83: original crash, no --ramp-rate (fixed 0.5s Tramp) ---
+label     = r1p83
+arguments = 1.83 $(label) -rampdt 999.0
+output    = logs/$(label).out
+error     = logs/$(label).err
+transfer_output_files = work/runs/$(label)_baseline, work/runs/$(label)_sym
+queue
