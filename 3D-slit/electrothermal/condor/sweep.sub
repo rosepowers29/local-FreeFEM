@@ -21,7 +21,7 @@ executable      = condor_run_ratio.sh
 # --ramp-rate/--ramp-dt: validated safe together (see ../CLAUDE.md) --
 # never raise --ramp-rate without also raising --ramp-dt, or every job
 # pays the 2.5x-4.3x ramp-phase step-count penalty this was meant to avoid.
-arguments       = $(ratio) $(label) --ramp-rate 20 --ramp-dt 999
+arguments       = $(ratio) $(label) --ramp-rate 20 --ramp-dt 999 --runaway-tmax $(runaway_tmax)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
@@ -46,4 +46,36 @@ log    = logs/$(label).log
 stream_output = True
 stream_error  = True
 
-queue ratio,label from ratios.txt
+# Auto-retry on a RETRY_WORTHY exit code (see run_transient.py --
+# crashed/init_failed/numerical_divergence/no_data, exactly the statuses
+# analyze_sweep_hdf5.py already treats as "no trustworthy physics").
+# Motivation: the node-heterogeneity investigation (CLAUDE.md's "Ramp
+# collapse breaks down above Ic" section) found that r1p36/r1p83's
+# original crashes did NOT reproduce on a retry that happened to land on
+# different execute hosts (Colgate -> Clemson/Montana State/hellbender)
+# -- so a RETRY_WORTHY failure is plausibly just an unlucky execute-node
+# draw (bad UMFPACK pivot for that specific hardware), not a real bug,
+# and simply requeuing is a reasonable first response rather than always
+# requiring a human to notice and resubmit by hand.
+#
+# on_exit_hold puts the job on hold (instead of "completed") when
+# condor_run_ratio.sh's own exit code is nonzero -- which only happens
+# now that run_transient.py's main() actually propagates a RETRY_WORTHY
+# status as exit 1 (previously it always exited 0 regardless of
+# outcome, so this policy would never have fired at all). periodic_release
+# requeues it after a cooldown, letting Condor's normal matchmaking put
+# it wherever's next available (no guarantee of a different node, but
+# likely on a pool this size). NumJobStarts<4 caps it at 3 automatic
+# retries (4 attempts total) before it stays held for a human to look at
+# -- a run that fails 4 times in a row across different node draws is
+# more likely a real bug than bad luck.
+#
+# First-pass numbers, NOT measured against a real job on this pool --
+# same caveat as request_memory/request_disk above. 300s cooldown is a
+# guess at "long enough that an immediately-oversubscribed slot has
+# freed up," not tuned.
+on_exit_hold        = (ExitCode != 0)
+on_exit_hold_reason  = "run_transient.py reported a RETRY_WORTHY status (see CLAUDE.md) -- auto-releasing to retry, likely on a different execute node"
+periodic_release     = (NumJobStarts < 4) && ((CurrentTime - EnteredCurrentStatus) > 300)
+
+queue ratio,label,runaway_tmax from ratios.txt

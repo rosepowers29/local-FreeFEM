@@ -379,28 +379,193 @@ near-identical neighbor. This project's own material tables are exactly
 the kind of input that produces that ill-conditioning at large collapsed
 `dt` (coefficients spanning many orders of magnitude -- e.g. buffer's
 placeholder `sigmaBuf=1e-10 S/m`, ~4 orders below even Hastelloy's real
-value). **Next step being evaluated: an explicit symmetric solve
-(`sym=1`, routing to CHOLMOD) instead of accepting the UMFPACK default**
--- not yet validated against real FreeFEM execution at the time of
-writing.
+value).
 
-**Separate bug this surfaced, independent of the solver question:**
-`fout << ... << T[].max << ...` (the CSV row write, `:325`) happens
-*before* `solve heatStep` (`:362`) runs for that same step -- so a CSV
-row's `Tmax` column is always one physical step stale relative to what
-the checkpoint ends up holding for that same `t`. Combined with
-`-tmaxcutoff` (see above) writing zero new CSV rows once it fires,
-`run_transient.py` never sees the blown-up `Tmax` in the CSV at all --
-it only sees `t` stall between invocations, and returns
-**`reached_end_no_deviation`**, a falsely benign label for what was
-actually `Tmax` diverging to `1e113`. Any run hitting this exact failure
-mode (giant-step UMFPACK blowup + immediate `-tmaxcutoff` trip) will be
-silently mislabeled in `status.json`/the HDF5 export as ordinary
-"reached end, no deviation" data rather than flagged as diverged --
-worth auditing existing Condor results for this signature (`n_steps`
-very low for a ratio that should need many, paired with a suspiciously
-short `wall_clock_seconds`) before trusting a `reached_end_*` label at
-face value for any large-`dt`-ramp run.
+**`sym=1` experiment (CHOLMOD instead of UMFPACK) -- tried, put on the
+back burner, not because it's wrong but because it couldn't be
+evaluated.** `step_3d_slit_transient_diag_symtest.edp` +
+`condor/symtest.sub` A/B-tested `sym=1` against today's default for
+`r1p474`/`r1p36`/`r1p83` on the actual Condor pool. Result: **all three
+baseline (`sym=0`) passes came back sane this time**, including the two
+that originally crashed. Checking the job logs' execute-host identity
+explained why: this pool is OSPool/OSG, a nationwide opportunistic grid
+-- the original `r1p36`/`r1p83` crashes ran on a Colgate University
+node; this retest landed on Clemson's Palmetto cluster, Montana State's
+EPYC nodes, and "hellbender," all different machines. **The failure is
+node/hardware-dependent, not a deterministic function of ratio or
+code** -- UMFPACK's LU pivoting on a borderline-conditioned matrix is
+sensitive to floating-point rounding differences between CPU
+microarchitectures. That makes a single side-by-side job an inconclusive
+test: both variants in one job always run on the same node, so a "good"
+node draw makes both look fine regardless of whether `sym=1` actually
+helps. Validating `sym=1` for real would need many repeated draws per
+ratio to compare failure *rates*, not a single pass/fail -- shelved for
+now in favor of the fix below, which doesn't have this problem.
+
+### Adaptive step-size bisection (implemented)
+
+Rather than pick a fixed `dt` cap for the collapsed ramp step (no cap
+could be shown safe -- `r1p83` blew up at just `0.273s`, smaller than
+the `1.0s` already-validated-elsewhere figure cited earlier in this
+file, and the node-heterogeneity finding above means "safe" may not
+even be a fixed number at all), `step_3d_slit_transient_diag.edp` now
+retries a step at half `dt` whenever the result is physically
+implausible, standard adaptive-FEA practice. Mechanism:
+
+- **Detection is a physical bound, not a magic threshold.** All three
+  known blowups had `I0w=0` (zero source) at the moment they happened --
+  by the diffusion equation's own maximum principle, `T` can't
+  legitimately move far from `Told`/`Tcold` in one step with no source
+  term. `maxStepRise` (`-maxsteprise`, default `500.0` K) checks
+  `T[].max-Told[].max` and `Told[].min-T[].min` against this bound --
+  generous enough that a real quench (~650K/s, the fastest observed
+  this project, is only ~13K at pulse-phase `dt`) never trips it, but
+  catches `1e100+`-scale garbage with enormous margin. NaN is checked
+  separately (`T[].max != T[].max`) since a NaN comparison via `>` is
+  always false in IEEE-754 and would otherwise never trip the bound,
+  same subtlety `run_transient.py`'s own isnan/isinf guard already
+  handles.
+- **Retry, don't downgrade permanently.** Only the `solve heatStep` call
+  is retried at half `dtTry` -- `Told`/`source`/`qHeaterNow` don't
+  depend on `dt` so they're computed once. `t` advances by whatever
+  `dt` actually got committed (possibly less than requested), and the
+  *next* step always tries the full requested `dt` fresh rather than
+  permanently coarsening the ramp rate for the rest of the run -- the
+  instability looks localized to specific `dt`/hardware combinations,
+  not a persistent property of the trajectory.
+- **`-maxbisections` (default 10)** caps the halving depth; exceeding it
+  is a hard `assert(false)` failure rather than silently grinding at a
+  useless `dt` forever -- if halving 10 times doesn't stabilize it,
+  that's a different problem than "dt too large."
+- **Cost model is the whole point:** a node that succeeds on the first
+  (large, fast) attempt pays nothing extra. Only a node that actually
+  hits the bad pivot pays for a retry -- strictly better than a fixed
+  cap, which taxes every run's step count regardless of whether that
+  particular node needed it.
+- Threaded through `run_transient.py`/`sweep_transient.py` as
+  `--max-step-rise`/`--max-bisections`, mirroring every other `.edp`
+  flag's Python CLI convention.
+
+**Bundled fix, same edit:** the CSV/diagnostic print (`fout`/`fdiag`)
+used to happen *before* `solve heatStep` ran for that step -- so a CSV
+row's `Tmax` was always one physical step stale relative to what the
+checkpoint ended up holding, and combined with `-tmaxcutoff` writing
+zero new rows once it fires, `run_transient.py` never saw `r1p474`'s
+actual diverged `Tmax` at all -- it only saw `t` stall, and returned the
+falsely benign `reached_end_no_deviation` instead of catching the
+divergence. Fixed by moving the diagnostic/CSV write to after the
+(possibly-bisected) solve and after advancing `t`, so both always refer
+to the same committed state. Voltage-tap diagnostics (`fdiag`) still
+reflect the electrical solve computed from the step's *starting*
+temperature (the model's existing staggered-scheme convention,
+unchanged) -- only `transient_3d_slit.csv`'s `Tmax`/`fracLeft`, the
+columns `run_transient.py` actually classifies on, needed the ordering
+fix.
+
+**Verified:** syntax-checked against the real FreeFEM v4.12 parser
+(via the local `freefem/freefem` container) -- full script parses
+clean, no compile errors, matches the exact echo-back FreeFEM already
+produced for the pre-bisection version. Not yet verified against an
+actual bisection-triggering blowup on real Condor hardware -- that
+needs the same real-node-lottery exposure the `sym=1` test needed and
+couldn't get locally.
+
+### Above-Ic phase: adaptive Jc-based step growth (implemented)
+
+The bisection mechanism above only guards against catastrophic UMFPACK
+blowups (the `maxStepRise=500K` bound) -- it doesn't address the
+*separate* wall-time problem from `rampDtAboveIc` being a fixed
+absolute dt (`r1p031`'s 20-hour trail: `--ramp-rate 20` stretches the
+above-Ic window to several seconds, and a fixed `0.002s` step multiplies
+that into hundreds-to-thousands of steps). No fixed replacement cap was
+adopted -- picking one blindly is exactly the mistake that caused the
+original ramp-collapse crashes, and this project needs the slow ramp
+rate for comparability across datasets (collaborator requirement, not
+negotiable), while also not wanting to commit to a specific resolution
+without justification.
+
+Instead, `rampDtAboveIc` is now a **starting guess that the step loop
+mutates directly** (grown or shrunk after every above-Ic step) rather
+than a fixed value -- `dtRaw`/`dtCapped` are unchanged, they just read
+whatever it currently holds. The accuracy criterion is built around
+`JcT(T)` rather than a Kelvin figure: `JcT(T)=Jc0*(Tc-T)/(Tc-50)` is
+linear in `T`, so its *fractional* change over a step is `~dT/(Tc-T)` --
+at `T~77K`, `Tc=90K`, even a 5K step is a ~38% swing in critical current
+density. The nonlinearity here isn't about how fast `I0(t)` itself is
+ramping (slow, by design, once `--ramp-rate` is used) -- it's about how
+close `T` sits to `Tc`, which the frozen-coefficient solve doesn't see.
+`-maxjcfracchange` (default `0.05`) bounds the allowed swing directly:
+inside the existing bisection loop, a step that isn't a catastrophe but
+moves `JcT(Tmax)` by more than this fraction is retried at half `dt`
+(shares the loop/halving mechanics with `maxStepRise`, just a second,
+tighter trigger). A step that lands comfortably inside the band (under
+half the bound) doubles `rampDtAboveIc` for the next step; otherwise the
+next step just carries forward whatever `dt` actually worked. This
+naturally keeps steps fine exactly at the Ic-crossing transition (where
+`Jc` is genuinely changing fast) and lets them grow everywhere else in
+the above-Ic window, without ever having to state a "safe" absolute
+number in advance.
+
+**Not yet validated as physically sufficient** -- `maxJcFracChange=0.05`
+is a first-pass default, not derived from a real accuracy comparison
+(e.g. against a fully fine-stepped reference trajectory). Smoke-test
+before trusting it for real data: watch `run.log` for `[bisect]` lines
+during the above-Ic phase (confirms the controller is actually
+exercising both bounds) and check how many steps the above-Ic window
+takes vs. the old fixed-`0.002s` count for the same ratio.
+
+### Runaway threshold for ratio>=1.0 batches: use --runaway-tmax 250
+
+No code change -- `runaway_tmax` is already a general, existing flag.
+Checked directly against the full 202-ratio dataset: **every ratio>=1.0
+run that didn't crash ended up `runaway` (89/91); zero ever recovered.**
+Separately, across those 89 runaway trajectories, `Tmax` **never
+reverses after crossing 200K** (checked at 100/150/200/250/300K -- the
+100-150K thresholds still show up to a 62K dip, the universal
+pulse-transient bump found earlier this session; 200K+ shows exactly
+0.00K of reversal in all 89 cases). The dataset's own recovery/runaway
+boundary sits at ratio 0.912/0.913 (adjacent granular steps, zero
+overlap) -- comfortably below this batch's floor of 1.0. So for a
+ratio>=1.0-only batch specifically, `--runaway-tmax 250` (some margin
+above the empirically-clean 200K floor) is a data-grounded way to stop
+each run right after it's unambiguously committed, instead of
+continuing to the default 900K -- saves the median ~0.42s (up to ~1.0s)
+of tail every one of these runs was computing for no classification
+benefit. **Do not reuse 250 for a mixed-ratio batch that includes
+anything near the 0.912-0.913 boundary** -- recovering/runaway
+trajectories are indistinguishable well past 250K near that boundary
+(see the voltage/Tmax turning-point work elsewhere in this file); this
+number is only justified because every ratio in this batch sits well
+above it.
+
+### Condor auto-retry on RETRY_WORTHY failures (implemented, closes out the retry piece of "detect and retry" from the node-heterogeneity discussion)
+
+`run_transient.py` previously always exited 0 regardless of the run's
+actual status -- `main()` called `run_one()` and discarded the returned
+summary entirely. That meant no Condor exit-code policy could ever have
+distinguished a crashed run from a settled one; every job looked
+"successful" to Condor no matter what happened inside. Fixed: `main()`
+now exits 1 for exactly the statuses `analyze_sweep_hdf5.py` already
+treats as "no trustworthy physics" (`RETRY_WORTHY_STATUSES = {"crashed",
+"init_failed", "numerical_divergence", "no_data"}`, kept manually in
+sync with that file's `NO_TRUSTWORTHY_PHYSICS`).
+
+`condor/sweep.sub` now holds a job on that nonzero exit and
+auto-releases it after a cooldown (`on_exit_hold`/`periodic_release`,
+capped at 3 automatic retries via `NumJobStarts<4`) -- see
+`condor/README.md` for the full policy. Justified directly by this
+session's own evidence: `r1p36`/`r1p83`'s original crashes did NOT
+reproduce when the exact same scenario reran on different execute hosts
+across this pool (Colgate -> Clemson/Montana State/hellbender) -- a
+RETRY_WORTHY failure is plausibly just an unlucky node draw, not a real
+bug, so requeuing is a reasonable default rather than requiring a human
+to notice a `crashed` status and resubmit by hand. A run that still
+fails after 4 attempts across different node draws is more likely a
+real bug than bad luck, and stays held for review rather than retrying
+forever.
+
+Not yet measured against a real job on this pool -- same caveat as
+every other first-pass Condor resource number in this file.
 
 **At the time of this crash, no Tmax safety check existed anywhere that
 could have caught it.** `step_3d_slit_transient_diag.edp`'s own step loop

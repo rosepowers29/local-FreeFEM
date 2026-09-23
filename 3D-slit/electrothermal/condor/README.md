@@ -129,6 +129,23 @@ python3 export_sweep_hdf5.py
 python3 analyze_sweep_hdf5.py
 ```
 
+## Auto-retry on RETRY_WORTHY failures (implemented)
+
+`sweep.sub` now holds and auto-releases a job whose exit code indicates
+`run_transient.py` reported `crashed`/`init_failed`/`numerical_divergence`/
+`no_data` (`on_exit_hold`/`periodic_release`, capped at 3 automatic
+retries). This exists because the node-heterogeneity investigation
+(`../CLAUDE.md`) found the original `r1p36`/`r1p83` crashes did NOT
+reproduce when rerun on different execute hosts across this pool
+(Colgate -> Clemson/Montana State/hellbender) -- a RETRY_WORTHY failure
+is plausibly just an unlucky execute-node draw, not a real bug, so
+requeuing it is a reasonable default response. This REQUIRED a prerequisite
+fix: `run_transient.py`'s `main()` previously always exited 0 regardless
+of the run's actual status, so no exit-code-based Condor policy could
+ever have fired -- it now exits 1 for exactly the statuses above.
+Not yet measured against a real job on this pool -- same caveat as the
+resource-request numbers below.
+
 ## Known limitations (v1, deliberately simple)
 
 - **No resume-on-preemption.** With `should_transfer_files=YES` and

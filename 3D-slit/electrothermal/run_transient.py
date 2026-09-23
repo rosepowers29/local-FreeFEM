@@ -33,6 +33,15 @@ INIT_SCRIPT = "init_3d_slit_transient_checkpoint.edp"
 STEP_SCRIPT = "step_3d_slit_transient_diag.edp"
 TRANSIENT_CSV = "transient_3d_slit.csv"
 
+# Same set analyze_sweep_hdf5.py already uses to exclude a run's physics
+# from cross-ratio plots -- these are the statuses with no trustworthy
+# result at all (crashed, never started, garbage numbers), as opposed to
+# a legitimate-if-unwanted terminal outcome (settled/runaway/reached_end_*/
+# plateaued_off_parity/max_steps_exceeded). Kept in sync manually since
+# they're separate files with separate purposes (plotting vs. process
+# exit code) -- update both if this list ever changes.
+RETRY_WORTHY_STATUSES = {"crashed", "init_failed", "numerical_divergence", "no_data"}
+
 DEFAULT_RUNAWAY_TMAX = 900.0
 DEFAULT_DEVIATION_EPS = 0.01
 DEFAULT_RECOVER_EPS = 0.002
@@ -75,6 +84,9 @@ DEFAULT_RAMP_DT = 0.05
 # for ratio<=1 this has no effect regardless of its value. 0.002 matches
 # the .edp's own default and the pulse phase's resolution.
 DEFAULT_RAMP_DT_ABOVE_IC = 0.002
+DEFAULT_MAX_STEP_RISE = 500.0
+DEFAULT_MAX_BISECTIONS = 10
+DEFAULT_MAX_JC_FRAC_CHANGE = 0.05
 
 
 def ts():
@@ -209,7 +221,10 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             steps_per_invocation=DEFAULT_STEPS_PER_INVOCATION,
             ramp_rate=DEFAULT_RAMP_RATE, ramp_dt=DEFAULT_RAMP_DT,
             ramp_dt_above_ic=DEFAULT_RAMP_DT_ABOVE_IC,
-            settle_tmax_max=DEFAULT_SETTLE_TMAX_MAX):
+            settle_tmax_max=DEFAULT_SETTLE_TMAX_MAX,
+            max_step_rise=DEFAULT_MAX_STEP_RISE,
+            max_bisections=DEFAULT_MAX_BISECTIONS,
+            max_jc_frac_change=DEFAULT_MAX_JC_FRAC_CHANGE):
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -252,7 +267,10 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                                             "-steps-per-invocation", str(steps_per_invocation),
                                             "-ramprate", str(ramp_rate), "-rampdt", str(ramp_dt),
                                             "-rampdt-aboveic", str(ramp_dt_above_ic),
-                                            "-tmaxcutoff", str(runaway_tmax)],
+                                            "-tmaxcutoff", str(runaway_tmax),
+                                            "-maxsteprise", str(max_step_rise),
+                                            "-maxbisections", str(max_bisections),
+                                            "-maxjcfracchange", str(max_jc_frac_change)],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
             # once steps_per_invocation > 1 -- each invocation now advances up
@@ -416,14 +434,36 @@ def main():
                         f"above Ic (default: {DEFAULT_RAMP_DT_ABOVE_IC}) -- only matters "
                         f"once --ratio>1. See CLAUDE.md / step_3d_slit_transient_diag.edp's "
                         f"rampDtAboveIc comment: --ramp-dt alone is unsafe there.")
+    p.add_argument("--max-step-rise", type=float, default=DEFAULT_MAX_STEP_RISE,
+                   help=f"Max K a single heatStep solve may move Tmax/Tmin from "
+                        f"Told before it's treated as numerical garbage and the step "
+                        f"is retried at half dt (default: {DEFAULT_MAX_STEP_RISE}). "
+                        f"See CLAUDE.md's adaptive-bisection section.")
+    p.add_argument("--max-bisections", type=int, default=DEFAULT_MAX_BISECTIONS,
+                   help=f"Max halvings of a step's dt before giving up and failing "
+                        f"hard rather than retrying forever (default: {DEFAULT_MAX_BISECTIONS}).")
+    p.add_argument("--max-jc-frac-change", type=float, default=DEFAULT_MAX_JC_FRAC_CHANGE,
+                   help=f"Above-Ic adaptive controller's accuracy band: max fractional "
+                        f"change in JcT(Tmax) allowed per step before halving dt instead "
+                        f"of accepting it (default: {DEFAULT_MAX_JC_FRAC_CHANGE}). See "
+                        f"CLAUDE.md's adaptive-bisection section.")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
-    run_one(args.ratio, label, args.base_dir, args.runaway_tmax, args.deviation_eps,
+    summary = run_one(args.ratio, label, args.base_dir, args.runaway_tmax, args.deviation_eps,
             args.recover_eps, args.recover_hold_time, args.max_steps, args.force,
             args.freefem_bin, args.trend_window, args.trend_eps, args.resume,
             args.steps_per_invocation, args.ramp_rate, args.ramp_dt,
-            args.ramp_dt_above_ic, args.settle_tmax_max)
+            args.ramp_dt_above_ic, args.settle_tmax_max,
+            args.max_step_rise, args.max_bisections, args.max_jc_frac_change)
+    # Exit code drives Condor's on_exit_hold/periodic_release retry policy
+    # (see condor/sweep.sub) -- without this, the process always exited 0
+    # regardless of status, so no exit-code-based retry could ever have
+    # worked. A RETRY_WORTHY status is exactly the kind of failure the
+    # node-heterogeneity investigation found (see CLAUDE.md) -- plausibly
+    # just needs a different execute node, not a real fix.
+    if summary["status"] in RETRY_WORTHY_STATUSES:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

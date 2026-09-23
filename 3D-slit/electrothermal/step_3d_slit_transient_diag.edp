@@ -58,22 +58,33 @@ real qHeater = heaterPower/(2e-3*2e-3);
 // would otherwise multiply ramp-phase step count 2.5x-4.3x at fixed dt).
 real rampRateTarget = getARGV("-ramprate", 0.0);
 real rampDt = getARGV("-rampdt", 0.05);
-// rampDtAboveIc (-rampdt-aboveic): dt used for whatever portion of the
-// ramp has I0(t) already above Ic. The "quasi-static" assumption rampDt
-// exploits was only ever validated at currentRatio=0.7, where I0(t) never
-// reaches Ic during the ramp -- see CLAUDE.md. At currentRatio>1 (first
-// hit in a 202-ratio batch reaching up to 1.9xIc), I0(t) crosses Ic
-// *during* the ramp itself, well before the heater pulse, and collapsing
-// that portion into one huge step (rampDt=999-style) asks a single
-// linear solve -- with coefficients frozen at the step's starting
-// (superconducting, 77K) temperature -- to capture a violent resistive
-// transition it can't actually resolve. Confirmed directly: two runs
-// (r1p36 at 1.36xIc, r1p83 at 1.83xIc) blew up to Tmax~1e65-1e228 within
-// that single collapsed ramp step (see CLAUDE.md). Default 0.002 matches
-// the pulse phase's resolution, the only other timescale in this model
-// where similarly fast resistive transitions are already resolved
-// without incident.
+// rampDtAboveIc (-rampdt-aboveic): STARTING dt guess for whatever portion
+// of the ramp has I0(t) already above Ic -- no longer fixed for the
+// whole phase. Originally was a fixed 0.002 (matching the pulse phase's
+// resolution) for the entire above-Ic window, but a slow --ramp-rate
+// stretches that window enough (Tramp*(1-1/ratio), up to several
+// seconds) that a fixed 0.002s step multiplies into hundreds-to-
+// thousands of steps -- real cost, not just theoretical (see CLAUDE.md's
+// r1p031 wall-time trail). This variable is now MUTATED directly by the
+// step loop's adaptive controller below (grown when Jc is changing
+// slowly, shrunk when it's not) -- dtRaw/dtCapped read whatever value it
+// currently holds, unchanged otherwise. Started here at the old fixed
+// value as a conservative first guess.
 real rampDtAboveIc = getARGV("-rampdt-aboveic", 0.002);
+// maxJcFracChange: accuracy bound for the above-Ic adaptive controller,
+// separate from maxStepRise's catastrophe bound. JcT(T)=Jc0*(Tc-T)/
+// (Tc-50) is LINEAR in T, so its FRACTIONAL change over a step is
+// ~dT/(Tc-T) -- at T~77K, Tc=90K, even a 5K step is a ~38% swing in
+// critical current density. The nonlinearity that matters here isn't
+// how fast I0(t) itself is ramping (slow, by design, once --ramp-rate is
+// used) -- it's how close T sits to Tc, which the frozen-coefficient
+// solve (kfun/rhocpfun/source fixed at Told for the whole step) doesn't
+// see. Bounding the allowed swing in Jc directly, rather than picking an
+// arbitrary Kelvin figure, keeps steps fine exactly where the current-
+// sharing physics is genuinely changing fast (near Tc) and lets them
+// grow everywhere else. Not yet independently validated against a real
+// blown-up-vs-accurate comparison -- first pass, to be smoke-tested.
+real maxJcFracChange = getARGV("-maxjcfracchange", 0.05);
 real Tramp = 0.5;
 if (rampRateTarget > 0.0) Tramp = I0Target/rampRateTarget;
 // tCrossIc: when I0(t)=I0Target*(tt/Tramp) first reaches IcRebcoActual.
@@ -205,6 +216,24 @@ int maxStepsThisRun = getARGV("-steps-per-invocation", 1);
 // outcome is already decided, no trend analysis needed to justify stopping.
 real tmaxCutoff = getARGV("-tmaxcutoff", 900.0);
 
+// Adaptive step bisection: catches the large-dt UMFPACK ill-conditioning
+// failure mode found via r1p36/r1p83/r1p474 (see CLAUDE.md's "Ramp
+// collapse breaks down above Ic" section) without needing to guess a
+// safe fixed dt cap -- the failure turned out to be node/hardware-
+// dependent (same code, same inputs, different real machines gave
+// different results), so no fixed cap can be proven safe in advance.
+// Instead: attempt heatStep's real dt, check the result against a
+// physical bound, halve and retry if it's not physically sane. All
+// three known failures had zero source (I0w=0) at the moment they blew
+// up, so by the diffusion equation's own maximum principle T can't
+// legitimately move far from Told/Tcold in one step -- maxStepRise is
+// deliberately generous (a real quench climbing ~650K/s, the fastest
+// observed this project, is still only ~13K/step at pulse-phase dt)
+// so this only ever fires on genuine numerical garbage, never on a real
+// developing runaway.
+real maxStepRise = getARGV("-maxsteprise", 500.0);
+int maxBisections = getARGV("-maxbisections", 10);
+
 real t = 0.0;
 {
   ifstream fchk(outPrefix+"ckpt_3d_slit_transient.txt");
@@ -319,23 +348,15 @@ real t = 0.0;
 
     real tElecDone = clock();
 
-    real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
-    real TmaxRight = T(xHeatC,yCuTop,zRightRep);
-    cout << "t="<<t<<"s I0="<<I0w<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
-    fout << t << "," << I0w << "," << T[].max << "," << TmaxLeft << "," << TmaxRight << "," << fracLeft << "\n";
-
-    diagAllTapVoltages(diagVL, diagVR);
-    real VclPlus = 0.0;
-    real VclMinus = diagVcum(Lx, -1);   // == diagVcum(Lx,+1) by the slit's equal-voltage-drop closure condition
-    fdiag << t << "," << I0w << "," << T[].max << "," << fracLeft << "," << VclPlus << "," << VclMinus;
-    for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVL[i];
-    for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVR[i];
-    for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagLeft);
-    for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagRight);
-    fdiag << "," << hallNotModeled << "," << hallNotModeled << "\n";
-
     real dt = dtCapped(t);
     if (dt <= 1e-9) break;
+
+    // Only the above-Ic ramp window gets the Jc-based adaptive controller
+    // below (see maxJcFracChange's definition) -- below-Ic has I0w=0 (no
+    // current-sharing physics to resolve at all, maxStepRise alone is the
+    // right guard there) and the pulse/post-pulse phases already have
+    // independently-validated fixed dt.
+    bool inAboveIcPhase = (currentRatio > 1.0 && t >= tCrossIc-1e-9 && t < Tramp-1e-9);
 
     real qHeaterNow = 0.0;
     if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
@@ -349,28 +370,107 @@ real t = 0.0;
     kfun = kOf(region, Told);
     rhocpfun = rhoCpOf(region, Told);
 
-    // solver= deliberately unspecified (FreeFEM default). Tried solver=CG
-    // (measured 126.2s vs this default's 116.5s -- 8% slower, 10,293
-    // unpreconditioned iterations to reach an unnecessarily tight residual
-    // of 1.5e-32) and solver=CG,eps=1e-6 (identical iteration count/residual/
-    // timing to the decimal -- eps had no measurable effect, falsifying the
-    // "just a loose tolerance away" theory). Reverted rather than keep
-    // tuning blind without FreeFEM solver internals expertise to explain
-    // why eps didn't take effect. See CLAUDE.md for the full trail and
-    // where to pick this back up if revisited (preconditioning, or a
-    // different direct solver).
-    solve heatStep(T, w) =
-        int3d(Th3)( rhocpfun*T*w/dt + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
-      - int3d(Th3)( rhocpfun*Told*w/dt + source*w )
-      - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
-      + on(2, 4, T=Tcold);
+    // Adaptive bisection around the PDE solve -- see maxStepRise's
+    // definition above for why. Told/source/qHeaterNow don't depend on
+    // dt, so only the solve itself needs retrying, not the electrical
+    // sub-solve above or the source/Told snapshot.
+    real TmaxBefore = Told[].max, TminBefore = Told[].min;
+    real jcBefore = JcT(TmaxBefore);
+    real dtTry = dt;
+    int bisectCount = 0;
+    real jcFrac = 0.0;
+    bool solveOk = false;
+    while (!solveOk){
+      // solver= deliberately unspecified (FreeFEM default). Tried solver=CG
+      // (measured 126.2s vs this default's 116.5s -- 8% slower, 10,293
+      // unpreconditioned iterations to reach an unnecessarily tight residual
+      // of 1.5e-32) and solver=CG,eps=1e-6 (identical iteration count/residual/
+      // timing to the decimal -- eps had no measurable effect, falsifying the
+      // "just a loose tolerance away" theory). Reverted rather than keep
+      // tuning blind without FreeFEM solver internals expertise to explain
+      // why eps didn't take effect. See CLAUDE.md for the full trail and
+      // where to pick this back up if revisited (preconditioning, or a
+      // different direct solver).
+      solve heatStep(T, w) =
+          int3d(Th3)( rhocpfun*T*w/dtTry + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
+        - int3d(Th3)( rhocpfun*Told*w/dtTry + source*w )
+        - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
+        + on(2, 4, T=Tcold);
+      // NaN checked separately from the rise bound below (like
+      // run_transient.py's own isnan/isinf guard) -- a NaN comparison
+      // against a finite bound via ">" is always false in IEEE-754, so a
+      // diverged-to-NaN solve would otherwise never trip the bisection.
+      bool isNan = (T[].max != T[].max) || (T[].min != T[].min);
+      bool blewUp = isNan || (T[].max-TmaxBefore > maxStepRise) || (TminBefore-T[].min > maxStepRise);
+      // Accuracy check, above-Ic phase only -- see maxJcFracChange's
+      // definition above. Skipped once blewUp is already true: no point
+      // computing Jc off a catastrophically garbage T[].max.
+      bool jcTooFast = false;
+      if (inAboveIcPhase && !blewUp){
+        jcFrac = abs(JcT(T[].max)-jcBefore)/max(jcBefore, 1e-30);
+        jcTooFast = jcFrac > maxJcFracChange;
+      }
+      if (!blewUp && !jcTooFast) solveOk = true;
+      else {
+        bisectCount++;
+        cout << "[bisect] step=" << step << " t=" << t << " dtTry=" << dtTry
+             << " jcFrac=" << jcFrac << " Tmax=" << T[].max << " Tmin=" << T[].min
+             << " -- halving (attempt " << bisectCount << "/" << maxBisections << ")" << endl;
+        if (bisectCount > maxBisections){
+          cout << "FATAL: heatStep did not stabilize after " << maxBisections
+               << " bisections at t=" << t << " (started from dt=" << dt << ")" << endl;
+          assert(false);
+        }
+        dtTry = dtTry/2.0;
+      }
+    }
+    dt = dtTry;   // the committed dt, possibly smaller than originally requested
+    // Grow the above-Ic guess for the NEXT step if this one was comfortably
+    // inside the accuracy band; otherwise just carry forward whatever dt
+    // actually worked, rather than re-attempting the same too-large value.
+    if (inAboveIcPhase){
+      if (jcFrac < 0.5*maxJcFracChange) rampDtAboveIc = dtTry*2.0;
+      else rampDtAboveIc = dtTry;
+    }
     real tSolveDone = clock();
     cout << "[profile] step=" << step << " elecSplit=" << (tElecDone-tElecStart)
-         << "s pdeSolve=" << (tSolveDone-tSolveStart) << "s" << endl;
+         << "s pdeSolve=" << (tSolveDone-tSolveStart) << "s bisections=" << bisectCount << endl;
 
     t += dt;
     for (int i=0;i<5;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
     step++;
+
+    // Diagnostic/CSV write moved to AFTER the (possibly-bisected) solve
+    // and AFTER advancing t -- so t and T[].max always refer to the same
+    // committed state. Previously this printed BEFORE solve (i.e. logged
+    // the state entering this step, labeled with this step's own t only
+    // once the NEXT iteration ran) -- harmless normally, but meant the
+    // truly-final row before an early exit (tmaxCutoff, steps-per-
+    // invocation, or now a bisection FATAL) never got logged, which is
+    // exactly how r1p474's actual diverged Tmax silently never reached
+    // transient_3d_slit.csv and run_transient.py misclassified the run
+    // as reached_end_no_deviation instead of catching the divergence.
+    real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
+    real TmaxRight = T(xHeatC,yCuTop,zRightRep);
+    cout << "t="<<t<<"s I0="<<I0w<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
+    fout << t << "," << I0w << "," << T[].max << "," << TmaxLeft << "," << TmaxRight << "," << fracLeft << "\n";
+
+    // Voltage tap diagnostics reflect the electrical solve above (current
+    // split given the temperature AT THE START of this step, per the
+    // model's existing staggered-scheme convention) -- paired with the
+    // step's ending t, i.e. "the current/voltage that drove heating over
+    // this step, and where that left Tmax." Not recomputed post-solve:
+    // that would mean re-running the electrical model at the step's new
+    // temperature, changing what's being modeled, not just what's logged.
+    diagAllTapVoltages(diagVL, diagVR);
+    real VclPlus = 0.0;
+    real VclMinus = diagVcum(Lx, -1);   // == diagVcum(Lx,+1) by the slit's equal-voltage-drop closure condition
+    fdiag << t << "," << I0w << "," << T[].max << "," << fracLeft << "," << VclPlus << "," << VclMinus;
+    for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVL[i];
+    for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVR[i];
+    for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagLeft);
+    for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagRight);
+    fdiag << "," << hallNotModeled << "," << hallNotModeled << "\n";
 
     // Checkpoint after EVERY step, not just once at invocation end -- so a
     // crash/preemption partway through a multi-step invocation

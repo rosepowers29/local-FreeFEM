@@ -52,6 +52,13 @@ def main():
     p.add_argument("--ramp-dt-above-ic", type=float, default=rt.DEFAULT_RAMP_DT_ABOVE_IC,
                    help="Timestep for the above-Ic portion of the ramp (ratio>1 only) -- "
                         "see run_transient.py --help.")
+    p.add_argument("--max-step-rise", type=float, default=rt.DEFAULT_MAX_STEP_RISE,
+                   help="Adaptive-bisection rise bound (K) -- see run_transient.py --help.")
+    p.add_argument("--max-bisections", type=int, default=rt.DEFAULT_MAX_BISECTIONS,
+                   help="Adaptive-bisection max halvings -- see run_transient.py --help.")
+    p.add_argument("--max-jc-frac-change", type=float, default=rt.DEFAULT_MAX_JC_FRAC_CHANGE,
+                   help="Above-Ic adaptive controller's Jc accuracy band -- "
+                        "see run_transient.py --help.")
     p.add_argument("--force", action="store_true")
     p.add_argument("--freefem-bin", default=None,
                    help="Path to the FreeFem++ executable (default: $FREEFEM_BIN "
@@ -74,7 +81,9 @@ def main():
              trend_window=args.trend_window, trend_eps=args.trend_eps,
              steps_per_invocation=args.steps_per_invocation,
              ramp_rate=args.ramp_rate, ramp_dt=args.ramp_dt,
-             ramp_dt_above_ic=args.ramp_dt_above_ic)
+             ramp_dt_above_ic=args.ramp_dt_above_ic,
+             max_step_rise=args.max_step_rise, max_bisections=args.max_bisections,
+             max_jc_frac_change=args.max_jc_frac_change)
         for ratio in ratios
     ]
 

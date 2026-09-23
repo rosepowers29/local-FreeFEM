@@ -1,22 +1,37 @@
 #!/usr/bin/env python3
 """
-make_ratios_list.py -- generates the ratio,label pairs sweep.sub's
-`queue ratio,label from ratios.txt` reads, using run_transient.py's own
-sanitize_label() so Condor job labels always match what run_transient.py
-would derive itself. Avoids hand-typing labels that could silently drift
-out of sync with the naming convention used everywhere else in this repo.
+make_ratios_list.py -- generates the ratio,label,runaway_tmax rows
+sweep.sub's `queue ratio,label,runaway_tmax from ratios.txt` reads,
+using run_transient.py's own sanitize_label() so Condor job labels
+always match what run_transient.py would derive itself. Avoids
+hand-typing labels that could silently drift out of sync with the
+naming convention used everywhere else in this repo.
 
 Also checks for label collisions before writing anything -- two ratios
 that sanitize to the same label would both write to the same Condor
 output path and clobber each other, so this is caught here rather than
-left as a manual pre-submission check.
+left as a manual pre-submission check. NOTE: collision checking is only
+within a single invocation -- running this twice (see --runaway-tmax
+below) and concatenating won't catch a collision across the two runs,
+though in practice the two groups you'd use this for are disjoint
+ratio ranges by construction.
+
+--runaway-tmax is per-invocation, not per-ratio: different regimes need
+different values (see CLAUDE.md's "Runaway threshold for ratio>=1.0
+batches" section -- 250 is only justified for ratio>=1.0, NOT for
+anything near the 0.912/0.913 recovery boundary), so build ratios.txt by
+running this once per regime and appending.
 
 Usage:
-  # explicit list (original usage)
+  # explicit list (original usage), default runaway_tmax (900)
   python3 make_ratios_list.py 0.5 0.7 0.8 0.9 0.925 0.95 0.99 1.0 1.1 > ratios.txt
 
   # range: START STOP STEP, STOP inclusive
   python3 make_ratios_list.py --range 0.90 0.95 0.005 > ratios.txt
+
+  # two regimes, two thresholds, one file (note >> on the second call)
+  python3 make_ratios_list.py 0.7 0.85 0.912 0.913 0.95 > ratios.txt
+  python3 make_ratios_list.py --runaway-tmax 250 1.05 1.36 1.83 1.9 >> ratios.txt
 """
 import argparse
 import sys
@@ -46,6 +61,11 @@ def main():
     p.add_argument("--range", nargs=3, type=float, metavar=("START", "STOP", "STEP"),
                     help="Generate ratios from START to STOP (inclusive) in "
                          "increments of STEP, instead of listing them individually")
+    p.add_argument("--runaway-tmax", type=float, default=rt.DEFAULT_RUNAWAY_TMAX,
+                   help=f"runaway_tmax value written for every ratio in THIS "
+                        f"invocation (default: {rt.DEFAULT_RUNAWAY_TMAX}) -- run "
+                        f"this script once per regime and append if different "
+                        f"ratios need different thresholds, see CLAUDE.md.")
     args = p.parse_args()
 
     if args.range and args.ratios:
@@ -71,7 +91,7 @@ def main():
                  f"anything: {detail}")
 
     for ratio, label in zip(ratios, labels):
-        print(f"{ratio},{label}")
+        print(f"{ratio},{label},{args.runaway_tmax}")
 
 
 if __name__ == "__main__":
