@@ -59,6 +59,60 @@ FreeFem++ -nw init_3d_slit_transient_checkpoint.edp   # once, to (re)initialize
 FreeFem++ -nw step_3d_slit_transient_bfield.edp       # repeat to advance; 1 timestep/invocation
 ```
 
+## Adaptive bisection / runaway cutoff (ported from `electrothermal/`)
+
+`step_3d_slit_transient_bfield.edp` now carries the same PDE-solve safety
+net as `electrothermal/step_3d_slit_transient_diag.edp` — see that
+track's `CLAUDE.md` ("Ramp collapse breaks down above Ic" / "Adaptive
+step-size bisection") for the full crash history that motivated it. Same
+root cause applies here: `heatStep`'s `solve` leaves `solver=`
+unspecified, so FreeFEM solves the SPD bilinear form as a general system
+via UMFPACK, which can fail on this project's ill-conditioned material
+tables in a way found to be node/hardware-dependent, not a deterministic
+function of `dt`.
+
+- **`-maxsteprise`** (default `500.0` K) / **`-maxbisections`** (default
+  `10`): if a step's `T[].max`/`T[].min` moves further than this from
+  `Told` (or produces NaN), the solve is retried at half `dtTry` — up to
+  `maxBisections` times, then a hard `assert(false)`. Only `heatStep`
+  retries; `Told`/`source`/`qHeaterNow` are computed once per step since
+  they don't depend on `dt`.
+- **`-tmaxcutoff`** (default `900.0` K): checked in the step loop's own
+  `while` condition (`T[].max < tmaxCutoff`), so a run that's already
+  genuinely runaway stops immediately rather than grinding through the
+  rest of `maxStepsThisRun`.
+- **CSV/diagnostic write ordering fixed**: `transient_3d_slit.csv`'s
+  `Tmax`/`TmaxLeft`/`TmaxRight` now write *after* the (possibly-bisected)
+  solve and *after* `t` advances, not before — the same stale-row bug
+  electrothermal found and fixed applied here too (a CSV row's `Tmax`
+  was always one physical step behind the checkpoint). Voltage-tap/Hall-
+  probe diagnostics are unchanged: they still reflect the electrical
+  solve computed from the step's *starting* temperature (the model's
+  existing staggered-scheme convention).
+- **Deliberately NOT ported**: the above-Ic Jc-fraction step-growth
+  controller (`-rampdt-aboveic`/`-maxjcfracchange`, and today's
+  `jcRef`-normalization fix in electrothermal). This script's
+  `I0Target` is still hardcoded to `0.7*IcRebcoActual` (see near the top
+  of the file) — `t` never crosses `Ic`, so that controller has no phase
+  to operate in and would be dead code until `currentRatio` becomes a
+  parameter here too. Planned alongside the `run_transient.py`-
+  equivalent wrapper for this workflow, not before.
+- **Verified**: full script parses clean against the real FreeFEM v4.12
+  parser (`docker run freefem/freefem`, matching electrothermal's own
+  verification method) with no compile errors. A complete real invocation
+  against the freshly re-initialized checkpoint ran to `Ok: Normal End`:
+  resumed at `t=0, Tmax=77`, advanced one step to `t=0.05s`, and wrote
+  `Tmax=77 TmaxLeft=77 TmaxRight=77 fracLeft=0.5 bisections=0` —
+  bit-identical to the pre-existing validated baseline at the ramp's
+  quiescent start (`I0=0`, no source term yet), confirming the reordered
+  CSV write, the bisection loop's non-triggering path, and the
+  checkpoint round-trip (E-arrays correctly zero, matching `I0=0`) all
+  work. **Not yet verified**: the bisection loop actually triggering and
+  recovering from a real blowup (this step had no source term, so
+  `blewUp` was never true) — same caveat electrothermal's own initial
+  bisection verification carried before real-hardware exposure found
+  `r1p36`/`r1p83`/`r1p474`.
+
 Outputs land in this directory: `transient_3d_slit.csv`
 (`t,I0,Tmax,TmaxLeft,TmaxRight,fracLeft`), `diagnostics_3d_slit.csv`
 (voltage taps, RTDs, real Hall-probe `H1`/`H2` B-field values — not the

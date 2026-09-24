@@ -462,8 +462,20 @@ real t = 0.0;
     // as reached_end_no_deviation instead of catching the divergence.
     real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
     real TmaxRight = T(xHeatC,yCuTop,zRightRep);
-    cout << "t="<<t<<"s I0="<<I0w<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
-    fout << t << "," << I0w << "," << T[].max << "," << TmaxLeft << "," << TmaxRight << "," << fracLeft << "\n";
+    // I0w (used above, in the solve and the electrical/voltage sub-solve)
+    // is deliberately evaluated at the PRE-increment t -- an explicit,
+    // frozen-coefficient source consistent with kfun/rhocpfun/Told, same
+    // convention as fracLeft/voltages below. But I0 itself is an exactly-
+    // known, purely time-driven function (no solve involved) -- there is
+    // no reason to log a stale value for it. I0Now re-evaluates I0ofT at
+    // the now-current (post-increment) t so the logged "I0" column
+    // actually matches the timestamp it's printed against. Found live:
+    // r1p26's CSV showed I0=0 at its very first row (t=15.548=tCrossIc)
+    // because that row's I0w was I0ofT(0) from the ramp's true start --
+    // see CLAUDE.md.
+    real I0Now = I0ofT(t);
+    cout << "t="<<t<<"s I0="<<I0Now<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
+    fout << t << "," << I0Now << "," << T[].max << "," << TmaxLeft << "," << TmaxRight << "," << fracLeft << "\n";
 
     // Voltage tap diagnostics reflect the electrical solve above (current
     // split given the temperature AT THE START of this step, per the
@@ -472,10 +484,13 @@ real t = 0.0;
     // this step, and where that left Tmax." Not recomputed post-solve:
     // that would mean re-running the electrical model at the step's new
     // temperature, changing what's being modeled, not just what's logged.
+    // (I0Now above is the one exception -- it's not re-derived from a
+    // solve, just re-evaluating the same closed-form ramp function at the
+    // correct time, so there's no such tradeoff for it.)
     diagAllTapVoltages(diagVL, diagVR);
     real VclPlus = 0.0;
     real VclMinus = diagVcum(Lx, -1);   // == diagVcum(Lx,+1) by the slit's equal-voltage-drop closure condition
-    fdiag << t << "," << I0w << "," << T[].max << "," << fracLeft << "," << VclPlus << "," << VclMinus;
+    fdiag << t << "," << I0Now << "," << T[].max << "," << fracLeft << "," << VclPlus << "," << VclMinus;
     for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVL[i];
     for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVR[i];
     for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagLeft);

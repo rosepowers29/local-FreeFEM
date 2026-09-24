@@ -14,6 +14,7 @@
 
 include "../shared/hts_mesh_module_3d_slit.idp"
 include "../shared/hts_materials.idp"
+include "getARGV.idp"
 
 real Tcold = 77.0;
 real IcRebcoActual = JcT(77.0)*tSc*coreWidth;
@@ -115,6 +116,20 @@ real[int] Bleft(nxs+1), Bright(nxs+1);
 
 int maxStepsThisRun = 1;
 
+// Adaptive-bisection/runaway-cutoff tunables, ported from
+// electrothermal/step_3d_slit_transient_diag.edp -- see the step loop
+// below for the mechanism and that track's CLAUDE.md for the crash
+// history that motivated it (large-dt UMFPACK ill-conditioning on this
+// project's own material tables, found to be node/hardware-dependent
+// rather than a deterministic function of dt). getARGV lets these be
+// overridden from the command line without editing the script; defaults
+// reproduce this script's exact prior behavior when unflagged. The
+// above-Ic Jc-fraction growth controller from that same source is
+// deliberately NOT ported here -- see the step loop comment for why.
+real maxStepRise = getARGV("-maxsteprise", 500.0);
+int maxBisections = getARGV("-maxbisections", 10);
+real tmaxCutoff = getARGV("-tmaxcutoff", 900.0);
+
 // CHECKPOINT FORMAT CHANGE: now also persists Earr/ElArr/ErArr, not just
 // t and T. This is required for computeSelfFieldB's lagged design to
 // actually work: it reads these arrays BEFORE this step's electrical
@@ -159,7 +174,7 @@ real t = 0.0;
   }
 
   int step = 0;
-  while (t < tEnd-1e-12 && step < maxStepsThisRun){
+  while (t < tEnd-1e-12 && step < maxStepsThisRun && T[].max < tmaxCutoff){
     real tStepStart = clock();
     real I0w = I0ofT(t);
 
@@ -252,6 +267,94 @@ real t = 0.0;
     }
     real tElectrical = clock() - tElecStart;
 
+    real dt = dtCapped(t);
+    if (dt <= 1e-9) break;
+
+    real qHeaterNow = 0.0;
+    if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
+
+    real tFieldsStart = clock();
+    Ph3 inSlitRange = (x>=xSlitStart)*(x<=xSlitEnd);
+    source = (1-inSlitRange)*sourceOfFull(region, Efun(x), T)
+           + inSlitRange*( (z<zSlitCenter)*sourceOfFull(region, ElFun(x), T)
+                          + (z>zSlitCenter)*sourceOfFull(region, ErFun(x), T) );
+    Told = T;
+    kfun = kOf(region, Told);
+    rhocpfun = rhoCpOf(region, Told);
+    real tFields = clock() - tFieldsStart;
+
+    // Adaptive step bisection -- ported from electrothermal/
+    // step_3d_slit_transient_diag.edp (see its CLAUDE.md, "Ramp collapse
+    // breaks down above Ic" / "Adaptive step-size bisection"). heatStep's
+    // solve leaves solver= unspecified, so FreeFEM solves the (genuinely
+    // SPD) bilinear form as a general system via UMFPACK, which can fail
+    // -- loudly (OOM on pathological pivoting/fill-in) or silently (a
+    // technically-completed but numerically garbage factorization) -- on
+    // an ill-conditioned matrix. This project's material tables span many
+    // orders of magnitude (e.g. buffer's placeholder sigmaBuf=1e-10 S/m),
+    // and the failure was found to be node/hardware-dependent rather than
+    // a deterministic function of dt, so no fixed-dt cap can be proven
+    // safe in advance. Retry at half dt whenever the result isn't
+    // physically sane, standard adaptive-FEA practice. maxStepRise is
+    // deliberately generous (a real quench -- ~650K/s, the fastest
+    // observed this project -- is only ~13K at pulse-phase dt) so this
+    // only ever fires on genuine numerical garbage.
+    //
+    // NOT ported: the above-Ic Jc-fraction growth controller from the
+    // same electrothermal fix. This script's I0Target is still hardcoded
+    // to 0.7*Ic (see near the top of this file), so t never crosses Ic
+    // and that controller has no phase to operate in -- it would be dead
+    // code until ratio becomes a parameter here too, which is planned
+    // alongside the run_transient.py-equivalent wrapper for this
+    // workflow, not before.
+    real TmaxBefore = Told[].max, TminBefore = Told[].min;
+    real dtTry = dt;
+    int bisectCount = 0;
+    bool solveOk = false;
+    real tHeatStart = clock();
+    while (!solveOk){
+      solve heatStep(T, w) =
+          int3d(Th3)( rhocpfun*T*w/dtTry + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
+        - int3d(Th3)( rhocpfun*Told*w/dtTry + source*w )
+        - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
+        + on(2, 4, T=Tcold);
+      // NaN checked separately from the rise bound -- a NaN comparison
+      // against a finite bound via ">" is always false in IEEE-754, so a
+      // diverged-to-NaN solve would otherwise never trip the bisection.
+      bool isNan = (T[].max != T[].max) || (T[].min != T[].min);
+      bool blewUp = isNan || (T[].max-TmaxBefore > maxStepRise) || (TminBefore-T[].min > maxStepRise);
+      if (!blewUp) solveOk = true;
+      else {
+        bisectCount++;
+        cout << "[bisect] step=" << step << " t=" << t << " dtTry=" << dtTry
+             << " Tmax=" << T[].max << " Tmin=" << T[].min
+             << " -- halving (attempt " << bisectCount << "/" << maxBisections << ")" << endl;
+        if (bisectCount > maxBisections){
+          cout << "FATAL: heatStep did not stabilize after " << maxBisections
+               << " bisections at t=" << t << " (started from dt=" << dt << ")" << endl;
+          assert(false);
+        }
+        dtTry = dtTry/2.0;
+      }
+    }
+    dt = dtTry;   // the committed dt, possibly smaller than originally requested
+    real tHeatSolve = clock() - tHeatStart;
+
+    t += dt;
+    for (int i=0;i<4;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
+    step++;
+
+    // CSV/diagnostic write moved to AFTER the (possibly-bisected) solve and
+    // AFTER advancing t -- ported from the same electrothermal fix, and
+    // fixing the identical bug here: writing before the solve meant a CSV
+    // row's Tmax was always one physical step stale relative to what the
+    // checkpoint ended up holding, so the truly-final row before an early
+    // exit (tmaxCutoff, a bisection FATAL) would never reach
+    // transient_3d_slit.csv at all. Voltage/Hall-probe diagnostics still
+    // reflect the electrical solve computed from the step's STARTING
+    // temperature (the model's existing staggered-scheme convention,
+    // unchanged) -- only Tmax/TmaxLeft/TmaxRight need the post-solve,
+    // just-committed state.
     real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
     real TmaxRight = T(xHeatC,yCuTop,zRightRep);
     cout << "t="<<t<<"s I0="<<I0w<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
@@ -271,39 +374,14 @@ real t = 0.0;
     fdiag << "," << BatHallLeft << "," << BatHallRight << "\n";
     real tDiag = clock() - tDiagStart;
 
-    real dt = dtCapped(t);
-    if (dt <= 1e-9) break;
-
-    real qHeaterNow = 0.0;
-    if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
-
-    real tFieldsStart = clock();
-    Ph3 inSlitRange = (x>=xSlitStart)*(x<=xSlitEnd);
-    source = (1-inSlitRange)*sourceOfFull(region, Efun(x), T)
-           + inSlitRange*( (z<zSlitCenter)*sourceOfFull(region, ElFun(x), T)
-                          + (z>zSlitCenter)*sourceOfFull(region, ErFun(x), T) );
-    Told = T;
-    kfun = kOf(region, Told);
-    rhocpfun = rhoCpOf(region, Told);
-    real tFields = clock() - tFieldsStart;
-
-    real tHeatStart = clock();
-    solve heatStep(T, w) =
-        int3d(Th3)( rhocpfun*T*w/dt + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
-      - int3d(Th3)( rhocpfun*Told*w/dt + source*w )
-      - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
-      + on(2, 4, T=Tcold);
-    real tHeatSolve = clock() - tHeatStart;
-
     real tStepTotal = clock() - tStepStart;
     cout << "TIMING (s): Bfield=" << tBfield << "  electrical=" << tElectrical
          << "  diagnostics=" << tDiag << "  fieldAssign=" << tFields << "  heatSolve=" << tHeatSolve
-         << "  ||  stepTotal=" << tStepTotal << endl;
-
-    t += dt;
-    for (int i=0;i<4;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
-    step++;
+         << "  bisections=" << bisectCount << "  ||  stepTotal=" << tStepTotal << endl;
   }
+  if (T[].max >= tmaxCutoff) cout << "Tmax cutoff " << tmaxCutoff << "K reached (Tmax="
+       << T[].max << "K) -- stopping early, " << (maxStepsThisRun-step)
+       << " step(s) skipped this invocation" << endl;
 }
 
 {
