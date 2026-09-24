@@ -376,6 +376,16 @@ real t = 0.0;
     // sub-solve above or the source/Told snapshot.
     real TmaxBefore = Told[].max, TminBefore = Told[].min;
     real jcBefore = JcT(TmaxBefore);
+    // Normalize the Jc swing against a FIXED reference (Jc at the cold
+    // base temperature), not the local jcBefore -- JcT is linear and
+    // hits exactly 0 at Tc=90K, so as Tmax approaches Tc, jcBefore->0
+    // and a fraction normalized by it becomes unsatisfiable regardless
+    // of how small dt gets (found live: r1p36 spun for 13.3 hours at
+    // dt~1e-6s approaching T=90K without ever crossing it -- see
+    // CLAUDE.md). A full quench through Tc is completely legitimate
+    // physics that must be traversable in finite steps; jcRef being
+    // fixed (never vanishes) keeps the bound well-posed there.
+    real jcRef = JcT(Tcold);
     real dtTry = dt;
     int bisectCount = 0;
     real jcFrac = 0.0;
@@ -407,7 +417,7 @@ real t = 0.0;
       // computing Jc off a catastrophically garbage T[].max.
       bool jcTooFast = false;
       if (inAboveIcPhase && !blewUp){
-        jcFrac = abs(JcT(T[].max)-jcBefore)/max(jcBefore, 1e-30);
+        jcFrac = abs(JcT(T[].max)-jcBefore)/max(jcRef, 1e-30);
         jcTooFast = jcFrac > maxJcFracChange;
       }
       if (!blewUp && !jcTooFast) solveOk = true;

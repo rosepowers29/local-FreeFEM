@@ -506,13 +506,52 @@ naturally keeps steps fine exactly at the Ic-crossing transition (where
 the above-Ic window, without ever having to state a "safe" absolute
 number in advance.
 
-**Not yet validated as physically sufficient** -- `maxJcFracChange=0.05`
-is a first-pass default, not derived from a real accuracy comparison
-(e.g. against a fully fine-stepped reference trajectory). Smoke-test
-before trusting it for real data: watch `run.log` for `[bisect]` lines
-during the above-Ic phase (confirms the controller is actually
-exercising both bounds) and check how many steps the above-Ic window
-takes vs. the old fixed-`0.002s` count for the same ratio.
+**Validated on the real Condor pool: `r1p05` (ratio=1.05) is the clean
+success case.** Above-Ic window (`tCrossIc=15.548s` to `Tramp=16.325s`,
+`0.777s` span) covered in **9 steps** via clean doubling
+(`0.002->0.004->...->0.256`, then a capped partial step landing exactly
+on `Tramp`) with zero bisections needed -- `Tmax` barely moved (`77 ->
+77.02`) the whole way, comfortably inside the accuracy band throughout.
+The old fixed-`0.002s` scheme would have needed ~389 steps for the same
+window -- a ~43x reduction, and `--runaway-tmax 250` correctly cut the
+tail (`Tmax cutoff 250K reached (Tmax=261.294K)`, classified `runaway`).
+Total: 2 Condor invocations, ~1.9 hours wall-clock.
+
+**Real bug found on the same batch: `r1p36` (ratio=1.36) span for 13.3
+hours and never reached the pulse at all.** Its own above-Ic window
+runs from the SAME `tCrossIc=15.548s` up to `Tramp=21.145s` -- long
+enough, and `ratio=1.36` hot enough, that pure overcurrent self-heating
+during the ramp (no heater pulse involved at all yet) drove `Tmax`
+toward `Tc=90K` before ever reaching `Tramp`. `JcT(T)` is linear and
+hits exactly 0 at `Tc` -- and `maxJcFracChange`'s normalization used the
+*local* `jcBefore` as the denominator, which -> 0 as `Tmax` -> `Tc`. Any
+nonzero step then produces an unboundedly large fractional swing no
+matter how small `dt` gets, since the criterion was `|delta Jc| /
+(a value approaching zero)`, not `(a value approaching zero) is itself
+hard to move accurately`. Confirmed directly in `run.log`: `dt` halved
+repeatedly down to `dtTry=3.90625e-06` (`Tmax=89.9365`, still short of
+`90`) and kept going -- `t` effectively froze at `t=20.987` (short of
+`Tramp=21.145`) while burning the entire 13.3-hour run just inching
+through fractions of a Kelvin near `Tc`. `fracLeft` genuinely never
+deviated (symmetric heating at this overcurrent, expected), so
+`run_transient.py`'s stall detector correctly fired on what it saw --
+`t` stalled between invocations -- and correctly labeled it
+`reached_end_no_deviation`. The label logic wasn't wrong; the `t`
+trajectory it was fed was garbage from the criterion, not the physics.
+A full quench through `Tc` is completely legitimate and must be
+traversable in finite steps.
+
+**Fix (implemented):** normalize `jcFrac`'s denominator against a FIXED
+reference, `jcRef = JcT(Tcold)` (`Tcold=77K`, always substantial, never
+vanishes), instead of the local, transiently-near-zero `jcBefore`.
+`jcFrac = abs(JcT(T[].max)-jcBefore)/max(jcRef, 1e-30)` -- same
+numerator (still the genuine per-step `Jc` delta), different, well-posed
+denominator. Syntax-checked against the real FreeFEM parser; not yet
+re-run against `r1p36`'s actual scenario to confirm it now crosses `Tc`
+in finite time -- that's the next real test once resubmitted.
+`r1p83`/`r1p9` in the same batch were likely stuck in this exact same
+spiral when this was found -- check whether they need killing and
+rerunning rather than left to keep spinning on the old code.
 
 ### Runaway threshold for ratio>=1.0 batches: use --runaway-tmax 250
 
