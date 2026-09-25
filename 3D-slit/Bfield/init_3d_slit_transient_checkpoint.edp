@@ -1,4 +1,12 @@
 include "../shared/hts_mesh_module_3d_slit.idp"
+include "getARGV.idp"
+
+// Lets a run_transient.py-style wrapper point this at a per-run output
+// directory without editing this file -- ported from electrothermal/
+// init_3d_slit_transient_checkpoint.edp. Default "" reproduces this
+// script's exact prior behavior (files written to the CWD).
+string outPrefix = getARGV("-outprefix", "");
+
 fespace Vh3(Th3, P1);
 Vh3 T = 77.0;
 // nxs must match the value used in the step scripts (60) -- this writes
@@ -10,7 +18,7 @@ Vh3 T = 77.0;
 // all, so this format change is harmless for them.
 int nxs = 60;
 {
-  ofstream fchkOut("ckpt_3d_slit_transient.txt");
+  ofstream fchkOut(outPrefix+"ckpt_3d_slit_transient.txt");
   fchkOut.precision(12);
   fchkOut << 0.0 << "\n";
   for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";

@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
 """
-run_transient.py -- drives step_3d_slit_transient_diag.edp through a full
-transient run at a given transport-current ratio: reinitializes the
-checkpoint/CSV outputs, repeatedly re-invokes FreeFem++ (one timestep per
-invocation, matching maxStepsThisRun=1 in the .edp), and stops
+run_bfield_transient.py -- drives step_3d_slit_transient_bfield.edp through
+a full transient run at a given transport-current ratio: reinitializes the
+checkpoint/CSV outputs, repeatedly re-invokes FreeFem++, and stops
 automatically once the current split has settled back near 50/50, a
 runaway/divergence signal appears, or the script's own tEnd is reached --
 instead of a human eyeballing transient_3d_slit.csv and deciding by hand.
 
-The stop-condition thresholds below are first-pass placeholders with no
-real run data to calibrate against yet -- see 3D-slit/electrothermal/CLAUDE.md.
+Ported from electrothermal/run_transient.py (see that track's CLAUDE.md for
+the full derivation of every threshold/flag below) once
+step_3d_slit_transient_bfield.edp grew the matching -ratio/-outprefix/
+-steps-per-invocation/etc. flags. Differences from the electrothermal
+version, both deliberate:
+  - No --resume support yet -- electrothermal's --resume reconstructs
+    deviation/trend state from an existing transient_3d_slit.csv, which
+    this workflow could do identically, but it hasn't been ported/verified
+    here yet. An interrupted run currently needs re-initializing.
+  - No prePulse/runaway_before_pulse status split -- that was added to
+    electrothermal AFTER its own I0 fix, as a separate, later feature, and
+    was explicitly not ported to this workflow's .edp. "runaway" here
+    covers both the heater-triggered and pure-overcurrent cases.
+
+The stop-condition thresholds below are the same first-pass placeholders
+electrothermal's docstring already flags -- no Bfield-specific run data has
+calibrated them yet. See 3D-slit/Bfield/CLAUDE.md.
 
 Usage:
-  python3 run_transient.py --ratio 0.70
-  python3 run_transient.py --ratio 0.85 --label r0p85 --max-steps 5
+  python3 run_bfield_transient.py --ratio 0.70
+  python3 run_bfield_transient.py --ratio 0.85 --label r0p85 --max-steps 5
 """
 import argparse
 import csv
@@ -30,59 +44,37 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 INIT_SCRIPT = "init_3d_slit_transient_checkpoint.edp"
-STEP_SCRIPT = "step_3d_slit_transient_diag.edp"
+STEP_SCRIPT = "step_3d_slit_transient_bfield.edp"
 TRANSIENT_CSV = "transient_3d_slit.csv"
 
-# Same set analyze_sweep_hdf5.py already uses to exclude a run's physics
-# from cross-ratio plots -- these are the statuses with no trustworthy
-# result at all (crashed, never started, garbage numbers), as opposed to
-# a legitimate-if-unwanted terminal outcome (settled/runaway/reached_end_*/
-# plateaued_off_parity/max_steps_exceeded). Kept in sync manually since
-# they're separate files with separate purposes (plotting vs. process
-# exit code) -- update both if this list ever changes.
+# Same set electrothermal's run_transient.py uses -- statuses with no
+# trustworthy result at all (crashed, never started, garbage numbers), as
+# opposed to a legitimate-if-unwanted terminal outcome (settled/runaway/
+# reached_end_*/plateaued_off_parity/max_steps_exceeded).
 RETRY_WORTHY_STATUSES = {"crashed", "init_failed", "numerical_divergence", "no_data"}
 
 DEFAULT_RUNAWAY_TMAX = 900.0
 DEFAULT_DEVIATION_EPS = 0.01
 DEFAULT_RECOVER_EPS = 0.002
 DEFAULT_RECOVER_HOLD_TIME = 0.1
-# Real bug caught by inspecting a "settled" result's own Tmax (ratio=0.91,
-# 20A/s ramp sweep): fracLeft can return to ~0.5 not because the quench
-# recovered, but because BOTH sides have gone symmetrically resistive in a
-# full-tape thermal runaway -- Tmax was 870K (climbing ~650K/s, nowhere
-# near turning over) when the deviation-only check declared "settled".
-# 90.0 = Tc (matches plot_slit_transient.py's --tc default and the REBCO
-# Tc used throughout this repo) -- every genuine recovery seen in real
-# data so far has stayed under ~85K; anything at/above Tc is definitely
-# non-superconducting and not a safe "settled" state regardless of how
-# symmetric the current split looks.
+# See electrothermal/run_transient.py's identical constant: fracLeft
+# returning to ~0.5 can mean BOTH sides went symmetrically resistive in a
+# full-tape runaway, not that the quench recovered. 90.0 = Tc, matching
+# this repo's REBCO Tc used throughout.
 DEFAULT_SETTLE_TMAX_MAX = 90.0
 DEFAULT_MAX_STEPS = 500
-# Calibrated against a real run (ratio=0.70): deviation relaxed smoothly
-# from a peak of ~0.474 to ~0.016 with a decay time constant of ~0.75s,
-# still clearly converging (slope ~0.013/s) at tEnd -- nowhere near flat.
-# trend-eps is set well below that so a genuinely-still-converging run
-# like that one is never misclassified as plateaued.
 DEFAULT_TREND_WINDOW = 0.3
 DEFAULT_TREND_EPS = 0.001
-# First-pass value, not yet calibrated against real mesh-build-vs-solve
-# profiling data (see CLAUDE.md) -- amortizes the mesh-rebuild-per-invocation
-# cost (the mesh is rebuilt from scratch on every FreeFEM process launch)
-# across this many physical timesteps per invocation instead of just 1.
-# Safe regardless of the exact value: the .edp now checkpoints after every
-# physical step, not once per invocation, so crash-safety/--resume behavior
-# is unaffected by raising this.
+# Amortizes the mesh-rebuild-per-invocation cost (the mesh is rebuilt from
+# scratch on every FreeFEM process launch) across this many physical
+# timesteps per invocation instead of just 1 -- see CLAUDE.md. Safe
+# regardless of the exact value: the .edp checkpoints after every physical
+# step, not once per invocation.
 DEFAULT_STEPS_PER_INVOCATION = 20
 # 0.0 is a sentinel meaning "use the .edp's original fixed 0.5s ramp
-# duration" -- set >0 (target A/s) to derive Tramp = I0Target/ramp_rate
-# instead, for the collaborator-requested slow-ramp scenario.
+# duration" -- set >0 (target A/s) to derive Tramp = I0Target/ramp_rate.
 DEFAULT_RAMP_RATE = 0.0
 DEFAULT_RAMP_DT = 0.05
-# dt used for whatever portion of the ramp already has I0(t) above Ic --
-# see step_3d_slit_transient_diag.edp's rampDtAboveIc comment. Only
-# matters once currentRatio>1 (I0(t) crosses Ic during the ramp itself);
-# for ratio<=1 this has no effect regardless of its value. 0.002 matches
-# the .edp's own default and the pulse phase's resolution.
 DEFAULT_RAMP_DT_ABOVE_IC = 0.002
 DEFAULT_MAX_STEP_RISE = 500.0
 DEFAULT_MAX_BISECTIONS = 10
@@ -95,21 +87,32 @@ def ts():
 
 def sanitize_label(ratio):
     # "0.70" -> "r0p70"; avoids dots, which are awkward in tar/rsync/glob
-    # patterns for the eventual colleague handoff.
+    # patterns for an eventual colleague handoff.
     s = f"{ratio:.4f}".rstrip("0").rstrip(".")
     return "r" + s.replace(".", "p").replace("-", "neg")
 
 
 def freefem_binary(freefem_bin=None):
-    # Resolution order: explicit --freefem-bin flag, then FREEFEM_BIN env var
-    # (handy to export once rather than pass every invocation), then PATH.
-    # Needed because FreeFEM installs are commonly a from-source/home-directory
-    # build on remote/cluster machines, not something on $PATH.
-    candidate = freefem_bin or os.environ.get("FREEFEM_BIN") or shutil.which("FreeFem++")
-    if candidate is None:
-        sys.exit("FreeFem++ not found -- pass --freefem-bin /path/to/FreeFem++, "
-                 "set FREEFEM_BIN, or add it to PATH.")
-    return candidate
+    # Resolution order: explicit --freefem-bin flag, then FREEFEM_BIN env
+    # var, then PATH. Needed because FreeFEM installs are commonly a
+    # from-source/home-directory build on remote/cluster machines.
+    #
+    # shutil.which() is applied to WHATEVER candidate wins, not just the
+    # PATH fallback -- found live while testing this wrapper: passing a
+    # bad --freefem-bin (or a stale FREEFEM_BIN) previously passed this
+    # function's `is None` check (a bad string is still truthy) and only
+    # failed later inside subprocess.Popen with an unhandled
+    # FileNotFoundError traceback, not this function's intended clean
+    # error message. which() checks existence+executability for an
+    # absolute/relative path too, not just a bare name on PATH, so this
+    # one call covers all three resolution sources uniformly.
+    candidate = freefem_bin or os.environ.get("FREEFEM_BIN") or "FreeFem++"
+    resolved = shutil.which(candidate)
+    if resolved is None:
+        sys.exit(f"FreeFem++ not found or not executable at {candidate!r} -- "
+                 f"pass --freefem-bin /path/to/FreeFem++, set FREEFEM_BIN, or "
+                 f"add it to PATH.")
+    return resolved
 
 
 def reinit_run_dir(run_dir: Path, force: bool):
@@ -120,7 +123,7 @@ def reinit_run_dir(run_dir: Path, force: bool):
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             backup = run_dir.parent / f"{run_dir.name}.bak.{stamp}"
             run_dir.rename(backup)
-            print(f"[run_transient] existing {run_dir} moved aside to {backup}")
+            print(f"[run_bfield_transient] existing {run_dir} moved aside to {backup}")
     run_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -131,9 +134,9 @@ def run_freefem(script_name, extra_args, log_fh, freefem_bin=None):
     print(header, end="", flush=True)
     log_fh.write(header)
     log_fh.flush()
-    # Stream output live (mesh build + a single timestep solve costs minutes
-    # here, not seconds) instead of buffering it all until the process exits
-    # -- a silent multi-minute wait is indistinguishable from a real hang.
+    # Stream output live (mesh build + solve costs minutes here, not
+    # seconds) instead of buffering until the process exits -- a silent
+    # multi-minute wait is indistinguishable from a real hang.
     proc = subprocess.Popen(cmd, cwd=SCRIPT_DIR, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, bufsize=1)
     for line in proc.stdout:
@@ -187,37 +190,16 @@ def finalize(status_path, log_fh, label, ratio, status, row, n_steps, start_time
     }
     log_fh.write(f"{ts()} FINISHED status={status} n_steps={n_steps} elapsed={elapsed:.1f}s\n")
     status_path.write_text(json.dumps(summary, indent=2))
-    print(f"[run_transient] label={label} ratio={ratio} -> {status} "
+    print(f"[run_bfield_transient] label={label} ratio={ratio} -> {status} "
           f"({n_steps} steps, {elapsed:.1f}s)")
     return summary
-
-
-def load_resume_state(csv_path, deviation_eps, trend_window):
-    # Reconstructs what an interrupted run_one() would have been tracking
-    # in memory, from the CSV rows a prior (killed) invocation already
-    # wrote. recover_since is deliberately NOT reconstructed -- if the
-    # split was already within recover-eps right when the process died,
-    # resuming just requires observing that closeness continue for
-    # recover-hold-time again, rather than trusting a state we have no
-    # persisted record of. Slightly conservative, never a false positive.
-    rows = []
-    with csv_path.open() as f:
-        rows = list(csv.DictReader(f))
-    if not rows:
-        return 0, None, False, deque()
-    prev_t = float(rows[-1]["t"])
-    has_deviated = any(abs(float(r["fracLeft"]) - 0.5) > deviation_eps for r in rows)
-    trend_buffer = deque((float(r["t"]), abs(float(r["fracLeft"]) - 0.5)) for r in rows)
-    while trend_buffer and prev_t - trend_buffer[0][0] > trend_window:
-        trend_buffer.popleft()
-    return len(rows), prev_t, has_deviated, trend_buffer
 
 
 def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             deviation_eps=DEFAULT_DEVIATION_EPS, recover_eps=DEFAULT_RECOVER_EPS,
             recover_hold_time=DEFAULT_RECOVER_HOLD_TIME, max_steps=DEFAULT_MAX_STEPS,
             force=False, freefem_bin=None, trend_window=DEFAULT_TREND_WINDOW,
-            trend_eps=DEFAULT_TREND_EPS, resume=False,
+            trend_eps=DEFAULT_TREND_EPS,
             steps_per_invocation=DEFAULT_STEPS_PER_INVOCATION,
             ramp_rate=DEFAULT_RAMP_RATE, ramp_dt=DEFAULT_RAMP_DT,
             ramp_dt_above_ic=DEFAULT_RAMP_DT_ABOVE_IC,
@@ -234,33 +216,18 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
     status_path = run_dir / "status.json"
     csv_path = run_dir / TRANSIENT_CSV
 
-    if resume:
-        ckpt_path = run_dir / "ckpt_3d_slit_transient.txt"
-        if not ckpt_path.exists():
-            sys.exit(f"--resume given but no checkpoint found at {ckpt_path} -- "
-                     f"nothing to resume. Omit --resume to start fresh (this "
-                     f"will move aside/delete {run_dir} as usual).")
-        n_steps, prev_t, has_deviated, trend_buffer = load_resume_state(
-            csv_path, deviation_eps, trend_window)
-        print(f"[run_transient] resuming label={label} from t={prev_t}, "
-              f"{n_steps} step(s) already recorded")
-        log_mode = "a"
-    else:
-        reinit_run_dir(run_dir, force)
-        n_steps, prev_t, has_deviated, trend_buffer = 0, None, False, deque()
-        log_mode = "w"
+    reinit_run_dir(run_dir, force)
+    n_steps, prev_t, has_deviated, trend_buffer = 0, None, False, deque()
     recover_since = None
 
     start_time = time.monotonic()
-    with log_path.open(log_mode) as log_fh:
-        log_fh.write(f"{ts()} {'resuming' if resume else 'starting'} "
-                      f"ratio={ratio} label={label}\n")
+    with log_path.open("w") as log_fh:
+        log_fh.write(f"{ts()} starting ratio={ratio} label={label}\n")
 
-        if not resume:
-            rc = run_freefem(INIT_SCRIPT, ["-outprefix", out_prefix], log_fh, freefem_bin)
-            if rc != 0:
-                return finalize(status_path, log_fh, label, ratio, "init_failed",
-                                 None, 0, start_time)
+        rc = run_freefem(INIT_SCRIPT, ["-outprefix", out_prefix], log_fh, freefem_bin)
+        if rc != 0:
+            return finalize(status_path, log_fh, label, ratio, "init_failed",
+                             None, 0, start_time)
 
         while True:
             rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix,
@@ -273,10 +240,7 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                                             "-maxjcfracchange", str(max_jc_frac_change)],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
-            # once steps_per_invocation > 1 -- each invocation now advances up
-            # to `steps_per_invocation` real timesteps internally (see
-            # CLAUDE.md). transient_3d_slit.csv still has one row per physical
-            # timestep regardless; only this counter's meaning changes.
+            # once steps_per_invocation > 1 -- see CLAUDE.md.
             n_steps += 1
             if rc != 0:
                 return finalize(status_path, log_fh, label, ratio, "crashed",
@@ -294,37 +258,28 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                           f"fracLeft={frac_left:.6f}\n")
             log_fh.flush()
 
-            # Checked BEFORE the runaway threshold: NaN/Inf comparisons against
-            # a finite threshold are false in Python (and nearly everywhere
-            # else), so a diverged-to-NaN run would otherwise never trip the
-            # runaway check and would just spin to max_steps writing garbage.
+            # Checked BEFORE the runaway threshold: NaN/Inf comparisons
+            # against a finite threshold are false in Python, so a
+            # diverged-to-NaN run would otherwise never trip the runaway
+            # check and would just spin to max_steps writing garbage.
             if any(math.isnan(v) or math.isinf(v) for v in (tmax, frac_left)):
                 return finalize(status_path, log_fh, label, ratio,
                                  "numerical_divergence", row, n_steps, start_time)
 
             if tmax > runaway_tmax:
-                # prePulse (added to transient_3d_slit.csv alongside the I0
-                # fix -- see CLAUDE.md) distinguishes a pure overcurrent/
-                # ramp-driven runaway, where the heater never fires at all,
-                # from the heater-triggered runaways this model was
-                # originally built around -- seen live at ratio=1.404.
-                # .get() default keeps this from KeyError-ing on a CSV
-                # written before this column existed (e.g. a --resume of an
-                # old run); such a row is treated as NOT pre-pulse, matching
-                # this status's pre-existing (undifferentiated) behavior.
-                pre_pulse = float(row.get("prePulse", 0.0)) >= 0.5
-                status = "runaway_before_pulse" if pre_pulse else "runaway"
-                return finalize(status_path, log_fh, label, ratio, status,
+                # No prePulse column here (see module docstring) -- unlike
+                # electrothermal, this workflow doesn't distinguish a pure
+                # overcurrent/ramp-driven runaway from a heater-triggered one.
+                return finalize(status_path, log_fh, label, ratio, "runaway",
                                  row, n_steps, start_time)
 
             deviation = abs(frac_left - 0.5)
             if deviation > deviation_eps:
                 has_deviated = True
 
-            # Both deviation AND tmax must be satisfied -- deviation alone
-            # is not sufficient (see DEFAULT_SETTLE_TMAX_MAX above): a
-            # symmetric full-tape runaway can pass the deviation check
-            # while very much not being safe.
+            # Both deviation AND tmax must be satisfied -- a symmetric
+            # full-tape runaway can pass the deviation check alone while
+            # very much not being safe. See DEFAULT_SETTLE_TMAX_MAX above.
             if has_deviated and deviation < recover_eps and tmax < settle_tmax_max:
                 if recover_since is None:
                     recover_since = t
@@ -334,23 +289,11 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             else:
                 recover_since = None
 
-            # Trend of the deviation magnitude over the trailing trend-window
-            # of simulated time -- used to tell "still relaxing toward parity,
-            # just needs more time than tEnd allows" apart from "genuinely
-            # stuck at a new, off-center equilibrium" apart from "still
-            # getting worse." Deliberately separate from the strict settled
-            # check above: settled needs to actually BE close to 0.5, this
-            # only asks whether it's still MOVING.
             trend_buffer.append((t, deviation))
             while trend_buffer and t - trend_buffer[0][0] > trend_window:
                 trend_buffer.popleft()
             trend = classify_trend(trend_buffer, trend_eps) if has_deviated else None
 
-            # Early exit: no strict-tolerance recovery, but the trend has
-            # genuinely flattened (not just slowed) -- further steps are
-            # unlikely to add new information, so don't burn more wall-clock
-            # time grinding out to tEnd. A still-converging run (trend==
-            # "converging") never hits this; it keeps running.
             if (has_deviated and deviation >= recover_eps and trend == "plateaued"
                     and t - trend_buffer[0][0] >= trend_window):
                 return finalize(status_path, log_fh, label, ratio,
@@ -393,9 +336,7 @@ def main():
     p.add_argument("--settle-tmax-max", type=float, default=DEFAULT_SETTLE_TMAX_MAX,
                    help=f"Tmax (K) must ALSO be below this for a run to be "
                         f"declared settled, not just a recovered current split "
-                        f"-- a symmetric full-tape runaway can otherwise pass the "
-                        f"deviation-only check (default: {DEFAULT_SETTLE_TMAX_MAX}, "
-                        f"i.e. Tc)")
+                        f"(default: {DEFAULT_SETTLE_TMAX_MAX}, i.e. Tc)")
     p.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS,
                    help=f"Safety cap on invocations for this ratio "
                         f"(default: {DEFAULT_MAX_STEPS})")
@@ -410,27 +351,14 @@ def main():
     p.add_argument("--force", action="store_true",
                    help="Delete any existing run directory for this label "
                         "instead of moving it aside")
-    p.add_argument("--resume", action="store_true",
-                   help="Continue an existing, interrupted run for this label in "
-                        "place (e.g. after a machine reboot/maintenance killed a "
-                        "prior invocation) instead of reinitializing. Requires the "
-                        "run directory's checkpoint to already exist; skips the "
-                        "init script and reconstructs deviation/trend state from "
-                        "the existing CSV. wall_clock_seconds in status.json then "
-                        "reflects only time since this resume, not the full run.")
     p.add_argument("--freefem-bin", default=None,
                    help="Path to the FreeFem++ executable (default: $FREEFEM_BIN "
-                        "env var, else whatever 'FreeFem++' resolves to on PATH). "
-                        "Needed when FreeFEM isn't on PATH, e.g. a from-source "
-                        "build under your home directory on a remote machine.")
+                        "env var, else whatever 'FreeFem++' resolves to on PATH).")
     p.add_argument("--steps-per-invocation", type=int, default=DEFAULT_STEPS_PER_INVOCATION,
-                   help=f"Physical timesteps advanced per FreeFEM invocation, "
-                        f"amortizing the mesh-rebuild cost paid on every process "
-                        f"launch across this many steps (default: "
-                        f"{DEFAULT_STEPS_PER_INVOCATION}). Not the same as "
-                        f"--max-steps, which caps total invocations for this "
-                        f"ratio as a safety net. See CLAUDE.md for the "
-                        f"mesh-vs-solve profiling this should be tuned against.")
+                   help=f"Physical timesteps advanced per FreeFEM invocation "
+                        f"(default: {DEFAULT_STEPS_PER_INVOCATION}). Not the same "
+                        f"as --max-steps, which caps total invocations as a "
+                        f"safety net. See CLAUDE.md.")
     p.add_argument("--ramp-rate", type=float, default=DEFAULT_RAMP_RATE,
                    help="Target current ramp rate in A/s (default: "
                         f"{DEFAULT_RAMP_RATE}, meaning use the .edp's original "
@@ -438,41 +366,30 @@ def main():
                         "duration as I0Target/ramp-rate instead.")
     p.add_argument("--ramp-dt", type=float, default=DEFAULT_RAMP_DT,
                    help=f"Timestep used during the ramp phase specifically "
-                        f"(default: {DEFAULT_RAMP_DT}, today's exact value). "
-                        f"See CLAUDE.md before coarsening this for real data.")
+                        f"(default: {DEFAULT_RAMP_DT}, today's exact value).")
     p.add_argument("--ramp-dt-above-ic", type=float, default=DEFAULT_RAMP_DT_ABOVE_IC,
-                   help=f"Timestep used for whatever portion of the ramp already has I0(t) "
-                        f"above Ic (default: {DEFAULT_RAMP_DT_ABOVE_IC}) -- only matters "
-                        f"once --ratio>1. See CLAUDE.md / step_3d_slit_transient_diag.edp's "
-                        f"rampDtAboveIc comment: --ramp-dt alone is unsafe there.")
+                   help=f"Starting dt for whatever portion of the ramp already has "
+                        f"I0(t) above Ic (default: {DEFAULT_RAMP_DT_ABOVE_IC}) -- "
+                        f"only matters once --ratio>1. See CLAUDE.md.")
     p.add_argument("--max-step-rise", type=float, default=DEFAULT_MAX_STEP_RISE,
                    help=f"Max K a single heatStep solve may move Tmax/Tmin from "
-                        f"Told before it's treated as numerical garbage and the step "
-                        f"is retried at half dt (default: {DEFAULT_MAX_STEP_RISE}). "
-                        f"See CLAUDE.md's adaptive-bisection section.")
+                        f"Told before it's retried at half dt (default: "
+                        f"{DEFAULT_MAX_STEP_RISE}). See CLAUDE.md.")
     p.add_argument("--max-bisections", type=int, default=DEFAULT_MAX_BISECTIONS,
                    help=f"Max halvings of a step's dt before giving up and failing "
-                        f"hard rather than retrying forever (default: {DEFAULT_MAX_BISECTIONS}).")
+                        f"hard (default: {DEFAULT_MAX_BISECTIONS}).")
     p.add_argument("--max-jc-frac-change", type=float, default=DEFAULT_MAX_JC_FRAC_CHANGE,
-                   help=f"Above-Ic adaptive controller's accuracy band: max fractional "
-                        f"change in JcT(Tmax) allowed per step before halving dt instead "
-                        f"of accepting it (default: {DEFAULT_MAX_JC_FRAC_CHANGE}). See "
-                        f"CLAUDE.md's adaptive-bisection section.")
+                   help=f"Above-Ic adaptive controller's accuracy band (default: "
+                        f"{DEFAULT_MAX_JC_FRAC_CHANGE}). See CLAUDE.md.")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
     summary = run_one(args.ratio, label, args.base_dir, args.runaway_tmax, args.deviation_eps,
             args.recover_eps, args.recover_hold_time, args.max_steps, args.force,
-            args.freefem_bin, args.trend_window, args.trend_eps, args.resume,
+            args.freefem_bin, args.trend_window, args.trend_eps,
             args.steps_per_invocation, args.ramp_rate, args.ramp_dt,
             args.ramp_dt_above_ic, args.settle_tmax_max,
             args.max_step_rise, args.max_bisections, args.max_jc_frac_change)
-    # Exit code drives Condor's on_exit_hold/periodic_release retry policy
-    # (see condor/sweep.sub) -- without this, the process always exited 0
-    # regardless of status, so no exit-code-based retry could ever have
-    # worked. A RETRY_WORTHY status is exactly the kind of failure the
-    # node-heterogeneity investigation found (see CLAUDE.md) -- plausibly
-    # just needs a different execute node, not a real fix.
     if summary["status"] in RETRY_WORTHY_STATUSES:
         sys.exit(1)
 

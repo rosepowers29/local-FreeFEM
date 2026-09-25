@@ -690,3 +690,52 @@ all four of those runs classify as `converging`. If you add a new
 outcome to `run_transient.py`'s state machine, add it to
 `OUTCOME_LABELS`/`OUTCOME_COLORS` here too or it'll fall back to
 whatever raw string `status` holds.
+
+## `runaway_before_pulse` status (pure overcurrent runaway, no heater)
+
+Found live in the clean (post-I0-fix) granular batch at ratio=1.404:
+`Tmax` crossed the runaway cutoff at `t=21.06s` while `tPulseStart` (=
+`Tramp`) was `21.1s` -- the heater pulse never fired at all. The
+above-Ic ramp itself was already enough to drive the tape into thermal
+runaway before the heater ever got a chance to act. Confirmed physically
+sane, not a bug: with no heater active, `fracLeft` stays at `0.5` to
+within ~1e-6 (numerical bisection noise) for the whole run, i.e. the
+system genuinely never broke left/right symmetry -- this is qualitatively
+different from the heater-triggered quenches this model was originally
+built to study, and worth keeping distinct for the surrogate-model
+dataset rather than lumping both under one `runaway` label.
+
+Plumbing (mirrors the `I0` fix, since Python doesn't know `Tramp`/`Ic`
+and re-deriving them independently would just create another
+duplicated-formula drift risk -- see `TcuL_x` naming gotcha's spirit):
+- `step_3d_slit_transient_diag.edp` now writes a `prePulse` column
+  (`1.0` if `t < tPulseStart` else `0.0`) to `transient_3d_slit.csv`,
+  evaluated at print time (post-increment `t`), the same place the `I0`
+  fix lives.
+- `run_transient.py`'s runaway check reads that column and sets status
+  `runaway_before_pulse` instead of `runaway` when it's `1.0`. Falls
+  back to `runaway` (old behavior) if the column is missing entirely --
+  e.g. a `--resume` of a run started before this change existed.
+- Only `runaway` needed splitting: every other status
+  (`settled`/`reached_end_*`/`plateaued_off_parity`) requires
+  `has_deviated`, which structurally can't go true before the heater
+  breaks left/right symmetry.
+- Not in `RETRY_WORTHY_STATUSES` -- this is a legitimate, trustworthy
+  physics result, just a different failure mode than `runaway`.
+- `analyze_sweep_hdf5.py`'s `OUTCOME_LABELS`/`OUTCOME_COLORS` got a
+  `"runaway (before pulse)"` entry (`darkorange`, distinct from
+  `runaway`'s `tab:red`).
+- `analyze_voltage_diagnostics.py`'s `RUNAWAY_OUTCOMES` now includes it
+  too (so it isn't silently treated as a third, skip-worthy outcome) --
+  but that script's whole framing is lead-time *relative to the heater
+  pulse firing*, which has no meaning for a run where the pulse never
+  fired. Any voltage-lead-time number pulled from that bucket for a
+  `runaway_before_pulse` run should be treated with suspicion, not taken
+  at face value.
+
+**Runs from before this change** (`status="runaway"` with no `prePulse`
+column) aren't retroactively relabeled -- their own CSV's `I0` history
+could still be checked by hand (I0 strictly increasing == still
+ramping == pre-pulse; I0 flat between the last two rows == ramp already
+complete) if it ever matters for a specific historical run, but no
+batch-wide reclassification has been done.

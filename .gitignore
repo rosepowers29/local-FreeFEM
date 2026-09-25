@@ -10,3 +10,10 @@
 3D-slit/electrothermal/condor/ratios.txt
 3D-slit/electrothermal/condor/work/
 3D-slit/electrothermal/condor/logs/
+3D-slit/Bfield/runs/
+3D-slit/Bfield/condor/payload.tar.gz
+3D-slit/Bfield/condor/_payload_build/
+3D-slit/Bfield/condor/ratios.txt
+3D-slit/Bfield/condor/work/
+3D-slit/Bfield/condor/shared/
+3D-slit/Bfield/condor/logs/

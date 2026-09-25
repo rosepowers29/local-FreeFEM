@@ -40,18 +40,20 @@
 // ============================================================
 
 // ---- Kim model: Jc(B,T) = Jc(T)/(1+|B|/B0) ----
-// PLACEHOLDER VALUE -- no experimental Jc(B,T) data on hand as of this
-// writing. 0.1 T is a round, order-of-magnitude-typical value for
-// REBCO self-field suppression scales in the literature, chosen
-// without search access to verify against a specific source. Treat as
-// a stand-in to be replaced once real data or a specific literature
-// value is available. Also note: this is an ISOTROPIC Kim model using
-// |B| regardless of orientation, per the project roadmap's stated
-// plan -- real REBCO Jc(B) is strongly anisotropic (perpendicular
-// field suppresses much more than parallel field); that anisotropy is
-// a known simplification here, not an oversight, and is a candidate
-// refinement for later, not implemented now.
-real B0kim = 0.1;
+// LITERATURE VALUE (2026-09-25), from Loic Queval et al 2016 Supercond.
+// Sci. Technol. 29 024007 -- replaces the prior 0.1 T placeholder (round,
+// order-of-magnitude guess made without search access; see git history).
+// Suppression scales with 1/B0kim, so this is a >2x more aggressive
+// suppression curve than the placeholder, not a cosmetic change --
+// verify with a real run before trusting downstream results against it
+// (see Bfield/CLAUDE.md).
+// Also note: this is still an ISOTROPIC Kim model using |B| regardless
+// of orientation -- real REBCO Jc(B) is strongly anisotropic
+// (perpendicular field suppresses much more than parallel field); that
+// anisotropy is a known simplification here, not an oversight, and is a
+// candidate refinement for later (see Bfield/CLAUDE.md for the
+// isotropic-first verification plan), not implemented now.
+real B0kim = 0.04265;
 
 func real JcTB(real Tl, real Bmag){
   return JcT(Tl) / (1.0 + Bmag/B0kim);

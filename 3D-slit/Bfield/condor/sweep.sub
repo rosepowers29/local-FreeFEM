@@ -1,0 +1,79 @@
+# Condor submit file: one job per current ratio, ratio-level parallelism
+# (embarrassingly parallel -- each ratio is fully independent, isolated
+# into its own runs/<label>/ by run_bfield_transient.py already). Ported
+# from electrothermal/condor/sweep.sub -- see condor/README.md before
+# submitting a real sweep with this, and that track's own README.md for
+# the underlying Condor-syntax/resource-sizing caveats this inherits
+# unverified.
+
+universe        = container
+# Unified container syntax (HTCondor 9.0+): container_image accepts both
+# a Docker reference (docker://registry/image:tag) and a local Apptainer/
+# Singularity .sif path. UNVERIFIED against this pool's actual HTCondor
+# version -- same caveat electrothermal's sweep.sub carries; ask pool
+# admins which applies and swap this block if needed.
+#
+# Reuses electrothermal's exact published image (same digest) rather
+# than building a separate one: the image is track-agnostic (FreeFEM +
+# Ubuntu + python3 only, see ../../electrothermal/condor/Dockerfile --
+# no project code or data baked in, that's transferred separately via
+# payload.tar.gz). Building a Bfield-specific image would be identical
+# content under a different tag -- pure duplicated build/push/digest-
+# pinning effort for zero functional difference. If you'd rather have a
+# Bfield-tagged image for naming clarity, `docker buildx build` the same
+# Dockerfile as `local-freefem-bfield` and update this line to match.
+container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal@sha256:8b39db74c15d90180fb623cda03211d434ce619cd3786c3abbd37de930aed37c
+
+# The published image is amd64-only (confirmed: no aarch64 variant) --
+# guarantee it never lands on a non-x86_64 execute node, in case this
+# pool has any in the mix.
+requirements = (Arch == "X86_64")
+
+executable      = condor_run_ratio.sh
+# Unlike electrothermal's sweep.sub, no --ramp-rate/--ramp-dt hardcoded
+# here -- that slow-ramp scenario was a collaborator-specific requirement
+# calibrated and validated for electrothermal only (see that track's
+# CLAUDE.md); Bfield hasn't validated it at all. Defaults to the .edp's
+# original fixed 0.5s ramp. Add --ramp-rate/--ramp-dt here (together --
+# see electrothermal/CLAUDE.md for why they must be raised in lockstep)
+# once/if this workflow needs the same slow-ramp scenario.
+arguments       = $(ratio) $(label) --runaway-tmax $(runaway_tmax)
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files    = payload.tar.gz
+transfer_output_files   = work/runs/$(label)
+
+# First-pass guesses carried over from electrothermal's sweep.sub, NOT
+# re-measured for Bfield specifically -- the mesh is the same size
+# (~88K DOF, same hts_mesh_module_3d_slit.idp) but this workflow does
+# extra per-step work (Biot-Savart self-field reconstruction), so actual
+# memory/CPU usage may differ. Run one job, check its actual usage
+# (condor_q -long, or the job's .log after completion), and tune before
+# trusting a full unattended sweep.
+request_cpus   = 1
+request_memory = 4096M
+request_disk   = 2048M
+
+output = logs/$(label).out
+error  = logs/$(label).err
+log    = logs/$(label).log
+# Without these, Condor buffers stdout/stderr until the job exits -- see
+# electrothermal/condor/README.md for why that matters for a
+# multi-hour job.
+stream_output = True
+stream_error  = True
+
+# Auto-retry on a RETRY_WORTHY exit code -- same policy and same
+# reasoning as electrothermal/condor/sweep.sub (node-heterogeneity
+# found there, not independently confirmed for Bfield, but the
+# underlying mechanism -- UMFPACK on an ill-conditioned matrix -- is
+# identical since both tracks share the same material tables and
+# unspecified solver=). Requires run_bfield_transient.py's main() to
+# exit 1 on a RETRY_WORTHY status, which it does (ported from
+# electrothermal's identical fix).
+on_exit_hold        = (ExitCode != 0)
+on_exit_hold_reason  = "run_bfield_transient.py reported a RETRY_WORTHY status (see CLAUDE.md) -- auto-releasing to retry, likely on a different execute node"
+periodic_release     = (NumJobStarts < 4) && ((CurrentTime - EnteredCurrentStatus) > 300)
+
+queue ratio,label,runaway_tmax from ratios.txt

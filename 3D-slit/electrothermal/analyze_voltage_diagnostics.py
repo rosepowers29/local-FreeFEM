@@ -88,6 +88,14 @@ RECOVERING_OUTCOMES = {"settled (recovered)", "recovering (asymptotic)", "no dev
 RUNAWAY_OUTCOMES = {
     "runaway", "falsely settled (still runaway)", "falsely recovering (still runaway)",
     "diverging (pre-runaway)",
+    # "runaway (before pulse)" (see CLAUDE.md/run_transient.py's prePulse
+    # field): physically still a runaway, bucketed here so it isn't
+    # silently skipped -- but this script's whole lead-time framing
+    # (voltage-trip time relative to the heater pulse) presumes a pulse
+    # actually fired. A pre-pulse runaway has no such reference point, so
+    # comparisons pulling from this bucket should be checked before
+    # trusting them for these runs specifically.
+    "runaway (before pulse)",
 }
 # Deliberately excluded, not force-bucketed: "plateaued off-parity" is a
 # genuine third physical outcome (new off-center equilibrium), not simply

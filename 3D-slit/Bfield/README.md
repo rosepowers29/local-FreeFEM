@@ -1,7 +1,8 @@
 # 3D-slit — B-field workflow
 
 Full transient laser-slit scenario with self-field/B-field feedback: the
-current ramps to 0.7×Ic over 0.5s, a 2mm×2mm / 13W / 10ms spot heater
+current ramps to a target ratio of Ic (default 0.7×Ic, `-ratio`) over
+the ramp phase, a 2mm×2mm / 13W / 10ms spot heater
 fires on the LEFT side only (z=width/4), then the run continues for 1.5s
 to observe recovery or runaway. Throughout, the Biot-Savart self-field is
 computed from the reconstructed current distribution and fed back into

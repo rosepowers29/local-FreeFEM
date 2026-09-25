@@ -13,6 +13,19 @@ Produces:
                                            Tmax vs ratio, colored by outcome
                                            status -- the settled/runaway
                                            boundary in one picture
+       chart_summary_peak_tmax.png     -- peak Tmax (max over the whole
+                                           run, not just the final row) vs
+                                           ratio -- meant to replace eyeballing
+                                           chart_summary_tmax_vs_t.png once a
+                                           sweep has too many ratios for
+                                           overlaid line plots to stay legible
+       chart_summary_peak_voltage.png  -- peak V_CL_minus (total end-to-end
+                                           tape voltage) vs ratio
+       chart_summary_recovery_margin.png -- time from heater-pulse-end to
+                                           Tmax's own turning point vs ratio,
+                                           for runs that actually turn over
+                                           (skips true runaways -- there's no
+                                           turning point to measure)
   2. Per-ratio diagnostic plots, one subdirectory per label, reusing
      ../shared/plot_slit_transient.py and
      ../shared/plot_diagnostics_3d_slit.py's plotting functions directly
@@ -75,6 +88,7 @@ def detect_pulse_start(transient, default=PULSE_START):
 OUTCOME_LABELS = {
     "settled": "settled (recovered)",
     "runaway": "runaway",
+    "runaway_before_pulse": "runaway (before pulse)",
     "reached_end_no_deviation": "no deviation",
     "crashed": "crashed",
     "init_failed": "init failed",
@@ -112,6 +126,7 @@ OUTCOME_COLORS = {
     "plateaued off-parity": "tab:purple",
     "diverging (pre-runaway)": "tab:orange",
     "runaway": "tab:red",
+    "runaway (before pulse)": "darkorange",
     "falsely settled (still runaway)": "darkred",
     "falsely recovering (still runaway)": "firebrick",
     "no deviation": "tab:blue",
@@ -363,6 +378,101 @@ def make_final_state_plot(runs, outpath):
 
 # ------------------------------------------------------------- per-ratio --
 
+def _scatter_by_outcome(runs, outpath, value_fn, ylabel, title, skip_note=None):
+    # Shared scaffold for the three ratio-vs-scalar scatter plots below --
+    # same colored-by-outcome-status convention as make_final_state_plot,
+    # just one point per run instead of two. value_fn returns None to skip
+    # a run (e.g. no diagnostics group, or no post-pulse turning point);
+    # skipped runs are reported by outcome, not silently dropped, matching
+    # this file's existing skip-reporting convention (see
+    # make_final_state_plot above).
+    fig, ax = plt.subplots(figsize=(9, 6))
+    labels = {r["label"]: outcome_label(r) for r in runs}
+    skipped = []
+    for r in sorted(runs, key=lambda r: r["ratio"]):
+        val = value_fn(r)
+        if val is None:
+            skipped.append(r["label"])
+            continue
+        c = OUTCOME_COLORS.get(labels[r["label"]], "gray")
+        ax.scatter(r["ratio"], val, color=c, s=45, zorder=3)
+    if skipped:
+        skipped_outcomes = sorted({labels[l] for l in skipped})
+        note = f" ({skip_note})" if skip_note else ""
+        print(f"  {outpath.name}: skipping {len(skipped)} run(s){note} "
+              f"(status={{{', '.join(skipped_outcomes)}}}): {', '.join(skipped)}")
+    ax.set_xlabel("transport current ratio (I0 / Ic)")
+    ax.set_ylabel(ylabel)
+    present_outcomes = sorted({v for k, v in labels.items() if k not in skipped})
+    handles = [plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=OUTCOME_COLORS.get(o, "gray"),
+                           markersize=8, label=o) for o in present_outcomes]
+    if handles:
+        ax.legend(handles=handles, loc="best", fontsize=8)
+    ax.set_title(title, fontsize=13)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150)
+    plt.close(fig)
+
+
+def make_peak_tmax_scatter(runs, outpath):
+    def peak_tmax(r):
+        tmax = r["transient"].get("Tmax")
+        return None if tmax is None or len(tmax) == 0 else float(np.max(tmax))
+    _scatter_by_outcome(runs, outpath, peak_tmax, "peak Tmax [K]",
+                        "Peak Tmax vs Transport Current Ratio")
+
+
+def make_peak_voltage_scatter(runs, outpath):
+    # V_CL_minus: cumulative end-to-end tape voltage (see
+    # diagnostics_3d_slit.idp) -- the single scalar a real quench-detection
+    # system would actually watch, as opposed to any one local tap. Raw
+    # value is SI volts; *1e6 matches plot_diagnostics_3d_slit.py's own
+    # display convention (unit_scale=1e6, " [µV]") for every other
+    # voltage chart in this repo.
+    def peak_voltage(r):
+        diag = r.get("diagnostics")
+        if not diag or "V_CL_minus" not in diag or len(diag["V_CL_minus"]) == 0:
+            return None
+        return float(np.max(diag["V_CL_minus"])) * 1e6
+    _scatter_by_outcome(runs, outpath, peak_voltage, "peak V_CL_minus [µV]",
+                        "Peak End-to-End Voltage vs Transport Current Ratio",
+                        skip_note="no diagnostics group")
+
+
+# Minimum decline (K) from a post-pulse Tmax peak to the run's last
+# recorded value before calling it a genuine reversal, rather than noise
+# or a peak that just happens to sit at the very last recorded row (i.e.
+# the run was cut off, possibly still climbing, before any real turnover).
+REVERSAL_MIN_DECLINE_K = 0.5
+
+
+def detect_tmax_reversal(transient, pulse_end):
+    t, tmax = transient.get("t"), transient.get("Tmax")
+    if t is None or tmax is None:
+        return None
+    mask = t >= pulse_end
+    if mask.sum() < 3:   # need at least a peak and a bit of decline after it
+        return None
+    t_post, tmax_post = t[mask], tmax[mask]
+    peak_idx = int(np.argmax(tmax_post))
+    if peak_idx == len(tmax_post) - 1:
+        return None   # peak is the last recorded row -- still climbing (or cut off), no turnover yet
+    decline = tmax_post[peak_idx] - tmax_post[-1]
+    if decline < REVERSAL_MIN_DECLINE_K:
+        return None
+    return float(t_post[peak_idx] - pulse_end)
+
+
+def make_recovery_margin_scatter(runs, outpath):
+    def margin(r):
+        pulse_end = detect_pulse_start(r["transient"]) + PULSE_DUR
+        return detect_tmax_reversal(r["transient"], pulse_end)
+    _scatter_by_outcome(runs, outpath, margin, "pulse-end -> Tmax turnover [s]",
+                        "Recovery Time Margin vs Transport Current Ratio\n"
+                        "(runs with no post-pulse Tmax turnover excluded)",
+                        skip_note="no post-pulse Tmax turnover (true runaway, or cut off while still climbing)")
+
+
 def per_ratio_plots(run, outdir, with_animation):
     outdir.mkdir(parents=True, exist_ok=True)
     label = run["label"]
@@ -464,6 +574,9 @@ def main():
                              "Tmax [K]", "Tmax(t) Across Transport Current Ratios (zoomed)",
                              xlim=zoom_xlim)
     make_final_state_plot(trustworthy, outdir / "chart_summary_final_state.png")
+    make_peak_tmax_scatter(trustworthy, outdir / "chart_summary_peak_tmax.png")
+    make_peak_voltage_scatter(trustworthy, outdir / "chart_summary_peak_voltage.png")
+    make_recovery_margin_scatter(trustworthy, outdir / "chart_summary_recovery_margin.png")
     print(f"  wrote {outdir}/chart_summary_*.png")
 
     print("Per-ratio diagnostic plots...")
