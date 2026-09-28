@@ -9,10 +9,14 @@ logic, only the imported module differs.
 
 Also checks for label collisions before writing anything -- two ratios
 that sanitize to the same label would both write to the same Condor
-output path and clobber each other.
+output path and clobber each other. --aniso automatically suffixes
+"-aniso" onto every label in THIS invocation, so an isotropic and an
+anisotropic sweep over the same ratios (the normal way to run a
+confirmation pair) don't collide with each other -- or with an existing
+isotropic runs/<label>/ from an earlier sweep.
 
 Usage:
-  # explicit list, default runaway_tmax (900)
+  # explicit list, default runaway_tmax (900), isotropic (aniso=0)
   python3 make_ratios_list.py 0.7 > ratios.txt
 
   # range: START STOP STEP, STOP inclusive
@@ -21,6 +25,11 @@ Usage:
   # different runaway_tmax for a different regime (append with >>)
   python3 make_ratios_list.py 0.7 0.85 > ratios.txt
   python3 make_ratios_list.py --runaway-tmax 250 1.05 1.36 >> ratios.txt
+
+  # anisotropic confirmation pair for the SAME ratios/runaway_tmax already
+  # run isotropic -- labels get a distinct "-aniso" suffix automatically
+  python3 make_ratios_list.py --aniso 0.7 > ratios.txt
+  python3 make_ratios_list.py --aniso --runaway-tmax 250 1.2 >> ratios.txt
 """
 import argparse
 import sys
@@ -54,6 +63,12 @@ def main():
                         f"invocation (default: {rt.DEFAULT_RUNAWAY_TMAX}) -- run "
                         f"this script once per regime and append if different "
                         f"ratios need different thresholds.")
+    p.add_argument("--aniso", action="store_true",
+                   help="Mark every ratio in THIS invocation as anisotropic "
+                        "Kim model runs (writes aniso=1, and appends "
+                        "'-aniso' to every label so it can't collide with "
+                        "an isotropic run of the same ratio). Default: "
+                        "isotropic (aniso=0, no label suffix).")
     args = p.parse_args()
 
     if args.range and args.ratios:
@@ -67,7 +82,8 @@ def main():
         sys.exit("Provide explicit ratios or --range START STOP STEP")
 
     ratios = sorted(ratios)
-    labels = [rt.sanitize_label(r) for r in ratios]
+    suffix = "-aniso" if args.aniso else ""
+    labels = [rt.sanitize_label(r) + suffix for r in ratios]
 
     seen = {}
     for r, lbl in zip(ratios, labels):
@@ -78,8 +94,9 @@ def main():
         sys.exit(f"Duplicate labels would collide, aborting without writing "
                  f"anything: {detail}")
 
+    aniso_val = 1 if args.aniso else 0
     for ratio, label in zip(ratios, labels):
-        print(f"{ratio},{label},{args.runaway_tmax}")
+        print(f"{ratio},{label},{args.runaway_tmax},{aniso_val}")
 
 
 if __name__ == "__main__":

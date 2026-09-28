@@ -37,7 +37,7 @@ executable      = condor_run_ratio.sh
 # original fixed 0.5s ramp. Add --ramp-rate/--ramp-dt here (together --
 # see electrothermal/CLAUDE.md for why they must be raised in lockstep)
 # once/if this workflow needs the same slow-ramp scenario.
-arguments       = $(ratio) $(label) --runaway-tmax $(runaway_tmax)
+arguments       = $(ratio) $(label) --runaway-tmax $(runaway_tmax) --aniso $(aniso)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
@@ -76,4 +76,4 @@ on_exit_hold        = (ExitCode != 0)
 on_exit_hold_reason  = "run_bfield_transient.py reported a RETRY_WORTHY status (see CLAUDE.md) -- auto-releasing to retry, likely on a different execute node"
 periodic_release     = (NumJobStarts < 4) && ((CurrentTime - EnteredCurrentStatus) > 300)
 
-queue ratio,label,runaway_tmax from ratios.txt
+queue ratio,label,runaway_tmax,aniso from ratios.txt

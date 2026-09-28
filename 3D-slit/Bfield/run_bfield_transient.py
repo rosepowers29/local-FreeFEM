@@ -79,6 +79,10 @@ DEFAULT_RAMP_DT_ABOVE_IC = 0.002
 DEFAULT_MAX_STEP_RISE = 500.0
 DEFAULT_MAX_BISECTIONS = 10
 DEFAULT_MAX_JC_FRAC_CHANGE = 0.05
+# 0 = isotropic Kim model (|B|/B0), 1 = anisotropic (component-resolved,
+# see bfield_3d_slit.idp). Coupling stays lagged either way -- this only
+# selects which Jc(B,T) suppression law the lagged B is fed into.
+DEFAULT_ANISO = 0
 
 
 def ts():
@@ -206,7 +210,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             settle_tmax_max=DEFAULT_SETTLE_TMAX_MAX,
             max_step_rise=DEFAULT_MAX_STEP_RISE,
             max_bisections=DEFAULT_MAX_BISECTIONS,
-            max_jc_frac_change=DEFAULT_MAX_JC_FRAC_CHANGE):
+            max_jc_frac_change=DEFAULT_MAX_JC_FRAC_CHANGE,
+            aniso=DEFAULT_ANISO):
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -237,7 +242,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                                             "-tmaxcutoff", str(runaway_tmax),
                                             "-maxsteprise", str(max_step_rise),
                                             "-maxbisections", str(max_bisections),
-                                            "-maxjcfracchange", str(max_jc_frac_change)],
+                                            "-maxjcfracchange", str(max_jc_frac_change),
+                                            "-aniso", str(int(aniso))],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
             # once steps_per_invocation > 1 -- see CLAUDE.md.
@@ -381,6 +387,13 @@ def main():
     p.add_argument("--max-jc-frac-change", type=float, default=DEFAULT_MAX_JC_FRAC_CHANGE,
                    help=f"Above-Ic adaptive controller's accuracy band (default: "
                         f"{DEFAULT_MAX_JC_FRAC_CHANGE}). See CLAUDE.md.")
+    p.add_argument("--aniso", type=int, choices=[0, 1], default=DEFAULT_ANISO,
+                   help="1 = anisotropic Kim model (component-resolved B via "
+                        "ByLeft/BzLeft etc.), 0 = isotropic (|B|/B0). Coupling "
+                        "stays lagged either way -- this only selects the "
+                        "suppression law fed by that lagged B "
+                        f"(default: {DEFAULT_ANISO}). See bfield_3d_slit.idp's "
+                        "\"Anisotropic Kim model infrastructure\".")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
@@ -389,7 +402,8 @@ def main():
             args.freefem_bin, args.trend_window, args.trend_eps,
             args.steps_per_invocation, args.ramp_rate, args.ramp_dt,
             args.ramp_dt_above_ic, args.settle_tmax_max,
-            args.max_step_rise, args.max_bisections, args.max_jc_frac_change)
+            args.max_step_rise, args.max_bisections, args.max_jc_frac_change,
+            args.aniso)
     if summary["status"] in RETRY_WORTHY_STATUSES:
         sys.exit(1)
 

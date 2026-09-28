@@ -150,6 +150,14 @@ real zLeftRep = width/4, zRightRep = 3*width/4;
 // Vh3 T declaration above, not just before it's first USED.
 include "bfield_3d_slit.idp"
 real[int] Bleft(nxs+1), Bright(nxs+1);
+// Component-wise self-field (perpendicular=mesh-y/thickness/c-axis,
+// parallel=mesh-z/width/ab-plane) -- feeds the anisotropic Kim model
+// (JcTBAniso/sigmaScBAniso/solveE*BAniso in bfield_3d_slit.idp), used by
+// the electrical solve below only when -aniso 1 (see useAniso above);
+// always populated regardless of the flag since computeSelfFieldB now
+// always computes both from the same pass. See Bfield/CLAUDE.md's
+// "Anisotropic Kim model infrastructure".
+real[int] ByLeft(nxs+1), ByRight(nxs+1), BzLeft(nxs+1), BzRight(nxs+1);
 
 // Defaults to 1 (this script's exact prior behavior, unflagged). A
 // wrapper passes a larger value via -steps-per-invocation to amortize
@@ -170,6 +178,15 @@ int maxStepsThisRun = getARGV("-steps-per-invocation", 1);
 real maxStepRise = getARGV("-maxsteprise", 500.0);
 int maxBisections = getARGV("-maxbisections", 10);
 real tmaxCutoff = getARGV("-tmaxcutoff", 900.0);
+
+// -aniso 1 switches the electrical solve from the isotropic Kim model
+// (solveE*B, |B| via Bleft/Bright) to the anisotropic one (solveE*BAniso,
+// component-resolved via ByLeft/BzLeft/ByRight/BzRight -- see
+// bfield_3d_slit.idp's "Anisotropic Kim model infrastructure"). Coupling
+// stays LAGGED either way -- this only changes how a given lagged B is
+// turned into a Jc suppression, not the lag itself. Default 0 (isotropic)
+// reproduces this script's exact prior behavior when unflagged.
+int useAniso = getARGV("-aniso", 0);
 
 // CHECKPOINT FORMAT CHANGE: now also persists Earr/ElArr/ErArr, not just
 // t and T. This is required for computeSelfFieldB's lagged design to
@@ -224,7 +241,7 @@ real t = 0.0;
     // state -- then held fixed through this timestep's bisection below
     // (the "lagged" coupling decision).
     real tBstart = clock();
-    computeSelfFieldB(Bleft, Bright, nxs+1);
+    computeSelfFieldB(Bleft, Bright, ByLeft, ByRight, BzLeft, BzRight, nxs+1);
     real tBfield = clock() - tBstart;
 
     real tElecStart = clock();
@@ -239,7 +256,8 @@ real t = 0.0;
       if (xx < xSlitStart || xx > xSlitEnd){
         real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep), THast=T(xx,yHastMid,zLeftRep),
              Tsc=T(xx,yScmid,zLeftRep), TagT=T(xx,yAgTmid,zLeftRep);
-        Earr[i] = solveEFullB(TcuShell,TagB,THast,Tsc,TagT, I0w, Bleft[i]);
+        Earr[i] = useAniso ? solveEFullBAniso(TcuShell,TagB,THast,Tsc,TagT, I0w, ByLeft[i], BzLeft[i])
+                            : solveEFullB(TcuShell,TagB,THast,Tsc,TagT, I0w, Bleft[i]);
         ElArr[i] = 0; ErArr[i] = 0;
       } else {
         Earr[i] = 0;
@@ -273,8 +291,10 @@ real t = 0.0;
       real Il = fracLeft*I0w;
       real sum = 0.0;
       for (int i=iSlitLo;i<iSlitHi;i++){
-        real Ea = solveEHalfB(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, Bleft[i]);
-        real Eb = solveEHalfB(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, Bleft[i+1]);
+        real Ea = useAniso ? solveEHalfBAniso(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, ByLeft[i],  BzLeft[i])
+                            : solveEHalfB(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, Bleft[i]);
+        real Eb = useAniso ? solveEHalfBAniso(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, ByLeft[i+1],BzLeft[i+1])
+                            : solveEHalfB(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, Bleft[i+1]);
         sum += 0.5*(Ea+Eb)*(xSample[i+1]-xSample[i]);
       }
       return sum;
@@ -283,8 +303,10 @@ real t = 0.0;
       real Ir = (1-fracLeft)*I0w;
       real sum = 0.0;
       for (int i=iSlitLo;i<iSlitHi;i++){
-        real Ea = solveEHalfB(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, Bright[i]);
-        real Eb = solveEHalfB(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, Bright[i+1]);
+        real Ea = useAniso ? solveEHalfBAniso(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, ByRight[i],  BzRight[i])
+                            : solveEHalfB(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, Bright[i]);
+        real Eb = useAniso ? solveEHalfBAniso(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, ByRight[i+1],BzRight[i+1])
+                            : solveEHalfB(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, Bright[i+1]);
         sum += 0.5*(Eb+Ea)*(xSample[i+1]-xSample[i]);
       }
       return sum;
@@ -303,8 +325,10 @@ real t = 0.0;
     real fracLeft = 0.5*(flo+fhi);
     real IlFinal = fracLeft*I0w, IrFinal = (1-fracLeft)*I0w;
     for (int i=iSlitLo;i<=iSlitHi;i++){
-      ElArr[i] = solveEHalfB(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, Bleft[i]);
-      ErArr[i] = solveEHalfB(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, Bright[i]);
+      ElArr[i] = useAniso ? solveEHalfBAniso(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, ByLeft[i], BzLeft[i])
+                           : solveEHalfB(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, Bleft[i]);
+      ErArr[i] = useAniso ? solveEHalfBAniso(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, ByRight[i], BzRight[i])
+                           : solveEHalfB(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, Bright[i]);
     }
     real tElectrical = clock() - tElecStart;
 

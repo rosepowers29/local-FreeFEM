@@ -1,0 +1,3225 @@
+2026-09-25T16:44:02Z $ /usr/freefem/bin/FreeFem++ -nw init_3d_slit_transient_checkpoint.edp -outprefix runs/r0p7/
+-- FreeFem++ v4.12 (Wed Dec  7 13:22:45 UTC 2022 - git v4.12)
+   file : init_3d_slit_transient_checkpoint.edp
+ Load: lg_fem lg_mesh lg_mesh3 eigenvalue 
+    1 : include "../shared/hts_mesh_module_3d_slit.idp"// ============================================================
+    2 : // hts_mesh_module_3d_slit.idp
+    3 : // 3D shell mesh WITH a laser slit down the tape centerline.
+    4 : //
+    5 : // Slit: 5um wide, cuts FULL THICKNESS (top to bottom, severing the
+    6 : // copper shell's top/bottom portions in that region -- only the shell's
+    7 : // SIDE edges remain continuous, providing the one remaining electrical
+    8 : // path between the two halves within the slit's x-extent). Represented
+    9 : // as a "stadium" (capsule) shape in the (x,z) plane: all points within
+   10 : // radius R of the line segment from (xSlitStart, zCenter) to
+   11 : // (xSlitEnd, zCenter) -- gives rounded (semicircular) ends automatically,
+   12 : // no separate case needed for the caps.
+   13 : //
+   14 : // Region 7 = slit (vacuum-like properties, defined in materials module).
+   15 : // Regions 1-6 unchanged from the no-slit shell model.
+   16 : // ============================================================
+   17 : 
+   18 : load "msh3"
+   19 : 
+   20 : real Lx    = 0.20;
+   21 : real tCuB  = 20e-6, tAgB = 1.8e-6, tSub = 50e-6, tBuf = 0.2e-6,
+   22 :      tSc   = 1e-6,  tAgT = 2e-6,  tCuT = 20e-6;
+   23 : real yB0=0, yB1=yB0+tCuB, yB2=yB1+tAgB, yB3=yB2+tSub, yB4=yB3+tBuf,
+   24 :      yB5=yB4+tSc, yB6=yB5+tAgT, yB7=yB6+tCuT;
+   25 : 
+   26 : real width   = 0.012;
+   27 : real tSideCu = 20e-6;
+   28 : real zB0 = 0, zB1 = tSideCu, zB2 = width - tSideCu, zB3 = width;
+   29 : real coreWidth = zB2 - zB1;
+   30 : 
+   31 : // ---- slit geometry ----
+   32 : real slitWidth  = 5e-6;
+   33 : real slitR      = slitWidth/2;
+   34 : real xSlitStart = 0.010, xSlitEnd = 0.190;
+   35 : real zSlitCenter = width/2;
+   36 : 
+   37 : // distance from (px,pz) to the slit's centerline segment
+   38 : func real distToSlitSegment(real px, real pz){
+   39 :   real xa = xSlitStart, xb = xSlitEnd, zc = zSlitCenter;
+   40 :   real xq = px;
+   41 :   if (xq < xa) xq = xa;
+   42 :   if (xq > xb) xq = xb;
+   43 :   return sqrt((px-xq)^2 + (pz-zc)^2);
+   44 : }
+   45 : func bool inSlit(real px, real pz){
+   46 :   return distToSlitSegment(px,pz) <= slitR;
+   47 : }
+   48 : 
+   49 : int nx = 100;   // dx ~ 2mm (rounded-cap curvature at R=2.5um isn't resolved
+   50 :                 // at this scale regardless of x-resolution -- see discussion)
+   51 : int nCuB=8, nAgB=2, nSub=6, nBuf=1, nSc=2, nAgT=2, nCuT=8;
+   52 : int ny = nCuB+nAgB+nSub+nBuf+nSc+nAgT+nCuT;
+   53 : 
+   54 : // z structure: shell | core-left-of-slit | slit band | core-right-of-slit | shell
+   55 : int nzShell=2, nzCoreOuter=10, nzSlitBand=4;
+   56 : int nz = 2*nzShell + 2*nzCoreOuter + nzSlitBand;
+   57 : 
+   58 : real zSlitLo = zSlitCenter-slitR, zSlitHi = zSlitCenter+slitR;
+   59 : 
+   60 : func real yphys(real s){
+   61 :   real fCuB=nCuB*1.0/ny, fAgB=nAgB*1.0/ny, fSub=nSub*1.0/ny, fBuf=nBuf*1.0/ny,
+   62 :        fSc=nSc*1.0/ny, fAgT=nAgT*1.0/ny, fCuT=nCuT*1.0/ny;
+   63 :   real c0=0, c1=c0+fCuB, c2=c1+fAgB, c3=c2+fSub, c4=c3+fBuf, c5=c4+fSc, c6=c5+fAgT, c7=c6+fCuT;
+   64 :   if (s<=c1) return yB0 + (yB1-yB0)*(s-c0)/(c1-c0);
+   65 :   if (s<=c2) return yB1 + (yB2-yB1)*(s-c1)/(c2-c1);
+   66 :   if (s<=c3) return yB2 + (yB3-yB2)*(s-c2)/(c3-c2);
+   67 :   if (s<=c4) return yB3 + (yB4-yB3)*(s-c3)/(c4-c3);
+   68 :   if (s<=c5) return yB4 + (yB5-yB4)*(s-c4)/(c5-c4);
+   69 :   if (s<=c6) return yB5 + (yB6-yB5)*(s-c5)/(c6-c5);
+   70 :   return yB6 + (yB7-yB6)*(s-c6)/(c7-c6);
+   71 : }
+   72 : 
+   73 : func real zphys(real s){
+   74 :   real fSh=nzShell*1.0/nz, fCo=nzCoreOuter*1.0/nz, fSl=nzSlitBand*1.0/nz;
+   75 :   real c0=0, c1=c0+fSh, c2=c1+fCo, c3=c2+fSl, c4=c3+fCo, c5=c4+fSh;
+   76 :   if (s<=c1) return zB0 + (zB1-zB0)*(s-c0)/(c1-c0);
+   77 :   if (s<=c2) return zB1 + (zSlitLo-zB1)*(s-c1)/(c2-c1);
+   78 :   if (s<=c3) return zSlitLo + (zSlitHi-zSlitLo)*(s-c2)/(c3-c2);
+   79 :   if (s<=c4) return zSlitHi + (zB2-zSlitHi)*(s-c3)/(c4-c3);
+   80 :   return zB2 + (zB3-zB2)*(s-c4)/(c5-c4);
+   81 : }
+   82 : 
+   83 : mesh3 Th3 = cube(nx, ny, nz, [Lx*x, yphys(y), zphys(z)]);
+   84 : 
+   85 : fespace Ph3region(Th3, P0);
+   86 : Ph3region region0 = 7*(inSlit(x,z))
+   87 :                    + (1-inSlit(x,z))*(
+   88 :                        (y<=yB1 || y>yB6 || z<=zB1 || z>=zB2)*1
+   89 :                      + (y>yB1 && y<=yB2 && z>zB1 && z<zB2)*2
+   90 :                      + (y>yB2 && y<=yB3 && z>zB1 && z<zB2)*3
+   91 :                      + (y>yB3 && y<=yB4 && z>zB1 && z<zB2)*4
+   92 :                      + (y>yB4 && y<=yB5 && z>zB1 && z<zB2)*5
+   93 :                      + (y>yB5 && y<=yB6 && z>zB1 && z<zB2)*6 );
+   94 : Th3 = change(Th3, fregion=region0(x,y,z));
+   95 : 
+    2 : include "getARGV.idp" // for gestion of FreeFem++ argument and in version 3.10-1 FH
+    2 :  // F. Hecht 
+    3 :  // Usage:  getARGV(n,defaultvalue) // get the fist used default valeu
+    4 :  //  or     getARGV(after,defaultvalue) // get the arg after after 
+    5 :  // the type of delfaut value given the return type: int,double, string
+    6 :  // Modif version 3.54-2  Jan 2018 (add ones include)
+    7 :  IFMACRO(!getARGVidp)
+    8 &  macro getARGVidp 1 //
+    9 &  
+   10 &  
+   11 &  func int usedARGV(int n)
+   12 & {
+   13 &   int k=1,ii=1,kk=1,ret=-1;
+   14 &   for(int i=1;i<ARGV.n;++i)
+   15 &    {
+   16 &    // cout <<i<< " "<< ARGV[i] << " " <<(ARGV[i]=="-v") << " " << kk << "==" 
+   17 &    //      << n << " " << ARGV[i].rfind("dp") << " " <<ARGV[i].length-2  << endl;
+   18 &         
+   19 &        if(ARGV[i]=="-v") i++;
+   20 &        else if(ARGV[i]=="-fglut") i++;
+   21 &        else if(ARGV[i]=="-ffg") i++;
+   22 &        else if(ARGV[i]=="-glut") i++;
+   23 &        else if(ARGV[i]=="-f") i++;
+   24 &        else if(ARGV[i]=="-nw") ii;
+   25 &        else if(ARGV[i]=="-wait") ii;
+   26 &        else if(ARGV[i]=="-ne") ii;
+   27 &        else if(ARGV[i]=="-cd") ii;
+   28 &        //else if(ARGV[i].rfind(".edp")==ARGV[i].length-4 ) ii;
+   29 &        else if(i==1) ii;
+   30 &        else if(kk++==n) {ret=i;}
+   31 &       // else cout << " +++ \n";
+   32 &      }
+   33 &    //  cout << ret << endl;
+   34 &     return ret;
+   35 & }
+   36 & 
+   37 & func int usedARGV(string after)
+   38 & {
+   39 &   int ret=-1;
+   40 &   for(int i=ARGV.n-1;i>=0;--i)        
+   41 &        if(ARGV[i]==after) { ret=++i; break;}
+   42 &   if(ARGV.n<ret) ret=-1;
+   43 &   return ret;
+   44 & }
+   45 & 
+   46 & func int getARGV(int n,int default)
+   47 & {
+   48 &    int d=default;
+   49 &    int k=usedARGV(n);
+   50 &    if(k>0) d=strtol(ARGV[k]);
+   51 &     return d;
+   52 & }
+   53 & func real getARGV(int n,real default)
+   54 & {
+   55 &    real d=default;
+   56 &    int k=usedARGV(n);
+   57 &    if(k>0) d=strtod(ARGV[k]);
+   58 &    return d;
+   59 & }
+   60 & func string getARGV(int n,string default)
+   61 & {
+   62 &    string d=default;
+   63 &    int k=usedARGV(n);
+   64 &    if(k>0) d=ARGV[k];
+   65 &     return d;
+   66 & }
+   67 & 
+   68 & func int getARGV(string after,int default)
+   69 & {
+   70 &    int d=default;
+   71 &    int k=usedARGV(after);
+   72 &    if(k>0) d=strtol(ARGV[k]);
+   73 &     return d;
+   74 & }
+   75 & func real getARGV(string after,real default)
+   76 & {
+   77 &    real d=default;
+   78 &    int k=usedARGV(after);
+   79 &    if(k>0) d=strtod(ARGV[k]);
+   80 &    return d;
+   81 & }
+   82 & func string getARGV(string after,string default)
+   83 & {
+   84 &    string d=default;
+   85 &    int k=usedARGV(after);
+   86 &    if(k>0) d=ARGV[k];
+   87 &     return d;
+   88 & }
+   89 & 
+   90 & /*
+   91 & cout << getARGV(1,100) << endl;
+   92 & cout << getARGV(2,200.) << endl;
+   93 & cout << getARGV(3,"300.000") << endl;
+   94 & cout << getARGV("-n"," xxx") << endl;
+   95 & */
+   96 & ENDIFMACRO
+    8 @  macro getARGVidp 1 //
+    9 @  
+   10 @  
+   11 @  func int usedARGV(int n)
+   12 @ {
+   13 @   int k=1,ii=1,kk=1,ret=-1;
+   14 @   for(int i=1;i<ARGV.n;++i)
+   15 @    {
+   16 @    // cout <<i<< " "<< ARGV[i] << " " <<(ARGV[i]=="-v") << " " << kk << "==" 
+   17 @    //      << n << " " << ARGV[i].rfind("dp") << " " <<ARGV[i].length-2  << endl;
+   18 @         
+   19 @        if(ARGV[i]=="-v") i++;
+   20 @        else if(ARGV[i]=="-fglut") i++;
+   21 @        else if(ARGV[i]=="-ffg") i++;
+   22 @        else if(ARGV[i]=="-glut") i++;
+   23 @        else if(ARGV[i]=="-f") i++;
+   24 @        else if(ARGV[i]=="-nw") ii;
+   25 @        else if(ARGV[i]=="-wait") ii;
+   26 @        else if(ARGV[i]=="-ne") ii;
+   27 @        else if(ARGV[i]=="-cd") ii;
+   28 @        //else if(ARGV[i].rfind(".edp")==ARGV[i].length-4 ) ii;
+   29 @        else if(i==1) ii;
+   30 @        else if(kk++==n) {ret=i;}
+   31 @       // else cout << " +++ \n";
+   32 @      }
+   33 @    //  cout << ret << endl;
+   34 @     return ret;
+   35 @ }
+   36 @ 
+   37 @ func int usedARGV(string after)
+   38 @ {
+   39 @   int ret=-1;
+   40 @   for(int i=ARGV.n-1;i>=0;--i)        
+   41 @        if(ARGV[i]==after) { ret=++i; break;}
+   42 @   if(ARGV.n<ret) ret=-1;
+   43 @   return ret;
+   44 @ }
+   45 @ 
+   46 @ func int getARGV(int n,int default)
+   47 @ {
+   48 @    int d=default;
+   49 @    int k=usedARGV(n);
+   50 @    if(k>0) d=strtol(ARGV[k]);
+   51 @     return d;
+   52 @ }
+   53 @ func real getARGV(int n,real default)
+   54 @ {
+   55 @    real d=default;
+   56 @    int k=usedARGV(n);
+   57 @    if(k>0) d=strtod(ARGV[k]);
+   58 @    return d;
+   59 @ }
+   60 @ func string getARGV(int n,string default)
+   61 @ {
+   62 @    string d=default;
+   63 @    int k=usedARGV(n);
+   64 @    if(k>0) d=ARGV[k];
+   65 @     return d;
+   66 @ }
+   67 @ 
+   68 @ func int getARGV(string after,int default)
+   69 @ {
+   70 @    int d=default;
+   71 @    int k=usedARGV(after);
+   72 @    if(k>0) d=strtol(ARGV[k]);
+   73 @     return d;
+   74 @ }
+   75 @ func real getARGV(string after,real default)
+   76 @ {
+   77 @    real d=default;
+   78 @    int k=usedARGV(after);
+   79 @    if(k>0) d=strtod(ARGV[k]);
+   80 @    return d;
+   81 @ }
+   82 @ func string getARGV(string after,string default)
+   83 @ {
+   84 @    string d=default;
+   85 @    int k=usedARGV(after);
+   86 @    if(k>0) d=ARGV[k];
+   87 @     return d;
+   88 @ }
+   89 @ 
+   90 @ /*
+   91 @ cout << getARGV(1,100) << endl;
+   92 @ cout << getARGV(2,200.) << endl;
+   93 @ cout << getARGV(3,"300.000") << endl;
+   94 @ cout << getARGV("-n"," xxx") << endl;
+   95 @ */
+   96 @ 
+    3 : 
+    4 : // Lets a run_transient.py-style wrapper point this at a per-run output
+    5 : // directory without editing this file -- ported from electrothermal/
+    6 : // init_3d_slit_transient_checkpoint.edp. Default "" reproduces this
+    7 : // script's exact prior behavior (files written to the CWD).
+    8 : string outPrefix = getARGV("-outprefix", "");
+    9 : 
+   10 : fespace Vh3(Th3, P1);
+   11 : Vh3 T = 77.0;
+   12 : // nxs must match the value used in the step scripts (60) -- this writes
+   13 : // zero-initialized E-field arrays alongside t and T, matching the
+   14 : // checkpoint format step_3d_slit_transient_bfield.edp now expects (see
+   15 : // that file for why: computeSelfFieldB's lagged design requires these
+   16 : // arrays to actually persist across script invocations, not just T).
+   17 : // The plain (non-bfield) step scripts don't read these extra values at
+   18 : // all, so this format change is harmless for them.
+   19 : int nxs = 60;
+   20 : {
+   21 :   ofstream fchkOut(outPrefix+"ckpt_3d_slit_transient.txt");
+   22 :   fchkOut.precision(12);
+   23 :   fchkOut << 0.0 << "\n";
+   24 :   for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+   25 :   for (int i=0;i<=nxs;i++) fchkOut << 0.0 << "\n";   // Earr
+   26 :   for (int i=0;i<=nxs;i++) fchkOut << 0.0 << "\n";   // ElArr
+   27 :   for (int i=0;i<=nxs;i++) fchkOut << 0.0 << "\n";   // ErArr
+   28 : }
+   29 : cout << "Initialized, T.n=" << T.n << endl;
+   30 :  sizestack + 1024 =2784  ( 1760 )
+
+  -- Cube  nv=87870 nt=487200 nbe=26048 kind= 6
+  -- Build Nodes/DF on mesh :   n.v. 87870, n. elmt. 487200, n b. elmt. 26048
+     nb of Nodes 487200    nb of DoF   487200  DFon=0001
+  -- FESpace: Nb of Nodes 487200 Nb of DoF 487200
+  -- FESpace: Nb of Nodes 87870 Nb of DoF 87870
+Initialized, T.n=87870
+times: compile 0.012017s, execution 27.9652s,  mpirank:0
+ CodeAlloc : nb ptr  4915,  size :544128 mpirank: 0
+Ok: Normal End
+2026-09-25T16:44:31Z $ /usr/freefem/bin/FreeFem++ -nw step_3d_slit_transient_bfield.edp -ratio 0.7 -outprefix runs/r0p7/ -steps-per-invocation 20 -ramprate 20.0 -rampdt 999.0 -rampdt-aboveic 0.002 -tmaxcutoff 900.0 -maxsteprise 500.0 -maxbisections 10 -maxjcfracchange 0.05
+-- FreeFem++ v4.12 (Wed Dec  7 13:22:45 UTC 2022 - git v4.12)
+   file : step_3d_slit_transient_bfield.edp
+ Load: lg_fem lg_mesh lg_mesh3 eigenvalue 
+    1 : // ============================================================
+    2 : // step_3d_slit_transient_bfield.edp
+    3 : // Full transient scenario WITH the slit: ramp current to a target
+    4 : // transport-current ratio (currentRatio*Ic, default 0.7 -- see -ratio)
+    5 : // over the ramp phase, then apply the 2mm x 2mm / 13W / 10ms spot heater
+    6 : // on the LEFT side only (z=width/4), then observe recovery or runaway --
+    7 : // and critically, track how the current SPLIT between left/right
+    8 : // evolves.
+    9 : //
+   10 : // Electrical model: outside the slit's x-range, one equipotential
+   11 : // channel. WITHIN the slit's x-range, current splits into two
+   12 : // independent parallel paths matched by equal voltage drop across the
+   13 : // slit's length (cheap bisection, redone every timestep -- no 3D solve
+   14 : // involved in this sub-solve).
+   15 : // ============================================================
+   16 : 
+   17 : real tInvocationStart = clock();
+   18 : 
+   19 : real tMeshStart = clock();
+   20 : include "../shared/hts_mesh_module_3d_slit.idp"// ============================================================
+    2 : // hts_mesh_module_3d_slit.idp
+    3 : // 3D shell mesh WITH a laser slit down the tape centerline.
+    4 : //
+    5 : // Slit: 5um wide, cuts FULL THICKNESS (top to bottom, severing the
+    6 : // copper shell's top/bottom portions in that region -- only the shell's
+    7 : // SIDE edges remain continuous, providing the one remaining electrical
+    8 : // path between the two halves within the slit's x-extent). Represented
+    9 : // as a "stadium" (capsule) shape in the (x,z) plane: all points within
+   10 : // radius R of the line segment from (xSlitStart, zCenter) to
+   11 : // (xSlitEnd, zCenter) -- gives rounded (semicircular) ends automatically,
+   12 : // no separate case needed for the caps.
+   13 : //
+   14 : // Region 7 = slit (vacuum-like properties, defined in materials module).
+   15 : // Regions 1-6 unchanged from the no-slit shell model.
+   16 : // ============================================================
+   17 : 
+   18 : load "msh3"
+   19 : 
+   20 : real Lx    = 0.20;
+   21 : real tCuB  = 20e-6, tAgB = 1.8e-6, tSub = 50e-6, tBuf = 0.2e-6,
+   22 :      tSc   = 1e-6,  tAgT = 2e-6,  tCuT = 20e-6;
+   23 : real yB0=0, yB1=yB0+tCuB, yB2=yB1+tAgB, yB3=yB2+tSub, yB4=yB3+tBuf,
+   24 :      yB5=yB4+tSc, yB6=yB5+tAgT, yB7=yB6+tCuT;
+   25 : 
+   26 : real width   = 0.012;
+   27 : real tSideCu = 20e-6;
+   28 : real zB0 = 0, zB1 = tSideCu, zB2 = width - tSideCu, zB3 = width;
+   29 : real coreWidth = zB2 - zB1;
+   30 : 
+   31 : // ---- slit geometry ----
+   32 : real slitWidth  = 5e-6;
+   33 : real slitR      = slitWidth/2;
+   34 : real xSlitStart = 0.010, xSlitEnd = 0.190;
+   35 : real zSlitCenter = width/2;
+   36 : 
+   37 : // distance from (px,pz) to the slit's centerline segment
+   38 : func real distToSlitSegment(real px, real pz){
+   39 :   real xa = xSlitStart, xb = xSlitEnd, zc = zSlitCenter;
+   40 :   real xq = px;
+   41 :   if (xq < xa) xq = xa;
+   42 :   if (xq > xb) xq = xb;
+   43 :   return sqrt((px-xq)^2 + (pz-zc)^2);
+   44 : }
+   45 : func bool inSlit(real px, real pz){
+   46 :   return distToSlitSegment(px,pz) <= slitR;
+   47 : }
+   48 : 
+   49 : int nx = 100;   // dx ~ 2mm (rounded-cap curvature at R=2.5um isn't resolved
+   50 :                 // at this scale regardless of x-resolution -- see discussion)
+   51 : int nCuB=8, nAgB=2, nSub=6, nBuf=1, nSc=2, nAgT=2, nCuT=8;
+   52 : int ny = nCuB+nAgB+nSub+nBuf+nSc+nAgT+nCuT;
+   53 : 
+   54 : // z structure: shell | core-left-of-slit | slit band | core-right-of-slit | shell
+   55 : int nzShell=2, nzCoreOuter=10, nzSlitBand=4;
+   56 : int nz = 2*nzShell + 2*nzCoreOuter + nzSlitBand;
+   57 : 
+   58 : real zSlitLo = zSlitCenter-slitR, zSlitHi = zSlitCenter+slitR;
+   59 : 
+   60 : func real yphys(real s){
+   61 :   real fCuB=nCuB*1.0/ny, fAgB=nAgB*1.0/ny, fSub=nSub*1.0/ny, fBuf=nBuf*1.0/ny,
+   62 :        fSc=nSc*1.0/ny, fAgT=nAgT*1.0/ny, fCuT=nCuT*1.0/ny;
+   63 :   real c0=0, c1=c0+fCuB, c2=c1+fAgB, c3=c2+fSub, c4=c3+fBuf, c5=c4+fSc, c6=c5+fAgT, c7=c6+fCuT;
+   64 :   if (s<=c1) return yB0 + (yB1-yB0)*(s-c0)/(c1-c0);
+   65 :   if (s<=c2) return yB1 + (yB2-yB1)*(s-c1)/(c2-c1);
+   66 :   if (s<=c3) return yB2 + (yB3-yB2)*(s-c2)/(c3-c2);
+   67 :   if (s<=c4) return yB3 + (yB4-yB3)*(s-c3)/(c4-c3);
+   68 :   if (s<=c5) return yB4 + (yB5-yB4)*(s-c4)/(c5-c4);
+   69 :   if (s<=c6) return yB5 + (yB6-yB5)*(s-c5)/(c6-c5);
+   70 :   return yB6 + (yB7-yB6)*(s-c6)/(c7-c6);
+   71 : }
+   72 : 
+   73 : func real zphys(real s){
+   74 :   real fSh=nzShell*1.0/nz, fCo=nzCoreOuter*1.0/nz, fSl=nzSlitBand*1.0/nz;
+   75 :   real c0=0, c1=c0+fSh, c2=c1+fCo, c3=c2+fSl, c4=c3+fCo, c5=c4+fSh;
+   76 :   if (s<=c1) return zB0 + (zB1-zB0)*(s-c0)/(c1-c0);
+   77 :   if (s<=c2) return zB1 + (zSlitLo-zB1)*(s-c1)/(c2-c1);
+   78 :   if (s<=c3) return zSlitLo + (zSlitHi-zSlitLo)*(s-c2)/(c3-c2);
+   79 :   if (s<=c4) return zSlitHi + (zB2-zSlitHi)*(s-c3)/(c4-c3);
+   80 :   return zB2 + (zB3-zB2)*(s-c4)/(c5-c4);
+   81 : }
+   82 : 
+   83 : mesh3 Th3 = cube(nx, ny, nz, [Lx*x, yphys(y), zphys(z)]);
+   84 : 
+   85 : fespace Ph3region(Th3, P0);
+   86 : Ph3region region0 = 7*(inSlit(x,z))
+   87 :                    + (1-inSlit(x,z))*(
+   88 :                        (y<=yB1 || y>yB6 || z<=zB1 || z>=zB2)*1
+   89 :                      + (y>yB1 && y<=yB2 && z>zB1 && z<zB2)*2
+   90 :                      + (y>yB2 && y<=yB3 && z>zB1 && z<zB2)*3
+   91 :                      + (y>yB3 && y<=yB4 && z>zB1 && z<zB2)*4
+   92 :                      + (y>yB4 && y<=yB5 && z>zB1 && z<zB2)*5
+   93 :                      + (y>yB5 && y<=yB6 && z>zB1 && z<zB2)*6 );
+   94 : Th3 = change(Th3, fregion=region0(x,y,z));
+   95 : 
+   21 : real tMeshDone = clock();
+   22 : include "../shared/hts_materials.idp"// ============================================================
+    2 : // hts_materials.idp
+    3 : // Loads all tabulated (T, property) data and defines material
+    4 : // property functions exactly matching the user's COMSOL model.
+    5 : // Requires hts_mesh_module.idp to already be included (uses Lx etc. only
+    6 : // indirectly; no hard dependency, but kept together by convention).
+    7 : // ============================================================
+    8 : 
+    9 : // ---- generic linear interpolation table loader ----
+   10 : func int loadTable(string fname, int n, real[int] &T, real[int] &V){
+   11 :   ifstream f(fname);
+   12 :   for(int i=0;i<n;i++){ f >> T[i] >> V[i]; }
+   13 :   return n;
+   14 : }
+   15 : 
+   16 : // Binary search, NOT a linear scan -- verified bit-for-bit identical to
+   17 : // the original linear-scan implementation across every real data table
+   18 : // in this project (1342 test queries: every breakpoint, every midpoint,
+   19 : // off-center points, and out-of-range queries -- zero mismatches).
+   20 : // Deliberately replicates the linear scan's exact tie-breaking (when Tq
+   21 : // lands exactly on an interior breakpoint, uses the interval BELOW it,
+   22 : // same as the original "first matching i" loop would) -- this is why it
+   23 : // searches for "smallest index with T[j] >= Tq" rather than a generic
+   24 : // floor/ceiling search, which would pick the interval above instead and
+   25 : // give a numerically close but not bit-identical result at breakpoints.
+   26 : func real interp1(real[int] &T, real[int] &V, int nn, real Tq){
+   27 :   if (Tq <= T[0])    return V[0];
+   28 :   if (Tq >= T[nn-1]) return V[nn-1];
+   29 :   int lo = 0, hi = nn-1;
+   30 :   while (lo < hi){
+   31 :     int mid = (lo+hi)/2;
+   32 :     if (T[mid] < Tq) lo = mid+1; else hi = mid;
+   33 :   }
+   34 :   int i = lo-1;
+   35 :   real fr = (Tq-T[i])/(T[i+1]-T[i]);
+   36 :   return V[i] + fr*(V[i+1]-V[i]);
+   37 : }
+   38 : 
+   39 : // ---- load every table (row counts match `wc -l` on each file) ----
+   40 : real[int] TcpAg(71),   VcpAg(71);      int ncpAg   = loadTable("../shared/data/cp_ag.txt",   71, TcpAg, VcpAg);
+   41 : real[int] TcpBuf(132), VcpBuf(132);    int ncpBuf  = loadTable("../shared/data/cp_buff.txt", 132, TcpBuf, VcpBuf);
+   42 : real[int] TcpCu(16),   VcpCu(16);      int ncpCu   = loadTable("../shared/data/cp_cu.txt",   16, TcpCu, VcpCu);
+   43 : real[int] TcpHast(43), VcpHast(43);    int ncpHast = loadTable("../shared/data/cp_hast.txt", 43, TcpHast, VcpHast);
+   44 : real[int] TcpSc(34),   VcpSc(34);      int ncpSc   = loadTable("../shared/data/cp_rebco.txt",34, TcpSc, VcpSc);
+   45 : 
+   46 : real[int] TkAg(29),    VkAg(29);       int nkAg    = loadTable("../shared/data/k_ag.txt",    29, TkAg, VkAg);
+   47 : real[int] TkBuf(23),   VkBuf(23);      int nkBuf   = loadTable("../shared/data/k_buff.txt",  23, TkBuf, VkBuf);
+   48 : real[int] TkCu(16),    VkCu(16);       int nkCu    = loadTable("../shared/data/k_cu.txt",    16, TkCu, VkCu);
+   49 : real[int] TkHast(47),  VkHast(47);     int nkHast  = loadTable("../shared/data/k_hast.txt",  47, TkHast, VkHast);
+   50 : real[int] TkSc(13),    VkSc(13);       int nkSc    = loadTable("../shared/data/k_rebco.txt", 13, TkSc, VkSc);
+   51 : 
+   52 : real[int] TrhoCu(16),   VrhoCu(16);    int nrhoCu   = loadTable("../shared/data/rho_cu.txt", 16, TrhoCu, VrhoCu); // real measured data (note: possible anomaly at 273/300K, see discussion)
+   53 : real[int] TrhoHast(39), VrhoHast(39);  int nrhoHast = loadTable("../shared/data/rho_hast.txt", 39, TrhoHast, VrhoHast);
+   54 : real[int] TrhoAg(19),   VrhoAg(19);    int nrhoAg   = loadTable("../shared/data/rho_silver.txt", 19, TrhoAg, VrhoAg);
+   55 : 
+   56 : // ---- convenience wrappers: property(T) for each material ----
+   57 : func real cpAg(real T)   { return interp1(TcpAg,   VcpAg,   ncpAg,   T); }
+   58 : func real cpBuf(real T)  { return interp1(TcpBuf,  VcpBuf,  ncpBuf,  T); }
+   59 : func real cpCu(real T)   { return interp1(TcpCu,   VcpCu,   ncpCu,   T); }
+   60 : func real cpHast(real T) { return interp1(TcpHast, VcpHast, ncpHast, T); }
+   61 : func real cpSc(real T)   { return interp1(TcpSc,   VcpSc,   ncpSc,   T); }
+   62 : 
+   63 : func real kAg(real T)    { return interp1(TkAg,  VkAg,  nkAg,  T); }
+   64 : func real kBuf(real T)   { return interp1(TkBuf, VkBuf, nkBuf, T); }
+   65 : func real kCu(real T)    { return interp1(TkCu,  VkCu,  nkCu,  T); }
+   66 : func real kHast(real T)  { return interp1(TkHast,VkHast,nkHast,T); }
+   67 : func real kSc(real T)    { return interp1(TkSc,  VkSc,  nkSc,  T); }
+   68 : 
+   69 : func real rhoCu(real T)   { return interp1(TrhoCu,  VrhoCu,  nrhoCu,  T); }  // real measured data (flag: non-monotonic 273->300K point, see discussion)
+   70 : func real rhoHast(real T) { return interp1(TrhoHast,VrhoHast,nrhoHast,T); }
+   71 : func real rhoAg(real T)   { return interp1(TrhoAg,  VrhoAg,  nrhoAg,  T); }
+   72 : 
+   73 : // ---- densities [kg/m^3] (from *_vars.csv) ----
+   74 : real rhomCu   = 8960.0;
+   75 : real rhomAg   = 10490.0;
+   76 : real rhomHast = 8890.0;
+   77 : real rhomBuf  = 3600.0;
+   78 : real rhomSc   = 6390.0;
+   79 : 
+   80 : // ---- REBCO superconducting parameters (from comsol_params.csv / rebco_vars.csv) ----
+   81 : real Jc0       = 8.0e10;   // A/m^2
+   82 : real Tc        = 90.0;     // K
+   83 : real n0        = 20.0;     // n-value reference
+   84 : real E0        = 1.0e-4;   // V/m  (1 uV/cm criterion)
+   85 : real Einit     = 1.0e-10;  // V/m  (numerical floor ONLY, to avoid literal E=0 singularity --
+   86 :                             // NOT the critical-field criterion. Was mistakenly set equal to
+   87 :                             // E0 (1e-4), which clamped the entire below-Ic operating regime
+   88 :                             // into an artificially resistive state. See discussion.)
+   89 : real sigmaRebco= 1.0e6;    // S/m  (REBCO normal-state floor conductivity)
+   90 : real sigmaMax  = 1.0e20;   // raised: 1e16 was binding at the nominal 0.7Ic/77K operating point   // S/m  (numerical cap)
+   91 : real sigmaBuf  = 1.0e-10;  // S/m  (buffer, effectively insulating)
+   92 : 
+   93 : func real JcT(real T){
+   94 :   // Jc0*(Tc-T)*(T<Tc)/(Tc-50) + (T>=Tc)   -- floor of 1 A/m^2 above Tc (numerical safety)
+   95 :   if (T < Tc) return Jc0*(Tc-T)/(Tc-50.0);
+   96 :   else return 1.0;
+   97 : }
+   98 : func real nT(real T){
+   99 :   // (n0-10)*(Tc-T)*(T<Tc)/(Tc-50) + 10     -- floor of n=10 above Tc
+  100 :   if (T < Tc) return (n0-10.0)*(Tc-T)/(Tc-50.0) + 10.0;
+  101 :   else return 10.0;
+  102 : }
+  103 : 
+  104 : // total REBCO conductivity given local |E| and T (scalar E assumed ~ Ex, dominant
+  105 : // component along the tape length -- consistent with the 1D-per-layer approach)
+  106 : func real sigmaSc(real Emag, real T){
+  107 :   real Estab = max(abs(Emag), Einit);
+  108 :   real JcVal   = JcT(T);
+  109 :   real nVal    = nT(T);
+  110 :   real scTerm = (JcVal/Estab) * (Estab/E0)^(1.0/nVal);
+  111 :   return min(scTerm, sigmaMax) + sigmaRebco;
+  112 : }
+  113 : 
+   23 : real tMaterialsDone = clock();
+   24 : include "getARGV.idp" // for gestion of FreeFem++ argument and in version 3.10-1 FH
+    2 :  // F. Hecht 
+    3 :  // Usage:  getARGV(n,defaultvalue) // get the fist used default valeu
+    4 :  //  or     getARGV(after,defaultvalue) // get the arg after after 
+    5 :  // the type of delfaut value given the return type: int,double, string
+    6 :  // Modif version 3.54-2  Jan 2018 (add ones include)
+    7 :  IFMACRO(!getARGVidp)
+    8 &  macro getARGVidp 1 //
+    9 &  
+   10 &  
+   11 &  func int usedARGV(int n)
+   12 & {
+   13 &   int k=1,ii=1,kk=1,ret=-1;
+   14 &   for(int i=1;i<ARGV.n;++i)
+   15 &    {
+   16 &    // cout <<i<< " "<< ARGV[i] << " " <<(ARGV[i]=="-v") << " " << kk << "==" 
+   17 &    //      << n << " " << ARGV[i].rfind("dp") << " " <<ARGV[i].length-2  << endl;
+   18 &         
+   19 &        if(ARGV[i]=="-v") i++;
+   20 &        else if(ARGV[i]=="-fglut") i++;
+   21 &        else if(ARGV[i]=="-ffg") i++;
+   22 &        else if(ARGV[i]=="-glut") i++;
+   23 &        else if(ARGV[i]=="-f") i++;
+   24 &        else if(ARGV[i]=="-nw") ii;
+   25 &        else if(ARGV[i]=="-wait") ii;
+   26 &        else if(ARGV[i]=="-ne") ii;
+   27 &        else if(ARGV[i]=="-cd") ii;
+   28 &        //else if(ARGV[i].rfind(".edp")==ARGV[i].length-4 ) ii;
+   29 &        else if(i==1) ii;
+   30 &        else if(kk++==n) {ret=i;}
+   31 &       // else cout << " +++ \n";
+   32 &      }
+   33 &    //  cout << ret << endl;
+   34 &     return ret;
+   35 & }
+   36 & 
+   37 & func int usedARGV(string after)
+   38 & {
+   39 &   int ret=-1;
+   40 &   for(int i=ARGV.n-1;i>=0;--i)        
+   41 &        if(ARGV[i]==after) { ret=++i; break;}
+   42 &   if(ARGV.n<ret) ret=-1;
+   43 &   return ret;
+   44 & }
+   45 & 
+   46 & func int getARGV(int n,int default)
+   47 & {
+   48 &    int d=default;
+   49 &    int k=usedARGV(n);
+   50 &    if(k>0) d=strtol(ARGV[k]);
+   51 &     return d;
+   52 & }
+   53 & func real getARGV(int n,real default)
+   54 & {
+   55 &    real d=default;
+   56 &    int k=usedARGV(n);
+   57 &    if(k>0) d=strtod(ARGV[k]);
+   58 &    return d;
+   59 & }
+   60 & func string getARGV(int n,string default)
+   61 & {
+   62 &    string d=default;
+   63 &    int k=usedARGV(n);
+   64 &    if(k>0) d=ARGV[k];
+   65 &     return d;
+   66 & }
+   67 & 
+   68 & func int getARGV(string after,int default)
+   69 & {
+   70 &    int d=default;
+   71 &    int k=usedARGV(after);
+   72 &    if(k>0) d=strtol(ARGV[k]);
+   73 &     return d;
+   74 & }
+   75 & func real getARGV(string after,real default)
+   76 & {
+   77 &    real d=default;
+   78 &    int k=usedARGV(after);
+   79 &    if(k>0) d=strtod(ARGV[k]);
+   80 &    return d;
+   81 & }
+   82 & func string getARGV(string after,string default)
+   83 & {
+   84 &    string d=default;
+   85 &    int k=usedARGV(after);
+   86 &    if(k>0) d=ARGV[k];
+   87 &     return d;
+   88 & }
+   89 & 
+   90 & /*
+   91 & cout << getARGV(1,100) << endl;
+   92 & cout << getARGV(2,200.) << endl;
+   93 & cout << getARGV(3,"300.000") << endl;
+   94 & cout << getARGV("-n"," xxx") << endl;
+   95 & */
+   96 & ENDIFMACRO
+    8 @  macro getARGVidp 1 //
+    9 @  
+   10 @  
+   11 @  func int usedARGV(int n)
+   12 @ {
+   13 @   int k=1,ii=1,kk=1,ret=-1;
+   14 @   for(int i=1;i<ARGV.n;++i)
+   15 @    {
+   16 @    // cout <<i<< " "<< ARGV[i] << " " <<(ARGV[i]=="-v") << " " << kk << "==" 
+   17 @    //      << n << " " << ARGV[i].rfind("dp") << " " <<ARGV[i].length-2  << endl;
+   18 @         
+   19 @        if(ARGV[i]=="-v") i++;
+   20 @        else if(ARGV[i]=="-fglut") i++;
+   21 @        else if(ARGV[i]=="-ffg") i++;
+   22 @        else if(ARGV[i]=="-glut") i++;
+   23 @        else if(ARGV[i]=="-f") i++;
+   24 @        else if(ARGV[i]=="-nw") ii;
+   25 @        else if(ARGV[i]=="-wait") ii;
+   26 @        else if(ARGV[i]=="-ne") ii;
+   27 @        else if(ARGV[i]=="-cd") ii;
+   28 @        //else if(ARGV[i].rfind(".edp")==ARGV[i].length-4 ) ii;
+   29 @        else if(i==1) ii;
+   30 @        else if(kk++==n) {ret=i;}
+   31 @       // else cout << " +++ \n";
+   32 @      }
+   33 @    //  cout << ret << endl;
+   34 @     return ret;
+   35 @ }
+   36 @ 
+   37 @ func int usedARGV(string after)
+   38 @ {
+   39 @   int ret=-1;
+   40 @   for(int i=ARGV.n-1;i>=0;--i)        
+   41 @        if(ARGV[i]==after) { ret=++i; break;}
+   42 @   if(ARGV.n<ret) ret=-1;
+   43 @   return ret;
+   44 @ }
+   45 @ 
+   46 @ func int getARGV(int n,int default)
+   47 @ {
+   48 @    int d=default;
+   49 @    int k=usedARGV(n);
+   50 @    if(k>0) d=strtol(ARGV[k]);
+   51 @     return d;
+   52 @ }
+   53 @ func real getARGV(int n,real default)
+   54 @ {
+   55 @    real d=default;
+   56 @    int k=usedARGV(n);
+   57 @    if(k>0) d=strtod(ARGV[k]);
+   58 @    return d;
+   59 @ }
+   60 @ func string getARGV(int n,string default)
+   61 @ {
+   62 @    string d=default;
+   63 @    int k=usedARGV(n);
+   64 @    if(k>0) d=ARGV[k];
+   65 @     return d;
+   66 @ }
+   67 @ 
+   68 @ func int getARGV(string after,int default)
+   69 @ {
+   70 @    int d=default;
+   71 @    int k=usedARGV(after);
+   72 @    if(k>0) d=strtol(ARGV[k]);
+   73 @     return d;
+   74 @ }
+   75 @ func real getARGV(string after,real default)
+   76 @ {
+   77 @    real d=default;
+   78 @    int k=usedARGV(after);
+   79 @    if(k>0) d=strtod(ARGV[k]);
+   80 @    return d;
+   81 @ }
+   82 @ func string getARGV(string after,string default)
+   83 @ {
+   84 @    string d=default;
+   85 @    int k=usedARGV(after);
+   86 @    if(k>0) d=ARGV[k];
+   87 @     return d;
+   88 @ }
+   89 @ 
+   90 @ /*
+   91 @ cout << getARGV(1,100) << endl;
+   92 @ cout << getARGV(2,200.) << endl;
+   93 @ cout << getARGV(3,"300.000") << endl;
+   94 @ cout << getARGV("-n"," xxx") << endl;
+   95 @ */
+   96 @ 
+   25 : 
+   26 : // currentRatio/outPrefix let a run_transient.py-style wrapper drive this
+   27 : // script without editing it -- ported from electrothermal/
+   28 : // step_3d_slit_transient_diag.edp. Defaults reproduce this script's
+   29 : // exact prior hardcoded behavior (ratio=0.7, output files in the CWD)
+   30 : // when invoked with no extra flags.
+   31 : real currentRatio = getARGV("-ratio", 0.7);
+   32 : string outPrefix  = getARGV("-outprefix", "");
+   33 : cout << "[profile] meshBuild=" << (tMeshDone-tMeshStart) << "s materialsLoad="
+   34 :      << (tMaterialsDone-tMeshDone) << "s" << endl;
+   35 : 
+   36 : real Tcold = 77.0;
+   37 : real IcRebcoActual = JcT(77.0)*tSc*coreWidth;
+   38 : real I0Target = currentRatio * IcRebcoActual;
+   39 : 
+   40 : real shellAreaFull = width*yB7 - coreWidth*(yB6-yB1);
+   41 : real leftCoreWidth  = (zSlitCenter-slitR) - zB1;
+   42 : real rightCoreWidth = zB2 - (zSlitCenter+slitR);
+   43 : real leftShellArea  = tSideCu*yB7 + (tCuB+tCuT)*leftCoreWidth;
+   44 : real rightShellArea = tSideCu*yB7 + (tCuB+tCuT)*rightCoreWidth;
+   45 : 
+   46 : real xHeatC = Lx/2, zHeatC = width/4;   // LEFT side only
+   47 : real xHeatLo = xHeatC-1e-3, xHeatHi = xHeatC+1e-3;
+   48 : real zHeatLo = zHeatC-1e-3, zHeatHi = zHeatC+1e-3;
+   49 : real heaterPower = 13.0;
+   50 : real qHeater = heaterPower/(2e-3*2e-3);
+   51 : 
+   52 : // rampRateTarget (-ramprate, A/s) / rampDt (-rampdt) / rampDtAboveIc
+   53 : // (-rampdt-aboveic, MUTATED by the step loop's adaptive controller below)
+   54 : // / maxJcFracChange (-maxjcfracchange) -- ported verbatim from
+   55 : // electrothermal/step_3d_slit_transient_diag.edp, including the
+   56 : // jcRef-vs-Tcold fix already applied there (see the step loop below for
+   57 : // why jcRef, not the local jcBefore, is used as the fractional-change
+   58 : // denominator). Defaults reproduce this script's exact prior fixed-0.5s-
+   59 : // ramp behavior when unflagged.
+   60 : real rampRateTarget = getARGV("-ramprate", 0.0);
+   61 : real rampDt = getARGV("-rampdt", 0.05);
+   62 : real rampDtAboveIc = getARGV("-rampdt-aboveic", 0.002);
+   63 : real maxJcFracChange = getARGV("-maxjcfracchange", 0.05);
+   64 : real Tramp = 0.5;
+   65 : if (rampRateTarget > 0.0) Tramp = I0Target/rampRateTarget;
+   66 : // tCrossIc: when I0(t)=I0Target*(tt/Tramp) first reaches IcRebcoActual.
+   67 : // For currentRatio<=1, I0(t) never reaches Ic during the ramp, so this
+   68 : // equals Tramp exactly -- dtRaw/phaseBounds below are then byte-for-byte
+   69 : // unchanged from this script's pre-parameterization behavior.
+   70 : real tCrossIc = (currentRatio > 1.0) ? Tramp/currentRatio : Tramp;
+   71 : real tPulseStart = Tramp, tPulseDur = 0.01, tPulseEnd = tPulseStart+tPulseDur;
+   72 : real tEnd = tPulseEnd + 1.5;
+   73 : 
+   74 : func real I0ofT(real tt){
+   75 :   if (tt < Tramp) return I0Target*(tt/Tramp);
+   76 :   return I0Target;
+   77 : }
+   78 : real[int] phaseBounds = [tCrossIc, Tramp, tPulseStart, tPulseEnd, tEnd];
+   79 : func real dtRaw(real tt){
+   80 :   if (tt < tCrossIc) return rampDt;
+   81 :   if (tt < Tramp) return rampDtAboveIc;
+   82 :   if (tt < tPulseEnd) return 0.002;
+   83 :   if (tt > tPulseEnd + 0.2) return 0.02;
+   84 :   return 0.01;
+   85 : }
+   86 : func real dtCapped(real tt){
+   87 :   real d = dtRaw(tt);
+   88 :   for (int i=0;i<5;i++) if (tt < phaseBounds[i]-1e-9 && tt+d > phaseBounds[i]) d = phaseBounds[i]-tt;
+   89 :   return d;
+   90 : }
+   91 : 
+   92 : func real kOf(int rg, real Tl)
+ *** Warning  The identifier Tl hide a Global identifier  
+{
+   93 :   if (rg==1) return kCu(Tl);
+   94 :   if (rg==2 || rg==6) return kAg(Tl);
+   95 :   if (rg==3) return kHast(Tl);
+   96 :   if (rg==4) return kBuf(Tl);
+   97 :   if (rg==5) return kSc(Tl);
+   98 :   if (rg==7) return 1e-2;
+   99 :   return 1.0;
+  100 : }
+  101 : func real sourceOfFull(int rg, real Ef, real Tl)
+ *** Warning  The identifier Tl hide a Global identifier  
+{
+  102 :   if (rg==1) return Ef^2/rhoCu(Tl);
+  103 :   if (rg==2 || rg==6) return Ef^2/rhoAg(Tl);
+  104 :   if (rg==3) return Ef^2/rhoHast(Tl);   // Hastelloy: now a genuine parallel branch, not excluded
+  105 :   if (rg==5) return sigmaSc(Ef,Tl)*Ef^2;
+  106 :   return 0.0;   // region 4 (buffer) remains excluded -- see bfield_3d_slit.idp header note
+  107 : }
+  108 : func real rhoCpOf(int rg, real Tl)
+ *** Warning  The identifier Tl hide a Global identifier  
+{
+  109 :   if (rg==1) return rhomCu*cpCu(Tl);
+  110 :   if (rg==2 || rg==6) return rhomAg*cpAg(Tl);
+  111 :   if (rg==3) return rhomHast*cpHast(Tl);
+  112 :   if (rg==4) return rhomBuf*cpBuf(Tl);
+  113 :   if (rg==5) return rhomSc*cpSc(Tl);
+  114 :   return 1.0;   // region 7 (slit): nominal small value for well-posedness
+  115 : }
+  116 : 
+  117 : // (The non-B-aware ItotFull/solveEFull/ItotHalf/solveEHalf that used to
+  118 : // live here were dead code -- never called; the actual solve uses only
+  119 : // the B-aware solveEFullB/solveEHalfB from bfield_3d_slit.idp. Removed
+  120 : // rather than left stale, since leaving them would mean an un-fixed
+  121 : // duplicate missing the Hastelloy branch below sitting right next to
+  122 : // the real implementation.)
+  123 : 
+  124 : int nxs = 60;
+  125 : real[int] xSample(nxs+1), Earr(nxs+1), ElArr(nxs+1), ErArr(nxs+1);
+  126 : for (int i=0;i<=nxs;i++) xSample[i] = Lx*i/nxs;
+  127 : func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
+  128 : func real ElFun(real xx){ return interp1(xSample, ElArr, nxs+1, xx); }
+  129 : func real ErFun(real xx){ return interp1(xSample, ErArr, nxs+1, xx); }
+  130 : 
+  131 : // Diagnostics (voltage taps / RTDs / Hall-probe placeholders) -- must be
+  132 : // included after Efun/ElFun/ErFun above, per that file's header comment.
+  133 : include "../shared/diagnostics_3d_slit.idp"// ============================================================
+    2 : // diagnostics_3d_slit.idp
+    3 : // Lab-instrumentation-style diagnostics export for the 3D slit model.
+    4 : //
+    5 : // Mimics a real diagnostics board (see user-provided layout diagram):
+    6 : //   - 10 voltage taps per side (20 total), evenly spaced over 80% of
+    7 : //     the slit length, centered on the slit/heater x-location.
+    8 : //   - 8 RTD-style point temperature sensors per side (16 total),
+    9 : //     nested at the midpoint of each tap-to-tap gap EXCEPT the one
+   10 : //     gap that straddles the heater/Hall-probe location (no RTD
+   11 : //     there, matching the diagram).
+   12 : //   - 2 Hall-probe position placeholders (one per side, co-located
+   13 : //     with the heater), reserved but NOT wired to any B-field
+   14 : //     computation yet -- exported as a fixed sentinel value until the
+   15 : //     self-field roadmap item is implemented.
+   16 : //   - V_CL+ / V_CL- : the current-lead voltage reference points at the
+   17 : //     tape ends (x=0, x=Lx), outside the slit -- single channel there.
+   18 : //
+   19 : // IMPORTANT -- scope/inclusion requirements:
+   20 : //   This file assumes the INCLUDING script has ALREADY defined, with
+   21 : //   exactly these names (as step_3d_slit_transient.edp does):
+   22 : //     real Lx, width, xSlitStart, xSlitEnd, yB7
+   23 : //     func real Efun(real xx)   -- full-channel E, valid outside slit range
+   24 : //     func real ElFun(real xx)  -- left-channel E,  valid inside slit range
+   25 : //     func real ErFun(real xx)  -- right-channel E, valid inside slit range
+   26 : //   Include this file AFTER those are defined (i.e. after the E-field
+   27 : //   sampling arrays for the current timestep have been filled), not
+   28 : //   at the top of the script, since tap voltages must reflect the
+   29 : //   CURRENT timestep's field. Positions/metadata below are static and
+   30 : //   only need to be computed once, but voltage evaluation
+   31 : //   (diagVoltage/diagAllTapVoltages) must be called freshly each step.
+   32 : // ============================================================
+   33 : 
+   34 : // ---- physical z-locations representing "side" (matches TmaxLeft/
+   35 : // TmaxRight convention already used elsewhere in the transient script) ----
+   36 : real zDiagLeft  = width/4;
+   37 : real zDiagRight = 3*width/4;
+   38 : 
+   39 : // ---- tap layout: 10 per side, 80% of slit length, centered on slit ----
+   40 : int nTapsPerSide = 10;
+   41 : real slitLen    = xSlitEnd - xSlitStart;
+   42 : real spanCenter = 0.5*(xSlitStart + xSlitEnd);
+   43 : real spanFrac   = 0.8;
+   44 : real spanLen    = spanFrac*slitLen;
+   45 : real xSpanLo    = spanCenter - 0.5*spanLen;
+   46 : real xSpanHi    = spanCenter + 0.5*spanLen;
+   47 : real tapSpacing = spanLen/(nTapsPerSide-1);
+   48 : 
+   49 : real[int] xTap(nTapsPerSide);
+   50 : for (int i=0; i<nTapsPerSide; i++) xTap[i] = xSpanLo + i*tapSpacing;
+   51 : 
+   52 : // ---- RTD layout: one at the midpoint of each tap-gap, except the
+   53 : // gap straddling spanCenter (heater/Hall location) ----
+   54 : int nGaps = nTapsPerSide - 1;
+   55 : int heaterGapIdx = -1;
+   56 : for (int i=0; i<nGaps; i++)
+   57 :   if (xTap[i] <= spanCenter+1e-12 && xTap[i+1] >= spanCenter-1e-12) heaterGapIdx = i;
+   58 : 
+   59 : int nRTDsPerSide = nGaps - 1;
+   60 : real[int] xRTD(nRTDsPerSide);
+   61 : {
+   62 :   int k = 0;
+   63 :   for (int i=0; i<nGaps; i++){
+   64 :     if (i == heaterGapIdx) continue;
+   65 :     xRTD[k] = 0.5*(xTap[i] + xTap[i+1]);
+   66 :     k++;
+   67 :   }
+   68 : }
+   69 : 
+   70 : // ---- Hall probe placeholder positions (reserved, not yet computed) ----
+   71 : real xHall = spanCenter;   // co-located with heater, per diagram (H_1/H_2)
+   72 : real hallNotModeled = -999.0;   // sentinel: B-field modeling not yet implemented
+   73 : 
+   74 : // ---- field integration: honors the slit's L/R channel split ----
+   75 : // side: -1 = left (z=zDiagLeft), +1 = right (z=zDiagRight)
+   76 : func real diagEfield(real xx, int side){
+   77 :   if (xx < xSlitStart || xx > xSlitEnd) return Efun(xx);
+   78 :   return (side < 0) ? ElFun(xx) : ErFun(xx);
+   79 : }
+   80 : 
+   81 : // Cumulative voltage from x=0 (V_CL+ reference) out to xx, along the
+   82 : // given side's physical conductor path. Midpoint-rule integration --
+   83 : // cheap (interpolation lookups only, no solve) so a fine sub-count is
+   84 : // fine even though this runs every timestep.
+   85 : func real diagVcum(real xx, int side){
+   86 :   int nSub = 400;
+   87 :   real h = xx/nSub;
+   88 :   real sum = 0.0;
+   89 :   for (int j=0; j<nSub; j++){
+   90 :     real xm = (j+0.5)*h;
+   91 :     sum += diagEfield(xm, side)*h;
+   92 :   }
+   93 :   return sum;
+   94 : }
+   95 : 
+   96 : // Fills two length-nTapsPerSide arrays with the current cumulative tap
+   97 : // voltages for left/right. Call once per timestep after Efun/ElFun/
+   98 : // ErFun have been refreshed for that step.
+   99 : func int diagAllTapVoltages(real[int] &VL, real[int] &VR){
+  100 :   for (int i=0; i<nTapsPerSide; i++){
+  101 :     VL[i] = diagVcum(xTap[i], -1);
+  102 :     VR[i] = diagVcum(xTap[i], +1);
+  103 :   }
+  104 :   return 0;
+  105 : }
+  106 : 
+  107 : // One-time metadata export: physical location + type of every channel,
+  108 : // written once (not per-row) so it doesn't bloat the timeseries CSV.
+  109 : func int writeDiagnosticsMetadata(string fname){
+  110 :   ofstream fmeta(fname);
+  111 :   fmeta << "channel,type,side,x_m,y_m,z_m,notes\n";
+  112 :   for (int i=0; i<nTapsPerSide; i++){
+  113 :     fmeta << "V1_" << (i+1) << ",voltage_tap,left," << xTap[i] << "," << yB7 << "," << zDiagLeft  << ",cumulative from V_CL+\n";
+  114 :     fmeta << "V2_" << (i+1) << ",voltage_tap,right," << xTap[i] << "," << yB7 << "," << zDiagRight << ",cumulative from V_CL+\n";
+  115 :   }
+  116 :   for (int i=0; i<nRTDsPerSide; i++){
+  117 :     fmeta << "RTD1_" << (i+1) << ",temperature_rtd,left," << xRTD[i] << "," << yB7 << "," << zDiagLeft  << ",surface-mounted (top Cu)\n";
+  118 :     fmeta << "RTD2_" << (i+1) << ",temperature_rtd,right," << xRTD[i] << "," << yB7 << "," << zDiagRight << ",surface-mounted (top Cu)\n";
+  119 :   }
+  120 :   fmeta << "H1,hall_probe,left," << xHall << "," << yB7 << "," << zDiagLeft  << ",PLACEHOLDER - not yet wired to B-field computati
+  ... : on\n";
+  121 :   fmeta << "H2,hall_probe,right," << xHall << "," << yB7 << "," << zDiagRight << ",PLACEHOLDER - not yet wired to B-field computati
+  ... : on\n";
+  122 :   fmeta << "V_CL_plus,current_lead_voltage,n/a,0," << yB7 << ",n/a,reference (=0 by construction)\n";
+  123 :   fmeta << "V_CL_minus,current_lead_voltage,n/a," << Lx << "," << yB7 << ",n/a,far current lead\n";
+  124 :   return 0;
+  125 : }
+  126 : 
+  134 : real[int] diagVL(nTapsPerSide), diagVR(nTapsPerSide);
+  135 : 
+  136 : fespace Vh3(Th3, P1);
+  137 : fespace Ph3(Th3, P0);
+  138 : Ph3 reg = region;
+  139 : Vh3 T, Told, w;
+  140 : Ph3 kfun, source, rhocpfun;
+  141 : 
+  142 : real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yHastMid=0.5*(yB2+yB3), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
+  143 : real zLeftRep = width/4, zRightRep = 3*width/4;
+  144 : 
+  145 : // Self-field B computation (Kim-model Jc(B,T) feedback) -- must be
+  146 : // included after Efun/ElFun/ErFun AND after Vh3 T exists (bfield_3d_slit.idp's
+  147 : // computeSelfFieldB references the mesh field T directly), per its own
+  148 : // header comment. FreeFEM resolves identifiers at parse time even inside
+  149 : // func bodies not yet called, so this really does need to come after the
+  150 : // Vh3 T declaration above, not just before it's first USED.
+  151 : include "bfield_3d_slit.idp"// ============================================================
+    2 : // bfield_3d_slit.idp
+    3 : // Self-field B computation for Kim-model Jc(B,T) suppression.
+    4 : //
+    5 : // Scope decisions (see project history for the full discussion):
+    6 : //  - Self-field only: computed via Biot-Savart directly from the
+    7 : //    tape's own current distribution. No external circuit / current
+    8 : //    return path is modeled (open-conductor approximation) -- this is
+    9 : //    least accurate near the current leads (x=0, x=Lx) and most
+   10 : //    accurate near the tape's midpoint, which is where the physics of
+   11 : //    interest (heater/hot-spot self-field suppression) actually lives.
+   12 : //  - LAGGED coupling: B is computed from the PREVIOUS timestep's
+   13 : //    converged current distribution, then held fixed through the
+   14 : //    current timestep's current-sharing bisection -- matches the
+   15 : //    existing Told-based lagging already used for source terms, and
+   16 : //    avoids a nested Picard loop.
+   17 : //  - Thin-SHEET approximation, one sheet per CURRENT-CARRYING layer
+   18 : //    (Hastelloy/buffer carry no current, no sheet needed): Ag-bottom,
+   19 : //    REBCO, Ag-top (simple flat sheets) + the Cu shell decomposed into
+   20 : //    4 non-overlapping sub-sheets (top strip, bottom strip, left wall,
+   21 : //    right wall) to preserve its actual wrap-around geometry rather
+   22 : //    than approximating it as flat. Each sheet's current density is
+   23 : //    resolved in 2D (along x AND across its own width) -- deliberately
+   24 : //    not collapsed to a 1D line current, since width-resolved self-field
+   25 : //    structure at the tape edges is the specific thing motivating the
+   26 : //    thin-sheet choice over a filament approximation.
+   27 : //  - Within the slit's x-range, Ag-bottom/REBCO/Ag-top and the Cu
+   28 : //    top/bottom strips split left/right at z=zSlitCenter (matching the
+   29 : //    existing electrical model); the Cu side walls are always whole,
+   30 : //    always on their respective side (confirmed from the mesh module:
+   31 : //    the walls sit entirely outside the slit's z-range, so are never
+   32 : //    severed by it).
+   33 : //
+   34 : // REQUIRES: this file must be included in a script that has already
+   35 : // included hts_mesh_module_3d_slit.idp and hts_materials.idp, and
+   36 : // which defines (with these exact names, as step_3d_slit_transient_diag.edp
+   37 : // does): the E-field sample arrays/functions Efun/ElFun/ErFun and their
+   38 : // backing arrays Earr/ElArr/ErArr, xSample, nxs, xSlitStart, xSlitEnd,
+   39 : // zSlitCenter, zLeftRep, zRightRep, and Vh3 T.
+   40 : // ============================================================
+   41 : 
+   42 : // ---- Kim model: Jc(B,T) = Jc(T)/(1+|B|/B0) ----
+   43 : // LITERATURE VALUE (2026-09-25), from Loic Queval et al 2016 Supercond.
+   44 : // Sci. Technol. 29 024007 -- replaces the prior 0.1 T placeholder (round,
+   45 : // order-of-magnitude guess made without search access; see git history).
+   46 : // Suppression scales with 1/B0kim, so this is a >2x more aggressive
+   47 : // suppression curve than the placeholder, not a cosmetic change --
+   48 : // verify with a real run before trusting downstream results against it
+   49 : // (see Bfield/CLAUDE.md).
+   50 : // Also note: this is still an ISOTROPIC Kim model using |B| regardless
+   51 : // of orientation -- real REBCO Jc(B) is strongly anisotropic
+   52 : // (perpendicular field suppresses much more than parallel field); that
+   53 : // anisotropy is a known simplification here, not an oversight, and is a
+   54 : // candidate refinement for later (see Bfield/CLAUDE.md for the
+   55 : // isotropic-first verification plan), not implemented now.
+   56 : real B0kim = 0.04265;
+   57 : 
+   58 : func real JcTB(real Tl, real Bmag)
+ *** Warning  The identifier Tl hide a Global identifier  
+{
+   59 :   return JcT(Tl) / (1.0 + Bmag/B0kim);
+   60 : }
+   61 : func real sigmaScB(real Emag, real Tl, real Bmag)
+ *** Warning  The identifier Tl hide a Global identifier  
+{
+   62 :   real Estab = max(abs(Emag), Einit);
+   63 :   real JcVal = JcTB(Tl, Bmag);
+   64 :   real nVal  = nT(Tl);   // Kim model here only suppresses Jc, not n -- standard simplification
+   65 :   real scTerm = (JcVal/Estab) * (Estab/E0)^(1.0/nVal);
+   66 :   return min(scTerm, sigmaMax) + sigmaRebco;
+   67 : }
+   68 : 
+   69 : // ---- sheet geometry (all derived from the real mesh-module constants,
+   70 : // nothing hardcoded) ----
+   71 : real yCuBotSheet = tCuB/2.0;
+   72 : real yCuTopSheet = yB6 + tCuT/2.0;
+   73 : real yCuWallMid  = 0.5*(yB1+yB6);
+   74 : real zCuLeftWall  = tSideCu/2.0;
+   75 : real zCuRightWall = width - tSideCu/2.0;
+   76 : 
+   77 : real yAgBSheet = 0.5*(yB1+yB2);
+   78 : real yHastSheet = 0.5*(yB2+yB3);
+   79 : real yScSheet  = 0.5*(yB4+yB5);
+   80 : real yAgTSheet = 0.5*(yB5+yB6);
+   81 : 
+   82 : // ---- E-field helper: which E value applies at x for the given side
+   83 : // (side<0 = left/z<center, side>0 = right/z>center) -- outside the
+   84 : // slit range both sides see the same unified Efun, matching the
+   85 : // diagnostics module's identical convention ----
+   86 : func real EforSide(real xx, int side){
+   87 :   if (xx < xSlitStart || xx > xSlitEnd) return Efun(xx);
+   88 :   return (side < 0) ? ElFun(xx) : ErFun(xx);
+   89 : }
+   90 : 
+   91 : // ---- generic 2D Biot-Savart sheet integrators. Current always flows
+   92 : // in +x (the model's universal assumption). K(x) is surface current
+   93 : // density [A/m], uniform across the sheet's short/transverse extent at
+   94 : // a given x (consistent with the existing model's per-x-slice-uniform
+   95 : // current assumption within each layer) but resolved in 2D spatially
+   96 : // via explicit sub-strips across that transverse extent, so the actual
+   97 : // finite width still shapes the near-field the way a real sheet would.
+   98 : // ----
+   99 : func real[int] biotSheetYConst(real px,real py,real pz, real ySheet, real za,real zb,
+  100 :                                 real[int] &Karr, int nSub){
+  101 :   int Nz = 6;
+  102 :   real dz = (zb-za)/Nz;
+ *** Warning  The identifier dz hide a Global identifier  
+
+  103 :   real sx=0.0, sy=0.0, sz=0.0;
+  104 :   for (int iz=0; iz<Nz; iz++){
+  105 :     real zq = za + (iz+0.5)*dz;
+  106 :     for (int ix=0; ix<nSub-1; ix++){
+  107 :       real xq = 0.5*(xSample[ix]+xSample[ix+1]);
+  108 :       real Kavg = 0.5*(Karr[ix]+Karr[ix+1]);
+  109 :       real dI = Kavg*dz;
+  110 :       real dxSeg = xSample[ix+1]-xSample[ix];
+  111 :       real rx=px-xq, ry=py-ySheet, rz=pz-zq;
+  112 :       real rmag = sqrt(rx^2+ry^2+rz^2);
+  113 :       real inv = dI/(4*pi*(rmag^3+1e-30));
+  114 :       // dl=(dxSeg,0,0); dl x r = (0, -dxSeg*rz, dxSeg*ry)
+  115 :       sy += (-dxSeg*rz)*inv;
+  116 :       sz += ( dxSeg*ry)*inv;
+  117 :     }
+  118 :   }
+  119 :   real[int] res = [sx, sy, sz];
+  120 :   return res;
+  121 : }
+  122 : func real[int] biotSheetZConst(real px,real py,real pz, real zSheet, real ya,real yb,
+  123 :                                 real[int] &Karr, int nSub){
+  124 :   int Ny = 4;
+  125 :   real dy = (yb-ya)/Ny;
+ *** Warning  The identifier dy hide a Global identifier  
+
+  126 :   real sx=0.0, sy=0.0, sz=0.0;
+  127 :   for (int iy=0; iy<Ny; iy++){
+  128 :     real yq = ya + (iy+0.5)*dy;
+  129 :     for (int ix=0; ix<nSub-1; ix++){
+  130 :       real xq = 0.5*(xSample[ix]+xSample[ix+1]);
+  131 :       real Kavg = 0.5*(Karr[ix]+Karr[ix+1]);
+  132 :       real dI = Kavg*dy;
+  133 :       real dxSeg = xSample[ix+1]-xSample[ix];
+  134 :       real rx=px-xq, ry=py-yq, rz=pz-zSheet;
+  135 :       real rmag = sqrt(rx^2+ry^2+rz^2);
+  136 :       real inv = dI/(4*pi*(rmag^3+1e-30));
+  137 :       sy += (-dxSeg*rz)*inv;
+  138 :       sz += ( dxSeg*ry)*inv;
+  139 :     }
+  140 :   }
+  141 :   real[int] res = [sx, sy, sz];
+  142 :   return res;
+  143 : }
+  144 : 
+  145 : // ---- near-field-excluding variant, used ONLY when a sheet is being
+  146 : // evaluated at a point ON ITSELF (same y-height, same side) -- e.g.
+  147 : // REBCO's own contribution to B at REBCO's own location. Segments
+  148 : // immediately adjacent to the evaluation x-index are excluded from
+  149 : // the discretized sum (that's exactly where the y-distance is zero
+  150 : // and the naive kernel is near-singular), and nothing is added back:
+  151 : // the exact uniform-current-slab result for the field AT THE CENTER
+  152 : // of a locally-uniform slab is precisely zero (see project notes),
+  153 : // so omitting that immediate neighborhood entirely IS the correct
+  154 : // near-field treatment here, not merely an approximation of it.
+  155 : //
+  156 : // CAVEAT: the excluded window's width is tied to the x-sampling grid
+  157 : // spacing (~3.3mm at nxs=60), which is coarser than the length scale
+  158 : // over which current density is truly uniform right at sharp
+  159 : // features (the heater footprint, the slit edges). The zero-near-term
+  160 : // result is exact only insofar as current is locally uniform within
+  161 : // the excluded window -- it is a weaker approximation specifically at
+  162 : // those sharp features than everywhere else. nExclude is left as an
+  163 : // explicit, tunable parameter for exactly this reason.
+  164 : func real[int] biotSheetYConstExcludeNear(real px,real py,real pz, real ySheet, real za,real zb,
+  165 :                                            real[int] &Karr, int nSub, int excludeIdx, int nExclude){
+  166 :   int Nz = 6;
+  167 :   real dz = (zb-za)/Nz;
+ *** Warning  The identifier dz hide a Global identifier  
+
+  168 :   real sx=0.0, sy=0.0, sz=0.0;
+  169 :   int loEx = max(0, excludeIdx-nExclude);
+  170 :   int hiEx = min(nSub-2, excludeIdx+nExclude-1);
+  171 :   for (int iz=0; iz<Nz; iz++){
+  172 :     real zq = za + (iz+0.5)*dz;
+  173 :     for (int ix=0; ix<nSub-1; ix++){
+  174 :       if (ix>=loEx && ix<=hiEx) continue;   // skip the near neighborhood
+  175 :       real xq = 0.5*(xSample[ix]+xSample[ix+1]);
+  176 :       real Kavg = 0.5*(Karr[ix]+Karr[ix+1]);
+  177 :       real dI = Kavg*dz;
+  178 :       real dxSeg = xSample[ix+1]-xSample[ix];
+  179 :       real rx=px-xq, ry=py-ySheet, rz=pz-zq;
+  180 :       real rmag = sqrt(rx^2+ry^2+rz^2);
+  181 :       real inv = dI/(4*pi*(rmag^3+1e-30));
+  182 :       sy += (-dxSeg*rz)*inv;
+  183 :       sz += ( dxSeg*ry)*inv;
+  184 :     }
+  185 :   }
+  186 :   real[int] res = [sx, sy, sz];
+  187 :   return res;
+  188 : }
+  189 : 
+  190 : // ---- self-field driver: builds all 12 sheet current-density arrays
+  191 : // from the CURRENT (soon to be overwritten) Earr/ElArr/ErArr and T --
+  192 : // i.e. the previous timestep's converged state, per the lagged-
+  193 : // coupling decision -- and evaluates |B| (in Tesla) at the REBCO
+  194 : // layer's representative point for each side, at every x-sample point.
+  195 : //
+  196 : // NOTE on a deliberate simplification: the REBCO sheet's current here
+  197 : // is reconstructed via the plain sigmaSc(E,T) formula (NOT sigmaScB),
+  198 : // even though the "real" current that produced this stored E may have
+  199 : // been computed under B-suppression on a previous step. This avoids
+  200 : // needing a separate persisted-B checkpoint across script invocations
+  201 : // (B is always freshly recomputed from the already-checkpointed E/T
+  202 : // state instead). Given the whole self-field treatment is already an
+  203 : // approximation (open-conductor, lagged, isotropic Kim model), this
+  204 : // additional simplification is judged acceptable -- it does not
+  205 : // compound across timesteps, since nothing here is itself persisted.
+  206 : real mu0 = 4*pi*1e-7;
+  207 : 
+  208 : func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
+  209 :   real[int] KcuBotL(nSub), KcuBotR(nSub), KcuTopL(nSub), KcuTopR(nSub);
+  210 :   real[int] KcuLW(nSub), KcuRW(nSub);
+  211 :   real[int] KagbL(nSub), KagbR(nSub), KhastL(nSub), KhastR(nSub), KscL(nSub), KscR(nSub), KagtL(nSub), KagtR(nSub);
+  212 : 
+  213 :   for (int i=0; i<nSub; i++){
+  214 :     real xx = xSample[i];
+  215 :     real ElHere = EforSide(xx,-1), ErHere = EforSide(xx,+1);
+  216 :     real TcuBotL=T(xx,yCuBotSheet,zLeftRep), TcuBotR=T(xx,yCuBotSheet,zRightRep);
+  217 :     real TcuTopL=T(xx,yCuTopSheet,zLeftRep), TcuTopR=T(xx,yCuTopSheet,zRightRep);
+  218 :     real TcuLWt=T(xx,yCuWallMid,zCuLeftWall), TcuRWt=T(xx,yCuWallMid,zCuRightWall);
+  219 :     real TagbL=T(xx,yAgBSheet,zLeftRep), TagbR=T(xx,yAgBSheet,zRightRep);
+  220 :     real ThastL=T(xx,yHastSheet,zLeftRep), ThastR=T(xx,yHastSheet,zRightRep);
+  221 :     real TscL=T(xx,yScSheet,zLeftRep),   TscR=T(xx,yScSheet,zRightRep);
+  222 :     real TagtL=T(xx,yAgTSheet,zLeftRep), TagtR=T(xx,yAgTSheet,zRightRep);
+  223 : 
+  224 :     KcuBotL[i]=tCuB*(ElHere/rhoCu(TcuBotL)); KcuBotR[i]=tCuB*(ErHere/rhoCu(TcuBotR));
+  225 :     KcuTopL[i]=tCuT*(ElHere/rhoCu(TcuTopL)); KcuTopR[i]=tCuT*(ErHere/rhoCu(TcuTopR));
+  226 :     KcuLW[i]=tSideCu*(ElHere/rhoCu(TcuLWt)); KcuRW[i]=tSideCu*(ErHere/rhoCu(TcuRWt));
+  227 :     KagbL[i]=tAgB*(ElHere/rhoAg(TagbL));     KagbR[i]=tAgB*(ErHere/rhoAg(TagbR));
+  228 :     KhastL[i]=tSub*(ElHere/rhoHast(ThastL)); KhastR[i]=tSub*(ErHere/rhoHast(ThastR));
+  229 :     KscL[i]=sigmaSc(ElHere,TscL)*ElHere*tSc; KscR[i]=sigmaSc(ErHere,TscR)*ErHere*tSc;
+  230 :     KagtL[i]=tAgT*(ElHere/rhoAg(TagtL));     KagtR[i]=tAgT*(ErHere/rhoAg(TagtR));
+  231 :   }
+  232 : 
+  233 :   for (int i=0; i<nSub; i++){
+  234 :     real xx = xSample[i];
+  235 :     for (int side=-1; side<=1; side+=2){
+  236 :       real pz = (side<0) ? zLeftRep : zRightRep;
+  237 :       real[int] hCuBotL=biotSheetYConst(xx,yScSheet,pz, yCuBotSheet, 0.0,zSlitCenter, KcuBotL,nSub);
+  238 :       real[int] hCuBotR=biotSheetYConst(xx,yScSheet,pz, yCuBotSheet, zSlitCenter,width, KcuBotR,nSub);
+  239 :       real[int] hCuTopL=biotSheetYConst(xx,yScSheet,pz, yCuTopSheet, 0.0,zSlitCenter, KcuTopL,nSub);
+  240 :       real[int] hCuTopR=biotSheetYConst(xx,yScSheet,pz, yCuTopSheet, zSlitCenter,width, KcuTopR,nSub);
+  241 :       real[int] hCuLW  =biotSheetZConst(xx,yScSheet,pz, zCuLeftWall, yB1,yB6, KcuLW,nSub);
+  242 :       real[int] hCuRW  =biotSheetZConst(xx,yScSheet,pz, zCuRightWall, yB1,yB6, KcuRW,nSub);
+  243 :       real[int] hAgbL  =biotSheetYConst(xx,yScSheet,pz, yAgBSheet, zB1,zSlitCenter, KagbL,nSub);
+  244 :       real[int] hAgbR  =biotSheetYConst(xx,yScSheet,pz, yAgBSheet, zSlitCenter,zB2, KagbR,nSub);
+  245 :       // Hastelloy is a genuine cross-term here (evaluated at REBCO's
+  246 :       // y-height, not its own), so no near-field exclusion is needed --
+  247 :       // ordinary Biot-Savart, same as Ag/Cu.
+  248 :       real[int] hHastL =biotSheetYConst(xx,yScSheet,pz, yHastSheet, zB1,zSlitCenter, KhastL,nSub);
+  249 :       real[int] hHastR =biotSheetYConst(xx,yScSheet,pz, yHastSheet, zSlitCenter,zB2, KhastR,nSub);
+  250 :       // REBCO's contribution to B AT ITS OWN LOCATION: only the
+  251 :       // portion on the SAME side as the evaluation point (side<0 uses
+  252 :       // hScL, side>0 uses hScR) needs the near-field exclusion, since
+  253 :       // that's the only piece sharing both the evaluation y-height AND
+  254 :       // covering the evaluation z-location. The opposite-side portion
+  255 :       // is a genuine, well-posed cross-term (nonzero z-separation) and
+  256 :       // uses ordinary Biot-Savart unchanged.
+  257 :       real[int] hScL(3), hScR(3);
+  258 :       if (side<0){ hScL=biotSheetYConstExcludeNear(xx,yScSheet,pz, yScSheet, zB1,zSlitCenter, KscL,nSub, i,2);
+  259 :                    hScR=biotSheetYConst(xx,yScSheet,pz, yScSheet, zSlitCenter,zB2, KscR,nSub); }
+  260 :       else       { hScL=biotSheetYConst(xx,yScSheet,pz, yScSheet, zB1,zSlitCenter, KscL,nSub);
+  261 :                    hScR=biotSheetYConstExcludeNear(xx,yScSheet,pz, yScSheet, zSlitCenter,zB2, KscR,nSub, i,2); }
+  262 :       real[int] hAgtL  =biotSheetYConst(xx,yScSheet,pz, yAgTSheet, zB1,zSlitCenter, KagtL,nSub);
+  263 :       real[int] hAgtR  =biotSheetYConst(xx,yScSheet,pz, yAgTSheet, zSlitCenter,zB2, KagtR,nSub);
+  264 : 
+  265 :       real Hy = hCuBotL[1]+hCuBotR[1]+hCuTopL[1]+hCuTopR[1]+hCuLW[1]+hCuRW[1]
+  266 :               + hAgbL[1]+hAgbR[1]+hHastL[1]+hHastR[1]+hScL[1]+hScR[1]+hAgtL[1]+hAgtR[1];
+  267 :       real Hz = hCuBotL[2]+hCuBotR[2]+hCuTopL[2]+hCuTopR[2]+hCuLW[2]+hCuRW[2]
+  268 :               + hAgbL[2]+hAgbR[2]+hHastL[2]+hHastR[2]+hScL[2]+hScR[2]+hAgtL[2]+hAgtR[2];
+  269 :       real Hmag = sqrt(Hy^2+Hz^2);
+  270 :       if (side<0) BleftOut[i]=mu0*Hmag; else BrightOut[i]=mu0*Hmag;
+  271 :     }
+  272 :   }
+  273 :   return 0;
+  274 : }
+  275 : 
+  276 : // ---- B-aware current-sharing bisection: identical structure to the
+  277 : // existing ItotFull/solveEFull and ItotHalf/solveEHalf, but using
+  278 : // sigmaScB (Kim-suppressed) instead of sigmaSc for the REBCO term.
+  279 : //
+  280 : // Hastelloy (region 3) is included here as a genuine parallel resistive
+  281 : // branch (tSub*coreWidth*(E/rhoHast(THast)), same Ohmic form as Cu/Ag) --
+  282 : // NOT excluded as "non-conducting". It has real, measured, merely-HIGH
+  283 : // (not insulating) resistivity: ~1.23e-6 Ohm*m at 77-86K, essentially
+  284 : // flat with temperature, versus Cu/Ag's ~3-6e-9 Ohm*m which itself rises
+  285 : // with T. Back-of-envelope at 80K: Hastelloy's resistance per unit
+  286 : // length is ~235x the parallel Cu+Ag combination, i.e. it carries
+  287 : // roughly ~0.4-0.5% of the stabilizer's current there -- small, but a
+  288 : // real, included contribution now rather than an assumed-zero omission.
+  289 : // Buffer (region 4) remains excluded -- its assumed conductivity
+  290 : // (sigmaBuf=1e-10 S/m) is ~4 orders of magnitude below even Hastelloy's
+  291 : // real resistivity and is itself a nominal placeholder, not measured
+  292 : // data, but that's a separate, much-better-justified approximation than
+  293 : // Hastelloy's blanket exclusion was.
+  294 : func real ItotFullB(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT, real Bmag){
+  295 :   return shellAreaFull*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
+  296 :        + tSub*coreWidth*(E/rhoHast(THast))
+  297 :        + tSc*coreWidth*sigmaScB(E,Tsc,Bmag)*E + tAgT*coreWidth*(E/rhoAg(TagT));
+  298 : }
+  299 : func real solveEFullB(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget, real Bmag){
+  300 :   if (Itarget <= 0.0) return 0.0;
+  301 :   real Ehi0=4.0; int guard=0;
+  302 :   while (ItotFullB(Ehi0,TcuShell,TagB,THast,Tsc,TagT,Bmag) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  303 :   real logElo=log(1e-30), logEhi=log(Ehi0);
+  304 :   for(int it=0;it<50;it++){
+  305 :     real logEmid=0.5*(logElo+logEhi);
+  306 :     real Emid=exp(logEmid);
+  307 :     if (ItotFullB(Emid,TcuShell,TagB,THast,Tsc,TagT,Bmag) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  308 :   }
+  309 :   real Ef=exp(0.5*(logElo+logEhi));
+  310 :   real relErr=abs(ItotFullB(Ef,TcuShell,TagB,THast,Tsc,TagT,Bmag)-Itarget)/max(Itarget,1e-30);
+  311 :   assert(relErr<=1e-3);
+  312 :   return Ef;
+  313 : }
+  314 : func real ItotHalfB(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT, real shellA, real cw, real Bmag){
+  315 :   return shellA*(E/rhoCu(TcuShell)) + tAgB*cw*(E/rhoAg(TagB))
+  316 :        + tSub*cw*(E/rhoHast(THast))
+  317 :        + tSc*cw*sigmaScB(E,Tsc,Bmag)*E + tAgT*cw*(E/rhoAg(TagT));
+  318 : }
+  319 : func real solveEHalfB(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget, real shellA, real cw, real Bmag){
+  320 :   if (Itarget <= 0.0) return 0.0;
+  321 :   real Ehi0=4.0; int guard=0;
+  322 :   while (ItotHalfB(Ehi0,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bmag) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  323 :   real logElo=log(1e-30), logEhi=log(Ehi0);
+  324 :   for(int it=0;it<50;it++){
+  325 :     real logEmid=0.5*(logElo+logEhi);
+  326 :     real Emid=exp(logEmid);
+  327 :     if (ItotHalfB(Emid,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bmag) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  328 :   }
+  329 :   real Ef=exp(0.5*(logElo+logEhi));
+  330 :   real relErr=abs(ItotHalfB(Ef,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bmag)-Itarget)/max(Itarget,1e-30);
+  331 :   assert(relErr<=1e-3);
+  332 :   return Ef;
+  333 : }
+  334 : 
+  152 : real[int] Bleft(nxs+1), Bright(nxs+1);
+  153 : 
+  154 : // Defaults to 1 (this script's exact prior behavior, unflagged). A
+  155 : // wrapper passes a larger value via -steps-per-invocation to amortize
+  156 : // the mesh-rebuild-per-invocation cost across several timesteps --
+  157 : // CSV/diagnostics rows are still written every physical step regardless,
+  158 : // and (see below) the checkpoint is now written every physical step too,
+  159 : // so no time-resolution or crash-safety is lost by raising this.
+  160 : int maxStepsThisRun = getARGV("-steps-per-invocation", 1);
+  161 : 
+  162 : // Adaptive-bisection/runaway-cutoff tunables, ported from
+  163 : // electrothermal/step_3d_slit_transient_diag.edp -- see the step loop
+  164 : // below for the mechanism and that track's CLAUDE.md for the crash
+  165 : // history that motivated it (large-dt UMFPACK ill-conditioning on this
+  166 : // project's own material tables, found to be node/hardware-dependent
+  167 : // rather than a deterministic function of dt). getARGV lets these be
+  168 : // overridden from the command line without editing the script; defaults
+  169 : // reproduce this script's exact prior behavior when unflagged.
+  170 : real maxStepRise = getARGV("-maxsteprise", 500.0);
+  171 : int maxBisections = getARGV("-maxbisections", 10);
+  172 : real tmaxCutoff = getARGV("-tmaxcutoff", 900.0);
+  173 : 
+  174 : // CHECKPOINT FORMAT CHANGE: now also persists Earr/ElArr/ErArr, not just
+  175 : // t and T. This is required for computeSelfFieldB's lagged design to
+  176 : // actually work: it reads these arrays BEFORE this step's electrical
+  177 : // solve overwrites them, expecting last step's converged values. Without
+  178 : // persisting them, every fresh script invocation saw freshly-zero-
+  179 : // initialized arrays instead, and B was silently 0 forever regardless of
+  180 : // the real current/heating state -- a real bug, not a physics effect,
+  181 : // caught by exactly that symptom (uniformly zero B at every Hall probe
+  182 : // reading). Checkpoints from before this fix do NOT have this data --
+  183 : // re-run init_3d_slit_transient_checkpoint.edp for a fresh start rather
+  184 : // than resuming an old checkpoint with this script; there's no valid B
+  185 : // history in an old checkpoint to recover anyway (B was always 0 there).
+  186 : real t = 0.0;
+  187 : {
+  188 :   ifstream fchk(outPrefix+"ckpt_3d_slit_transient.txt");
+  189 :   fchk >> t;
+  190 :   for (int i=0;i<T.n;i++) fchk >> T[][i];
+  191 :   for (int i=0;i<=nxs;i++) fchk >> Earr[i];
+  192 :   for (int i=0;i<=nxs;i++) fchk >> ElArr[i];
+  193 :   for (int i=0;i<=nxs;i++) fchk >> ErArr[i];
+  194 :   cout << "Resumed at t="<<t<<"s Tmax="<<T[].max << endl;
+  195 : }
+  196 : 
+  197 : {
+  198 :   ofstream fout(outPrefix+"transient_3d_slit.csv", append);
+  199 :   if (t <= 1e-12) fout << "t,I0,Tmax,TmaxLeft,TmaxRight,fracLeft\n";
+  200 : 
+  201 :   ofstream fdiag(outPrefix+"diagnostics_3d_slit.csv", append);
+  202 :   int diagFileCheck = exec("test -s "+outPrefix+"diagnostics_3d_slit.csv");
+  203 :   bool diagCsvHasHeader = (diagFileCheck == 0);
+  204 :   // Metadata is static and cheap -- just rewrite it every invocation so it's
+  205 :   // always present/current, regardless of when this feature was added
+  206 :   // relative to an in-progress run's t value.
+  207 :   writeDiagnosticsMetadata(outPrefix+"diagnostics_positions_3d_slit.csv");
+  208 :   if (!diagCsvHasHeader) {
+  209 :     fdiag << "t,I0,Tmax,fracLeft,V_CL_plus,V_CL_minus";
+  210 :     for (int i=0;i<nTapsPerSide;i++) fdiag << ",V1_" << (i+1);
+  211 :     for (int i=0;i<nTapsPerSide;i++) fdiag << ",V2_" << (i+1);
+  212 :     for (int i=0;i<nRTDsPerSide;i++) fdiag << ",RTD1_" << (i+1);
+  213 :     for (int i=0;i<nRTDsPerSide;i++) fdiag << ",RTD2_" << (i+1);
+  214 :     fdiag << ",H1,H2\n";
+  215 :   }
+  216 : 
+  217 :   int step = 0;
+  218 :   while (t < tEnd-1e-12 && step < maxStepsThisRun && T[].max < tmaxCutoff){
+  219 :     real tStepStart = clock();
+  220 :     real I0w = I0ofT(t);
+  221 : 
+  222 :     // Self-field B, computed from the CURRENT (about-to-be-overwritten)
+  223 :     // Earr/ElArr/ErArr and T -- i.e. the previous timestep's converged
+  224 :     // state -- then held fixed through this timestep's bisection below
+  225 :     // (the "lagged" coupling decision).
+  226 :     real tBstart = clock();
+  227 :     computeSelfFieldB(Bleft, Bright, nxs+1);
+  228 :     real tBfield = clock() - tBstart;
+  229 : 
+  230 :     real tElecStart = clock();
+  231 :     // electrical: single channel outside slit range, split L/R inside.
+  232 :     // WITHIN the slit, El(x)/Er(x) are resolved PER-x (matching the
+  233 :     // outside-slit treatment) rather than sampled once at a single
+  234 :     // representative point and extended uniformly -- the heater creates a
+  235 :     // strongly localized hot spot, and a single point's local resistivity
+  236 :     // is not representative of the other ~178mm of slit length.
+  237 :     for (int i=0;i<=nxs;i++){
+  238 :       real xx = xSample[i];
+  239 :       if (xx < xSlitStart || xx > xSlitEnd){
+  240 :         real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep), THast=T(xx,yHastMid,zLeftRep),
+  241 :              Tsc=T(xx,yScmid,zLeftRep), TagT=T(xx,yAgTmid,zLeftRep);
+  242 :         Earr[i] = solveEFullB(TcuShell,TagB,THast,Tsc,TagT, I0w, Bleft[i]);
+  243 :         ElArr[i] = 0; ErArr[i] = 0;
+  244 :       } else {
+  245 :         Earr[i] = 0;
+  246 :       }
+  247 :     }
+  248 : 
+  249 :     // Precompute local per-x temperatures within the slit range for both
+  250 :     // sides ONCE per timestep -- T is fixed during this algebraic
+  251 :     // current-split sub-solve, so there's no need to re-evaluate the FE
+  252 :     // field on every bisection iteration below.
+  253 :     real[int] TcuLx(nxs+1), TagBLx(nxs+1), THastLx(nxs+1), TscLx(nxs+1), TagTLx(nxs+1);
+  254 :     real[int] TcuRx(nxs+1), TagBRx(nxs+1), THastRx(nxs+1), TscRx(nxs+1), TagTRx(nxs+1);
+  255 :     int iSlitLo=-1, iSlitHi=-1;
+  256 :     for (int i=0;i<=nxs;i++){
+  257 :       real xx = xSample[i];
+  258 :       if (xx >= xSlitStart && xx <= xSlitEnd){
+  259 :         if (iSlitLo<0) iSlitLo=i;
+  260 :         iSlitHi=i;
+  261 :         TcuLx[i]=T(xx,yCuTop,zLeftRep);  TagBLx[i]=T(xx,yAgBmid,zLeftRep);  THastLx[i]=T(xx,yHastMid,zLeftRep);
+  262 :         TscLx[i]=T(xx,yScmid,zLeftRep);  TagTLx[i]=T(xx,yAgTmid,zLeftRep);
+  263 :         TcuRx[i]=T(xx,yCuTop,zRightRep); TagBRx[i]=T(xx,yAgBmid,zRightRep); THastRx[i]=T(xx,yHastMid,zRightRep);
+  264 :         TscRx[i]=T(xx,yScmid,zRightRep); TagTRx[i]=T(xx,yAgTmid,zRightRep);
+  265 :       }
+  266 :     }
+  267 : 
+  268 :     // Total voltage drop along each side = integral of the LOCAL field
+  269 :     // (current fixed at Il/Ir along the length, field varies with local T)
+  270 :     // over the slit's x-range, trapezoidal over the same x-sample grid used
+  271 :     // everywhere else.
+  272 :     func real VLeftTotal(real fracLeft){
+  273 :       real Il = fracLeft*I0w;
+  274 :       real sum = 0.0;
+  275 :       for (int i=iSlitLo;i<iSlitHi;i++){
+  276 :         real Ea = solveEHalfB(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, Bleft[i]);
+  277 :         real Eb = solveEHalfB(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, Bleft[i+1]);
+  278 :         sum += 0.5*(Ea+Eb)*(xSample[i+1]-xSample[i]);
+  279 :       }
+  280 :       return sum;
+  281 :     }
+  282 :     func real VRightTotal(real fracLeft){
+  283 :       real Ir = (1-fracLeft)*I0w;
+  284 :       real sum = 0.0;
+  285 :       for (int i=iSlitLo;i<iSlitHi;i++){
+  286 :         real Ea = solveEHalfB(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, Bright[i]);
+  287 :         real Eb = solveEHalfB(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, Bright[i+1]);
+  288 :         sum += 0.5*(Eb+Ea)*(xSample[i+1]-xSample[i]);
+  289 :       }
+  290 :       return sum;
+  291 :     }
+  292 :     func real Vdiff(real fracLeft){
+  293 :       return VLeftTotal(fracLeft) - VRightTotal(fracLeft);
+  294 :     }
+  295 :     real flo=0.0, fhi=1.0;
+  296 :     if (I0w <= 0.0){ flo=0.5; fhi=0.5; }
+  297 :     else {
+  298 :       for(int it=0;it<30;it++){
+  299 :         real fmid=0.5*(flo+fhi);
+  300 :         if (Vdiff(fmid) < 0) flo=fmid; else fhi=fmid;
+  301 :       }
+  302 :     }
+  303 :     real fracLeft = 0.5*(flo+fhi);
+  304 :     real IlFinal = fracLeft*I0w, IrFinal = (1-fracLeft)*I0w;
+  305 :     for (int i=iSlitLo;i<=iSlitHi;i++){
+  306 :       ElArr[i] = solveEHalfB(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, Bleft[i]);
+  307 :       ErArr[i] = solveEHalfB(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, Bright[i]);
+  308 :     }
+  309 :     real tElectrical = clock() - tElecStart;
+  310 : 
+  311 :     real dt = dtCapped(t);
+  312 :     if (dt <= 1e-9) break;
+  313 : 
+  314 :     real qHeaterNow = 0.0;
+  315 :     if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
+  316 : 
+  317 :     real tFieldsStart = clock();
+  318 :     Ph3 inSlitRange = (x>=xSlitStart)*(x<=xSlitEnd);
+  319 :     source = (1-inSlitRange)*sourceOfFull(region, Efun(x), T)
+  320 :            + inSlitRange*( (z<zSlitCenter)*sourceOfFull(region, ElFun(x), T)
+  321 :                           + (z>zSlitCenter)*sourceOfFull(region, ErFun(x), T) );
+  322 :     Told = T;
+  323 :     kfun = kOf(region, Told);
+  324 :     rhocpfun = rhoCpOf(region, Told);
+  325 :     real tFields = clock() - tFieldsStart;
+  326 : 
+  327 :     // Adaptive step bisection -- ported from electrothermal/
+  328 :     // step_3d_slit_transient_diag.edp (see its CLAUDE.md, "Ramp collapse
+  329 :     // breaks down above Ic" / "Adaptive step-size bisection" / "Above-Ic
+  330 :     // phase: adaptive Jc-based step growth"). heatStep's solve leaves
+  331 :     // solver= unspecified, so FreeFEM solves the (genuinely SPD) bilinear
+  332 :     // form as a general system via UMFPACK, which can fail -- loudly (OOM
+  333 :     // on pathological pivoting/fill-in) or silently (a technically-
+  334 :     // completed but numerically garbage factorization) -- on an ill-
+  335 :     // conditioned matrix. This project's material tables span many orders
+  336 :     // of magnitude (e.g. buffer's placeholder sigmaBuf=1e-10 S/m), and the
+  337 :     // failure was found to be node/hardware-dependent rather than a
+  338 :     // deterministic function of dt, so no fixed-dt cap can be proven safe
+  339 :     // in advance. Retry at half dt whenever the result isn't physically
+  340 :     // sane, standard adaptive-FEA practice. maxStepRise is deliberately
+  341 :     // generous (a real quench -- ~650K/s, the fastest observed this
+  342 :     // project -- is only ~13K at pulse-phase dt) so this only ever fires
+  343 :     // on genuine numerical garbage.
+  344 :     //
+  345 :     // Only the above-Ic ramp window gets the second, Jc-based accuracy
+  346 :     // controller below -- below tCrossIc, I0(t) is still ramping toward
+  347 :     // Ic with no current-sharing physics engaged yet (maxStepRise alone is
+  348 :     // the right guard there), and the pulse/post-pulse phases already
+  349 :     // have independently-validated fixed dt. This only actually triggers
+  350 :     // once currentRatio>1 (see tCrossIc above); at the default ratio=0.7
+  351 :     // it's a no-op, same as before ratio was parameterized.
+  352 :     bool inAboveIcPhase = (currentRatio > 1.0 && t >= tCrossIc-1e-9 && t < Tramp-1e-9);
+  353 :     real TmaxBefore = Told[].max, TminBefore = Told[].min;
+  354 :     real jcBefore = JcT(TmaxBefore);
+  355 :     // Normalize the Jc swing against a FIXED reference (Jc at the cold
+  356 :     // base temperature), not the local jcBefore -- JcT is linear and hits
+  357 :     // exactly 0 at Tc=90K, so as Tmax approaches Tc, jcBefore->0 and a
+  358 :     // fraction normalized by it becomes unsatisfiable regardless of how
+  359 :     // small dt gets. Ported already-fixed (see electrothermal/CLAUDE.md's
+  360 :     // "Jc bisect fix" for the live bug this avoids: r1p36 spun for 13.3
+  361 :     // hours approaching T=90K without ever crossing it under the original,
+  362 :     // locally-normalized version of this check).
+  363 :     real jcRef = JcT(Tcold);
+  364 :     real dtTry = dt;
+  365 :     int bisectCount = 0;
+  366 :     real jcFrac = 0.0;
+  367 :     bool solveOk = false;
+  368 :     real tHeatStart = clock();
+  369 :     while (!solveOk){
+  370 :       solve heatStep(T, w) =
+  371 :           int3d(Th3)( rhocpfun*T*w/dtTry + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
+  372 :         - int3d(Th3)( rhocpfun*Told*w/dtTry + source*w )
+  373 :         - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
+  374 :         + on(2, 4, T=Tcold);
+  375 :       // NaN checked separately from the rise bound -- a NaN comparison
+  376 :       // against a finite bound via ">" is always false in IEEE-754, so a
+  377 :       // diverged-to-NaN solve would otherwise never trip the bisection.
+  378 :       bool isNan = (T[].max != T[].max) || (T[].min != T[].min);
+  379 :       bool blewUp = isNan || (T[].max-TmaxBefore > maxStepRise) || (TminBefore-T[].min > maxStepRise);
+  380 :       // Accuracy check, above-Ic phase only. Skipped once blewUp is
+  381 :       // already true: no point computing Jc off catastrophically garbage
+  382 :       // T[].max.
+  383 :       bool jcTooFast = false;
+  384 :       if (inAboveIcPhase && !blewUp){
+  385 :         jcFrac = abs(JcT(T[].max)-jcBefore)/max(jcRef, 1e-30);
+  386 :         jcTooFast = jcFrac > maxJcFracChange;
+  387 :       }
+  388 :       if (!blewUp && !jcTooFast) solveOk = true;
+  389 :       else {
+  390 :         bisectCount++;
+  391 :         cout << "[bisect] step=" << step << " t=" << t << " dtTry=" << dtTry
+  392 :              << " jcFrac=" << jcFrac << " Tmax=" << T[].max << " Tmin=" << T[].min
+  393 :              << " -- halving (attempt " << bisectCount << "/" << maxBisections << ")" << endl;
+  394 :         if (bisectCount > maxBisections){
+  395 :           cout << "FATAL: heatStep did not stabilize after " << maxBisections
+  396 :                << " bisections at t=" << t << " (started from dt=" << dt << ")" << endl;
+  397 :           assert(false);
+  398 :         }
+  399 :         dtTry = dtTry/2.0;
+  400 :       }
+  401 :     }
+  402 :     dt = dtTry;   // the committed dt, possibly smaller than originally requested
+  403 :     // Grow the above-Ic guess for the NEXT step if this one was comfortably
+  404 :     // inside the accuracy band; otherwise just carry forward whatever dt
+  405 :     // actually worked, rather than re-attempting the same too-large value.
+  406 :     if (inAboveIcPhase){
+  407 :       if (jcFrac < 0.5*maxJcFracChange) rampDtAboveIc = dtTry*2.0;
+  408 :       else rampDtAboveIc = dtTry;
+  409 :     }
+  410 :     real tHeatSolve = clock() - tHeatStart;
+  411 : 
+  412 :     t += dt;
+  413 :     for (int i=0;i<5;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
+  414 :     step++;
+  415 : 
+  416 :     // CSV/diagnostic write moved to AFTER the (possibly-bisected) solve and
+  417 :     // AFTER advancing t -- ported from the same electrothermal fix, and
+  418 :     // fixing the identical bug here: writing before the solve meant a CSV
+  419 :     // row's Tmax was always one physical step stale relative to what the
+  420 :     // checkpoint ended up holding, so the truly-final row before an early
+  421 :     // exit (tmaxCutoff, a bisection FATAL) would never reach
+  422 :     // transient_3d_slit.csv at all. Voltage/Hall-probe diagnostics still
+  423 :     // reflect the electrical solve computed from the step's STARTING
+  424 :     // temperature (the model's existing staggered-scheme convention,
+  425 :     // unchanged) -- only Tmax/TmaxLeft/TmaxRight need the post-solve,
+  426 :     // just-committed state.
+  427 :     real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
+  428 :     real TmaxRight = T(xHeatC,yCuTop,zRightRep);
+  429 :     // I0w (used above, in the solve and the electrical/voltage sub-solve)
+  430 :     // is deliberately evaluated at the PRE-increment t -- an explicit,
+  431 :     // frozen-coefficient source consistent with kfun/rhocpfun/Told, same
+  432 :     // convention as fracLeft/voltages below. But I0 itself is an exactly-
+  433 :     // known, purely time-driven function (no solve involved) -- there is
+  434 :     // no reason to log a stale value for it. I0Now re-evaluates I0ofT at
+  435 :     // the now-current (post-increment) t so the logged "I0" column
+  436 :     // actually matches the timestamp it's printed against. Ported from
+  437 :     // electrothermal/step_3d_slit_transient_diag.edp's "fix write lag
+  438 :     // issue" -- see that track's CLAUDE.md for where it was first found
+  439 :     // (r1p26's CSV showed I0=0 at its very first row because that row's
+  440 :     // I0w was I0ofT(0) from the ramp's true start).
+  441 :     real I0Now = I0ofT(t);
+  442 :     cout << "t="<<t<<"s I0="<<I0Now<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
+  443 :     fout << t << "," << I0Now << "," << T[].max << "," << TmaxLeft << "," << TmaxRight << "," << fracLeft << "\n";
+  444 : 
+  445 :     real tDiagStart = clock();
+  446 :     diagAllTapVoltages(diagVL, diagVR);
+  447 :     real VclPlus = 0.0;
+  448 :     real VclMinus = diagVcum(Lx, -1);   // == diagVcum(Lx,+1) by the slit's equal-voltage-drop closure condition
+  449 :     // (I0Now above is the one exception to "diagnostics reflect the
+  450 :     // step's starting state" -- it's not re-derived from a solve, just
+  451 :     // re-evaluating the same closed-form ramp function at the correct
+  452 :     // time, so there's no such tradeoff for it.)
+  453 :     fdiag << t << "," << I0Now << "," << T[].max << "," << fracLeft << "," << VclPlus << "," << VclMinus;
+  454 :     for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVL[i];
+  455 :     for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVR[i];
+  456 :     for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagLeft);
+  457 :     for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagRight);
+  458 :     real BatHallLeft = interp1(xSample, Bleft, nxs+1, xHall);
+  459 :     real BatHallRight = interp1(xSample, Bright, nxs+1, xHall);
+  460 :     fdiag << "," << BatHallLeft << "," << BatHallRight << "\n";
+  461 :     real tDiag = clock() - tDiagStart;
+  462 : 
+  463 :     real tStepTotal = clock() - tStepStart;
+  464 :     cout << "TIMING (s): Bfield=" << tBfield << "  electrical=" << tElectrical
+  465 :          << "  diagnostics=" << tDiag << "  fieldAssign=" << tFields << "  heatSolve=" << tHeatSolve
+  466 :          << "  bisections=" << bisectCount << "  ||  stepTotal=" << tStepTotal << endl;
+  467 : 
+  468 :     // Checkpoint after EVERY physical step, not just once at invocation
+  469 :     // end -- ported from electrothermal's identical fix, now actually
+  470 :     // relevant here too since -steps-per-invocation can exceed 1. Without
+  471 :     // this, a crash/preemption partway through a multi-step invocation
+  472 :     // would leave the checkpoint behind the CSV rows already written,
+  473 :     // and --resume (once this workflow has one) would re-write
+  474 :     // duplicate/overlapping t rows. Mesh-rebuild amortization (the reason
+  475 :     // for -steps-per-invocation>1) is unaffected -- the mesh is only
+  476 :     // built once per invocation regardless of how often this (cheap)
+  477 :     // checkpoint file is rewritten.
+  478 :     {
+  479 :       ofstream fchkOut(outPrefix+"ckpt_3d_slit_transient.txt");
+  480 :       fchkOut.precision(12);
+  481 :       fchkOut << t << "\n";
+  482 :       for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+  483 :       for (int i=0;i<=nxs;i++) fchkOut << Earr[i] << "\n";
+  484 :       for (int i=0;i<=nxs;i++) fchkOut << ElArr[i] << "\n";
+  485 :       for (int i=0;i<=nxs;i++) fchkOut << ErArr[i] << "\n";
+  486 :     }
+  487 :   }
+  488 :   if (T[].max >= tmaxCutoff) cout << "Tmax cutoff " << tmaxCutoff << "K reached (Tmax="
+  489 :        << T[].max << "K) -- stopping early, " << (maxStepsThisRun-step)
+  490 :        << " step(s) skipped this invocation" << endl;
+  491 : }
+  492 : cout << "Saved checkpoint at t="<<t<<"s" << endl;
+  493 : cout << "[profile] totalInvocation=" << (clock()-tInvocationStart) << "s" << endl;
+  494 :  sizestack + 1024 =13368  ( 12344 )
+
+  -- Cube  nv=87870 nt=487200 nbe=26048 kind= 6
+  -- Build Nodes/DF on mesh :   n.v. 87870, n. elmt. 487200, n b. elmt. 26048
+     nb of Nodes 487200    nb of DoF   487200  DFon=0001
+  -- FESpace: Nb of Nodes 487200 Nb of DoF 487200
+[profile] meshBuild=26.1983s materialsLoad=0.002802s
+  -- FESpace: Nb of Nodes 87870 Nb of DoF 87870
+  -- Build Nodes/DF on mesh :   n.v. 87870, n. elmt. 487200, n b. elmt. 26048
+     nb of Nodes 487200    nb of DoF   487200  DFon=0001
+  -- FESpace: Nb of Nodes 487200 Nb of DoF 487200
+Resumed at t=0s Tmax=77
+exec: test -s runs/r0p7/diagnostics_3d_slit.csv
+  -- Solve : 
+          min 77  max 77
+t=10.8836s I0=217.672 Tmax=77 TmaxL=77 TmaxR=77 fracLeft=0.5
+TIMING (s): Bfield=13.09  electrical=0.005418  diagnostics=0.614004  fieldAssign=214.906  heatSolve=13.7944  bisections=0  ||  stepTotal=242.41
+  -- Solve : 
+          min 76.7699  max 110.46
+t=10.8856s I0=217.672 Tmax=110.46 TmaxL=110.411 TmaxR=77.0001 fracLeft=0.5
+TIMING (s): Bfield=12.4668  electrical=86.7227  diagnostics=0.563568  fieldAssign=212.907  heatSolve=13.8128  bisections=0  ||  stepTotal=326.474
+  -- Solve : 
+          min 76.7934  max 127.167
+t=10.8876s I0=217.672 Tmax=127.167 TmaxL=127.094 TmaxR=77.0047 fracLeft=0.0729042
+TIMING (s): Bfield=12.2843  electrical=87.3986  diagnostics=0.730063  fieldAssign=203.173  heatSolve=15.4612  bisections=0  ||  stepTotal=319.048
+  -- Solve : 
+          min 76.8327  max 139.202
+t=10.8896s I0=217.672 Tmax=139.202 TmaxL=139.113 TmaxR=77.0088 fracLeft=0.0376818
+TIMING (s): Bfield=15.2298  electrical=91.2551  diagnostics=0.67807  fieldAssign=218.48  heatSolve=14.3083  bisections=0  ||  stepTotal=339.951
+  -- Solve : 
+          min 76.9133  max 148.825
+t=10.8916s I0=217.672 Tmax=148.825 TmaxL=148.725 TmaxR=77.0135 fracLeft=0.0325524
+TIMING (s): Bfield=11.4411  electrical=82.4747  diagnostics=0.705442  fieldAssign=213.107  heatSolve=15.1152  bisections=0  ||  stepTotal=322.844
+  -- Solve : 
+          min 76.9244  max 156.954
+t=10.8936s I0=217.672 Tmax=156.954 TmaxL=156.846 TmaxR=77.0189 fracLeft=0.0301312
+TIMING (s): Bfield=14.3289  electrical=95.4914  diagnostics=0.623644  fieldAssign=220.285  heatSolve=11.6548  bisections=0  ||  stepTotal=342.384
+  -- Solve : 
+          min 77  max 116.275
+t=10.9036s I0=217.672 Tmax=116.275 TmaxL=116.08 TmaxR=77.0571 fracLeft=0.0285724
+TIMING (s): Bfield=12.4627  electrical=84.5581  diagnostics=0.580754  fieldAssign=197.14  heatSolve=15.3891  bisections=0  ||  stepTotal=310.131
+  -- Solve : 
+          min 77  max 102.269
+t=10.9136s I0=217.672 Tmax=102.269 TmaxL=102.178 TmaxR=77.0964 fracLeft=0.0392692
+TIMING (s): Bfield=11.8764  electrical=83.3096  diagnostics=0.491313  fieldAssign=200.381  heatSolve=12.7309  bisections=0  ||  stepTotal=308.79
+  -- Solve : 
+          min 77  max 96.4281
+t=10.9236s I0=217.672 Tmax=96.4281 TmaxL=96.3904 TmaxR=77.1342 fracLeft=0.0468514
+TIMING (s): Bfield=11.4272  electrical=90.1205  diagnostics=0.596661  fieldAssign=197.873  heatSolve=12.0355  bisections=0  ||  stepTotal=312.053
+  -- Solve : 
+          min 77  max 93.4297
+t=10.9336s I0=217.672 Tmax=93.4297 TmaxL=93.4104 TmaxR=77.1697 fracLeft=0.0511661
+TIMING (s): Bfield=13.7935  electrical=85.2273  diagnostics=0.561452  fieldAssign=201.783  heatSolve=13.4469  bisections=0  ||  stepTotal=314.813
+  -- Solve : 
+          min 77  max 91.5923
+t=10.9436s I0=217.672 Tmax=91.5923 TmaxL=91.5684 TmaxR=77.203 fracLeft=0.0538145
+TIMING (s): Bfield=11.3946  electrical=92.4374  diagnostics=0.559247  fieldAssign=224.1  heatSolve=14.2082  bisections=0  ||  stepTotal=342.7
+  -- Solve : 
+          min 77  max 90.303
+t=10.9536s I0=217.672 Tmax=90.303 TmaxL=90.2721 TmaxR=77.2342 fracLeft=0.0557086
+TIMING (s): Bfield=12.3266  electrical=87.2169  diagnostics=0.532584  fieldAssign=205.908  heatSolve=12.1399  bisections=0  ||  stepTotal=318.124
+  -- Solve : 
+          min 77  max 89.3342
+t=10.9636s I0=217.672 Tmax=89.3342 TmaxL=89.2959 TmaxR=77.2639 fracLeft=0.057222
+TIMING (s): Bfield=12.0696  electrical=84.4463  diagnostics=0.520609  fieldAssign=195.761  heatSolve=12.439  bisections=0  ||  stepTotal=305.237
+  -- Solve : 
+          min 77  max 88.555
+t=10.9736s I0=217.672 Tmax=88.555 TmaxL=88.5147 TmaxR=77.2858 fracLeft=0.100166
+TIMING (s): Bfield=13.047  electrical=85.168  diagnostics=0.695455  fieldAssign=205.924  heatSolve=15.3696  bisections=0  ||  stepTotal=320.205
+  -- Solve : 
+          min 77  max 87.8955
+t=10.9836s I0=217.672 Tmax=87.8955 TmaxL=87.8554 TmaxR=77.3028 fracLeft=0.15081
+TIMING (s): Bfield=14.0604  electrical=79.8607  diagnostics=0.524344  fieldAssign=205.338  heatSolve=12.395  bisections=0  ||  stepTotal=312.179
+  -- Solve : 
+          min 77  max 87.3281
+t=10.9936s I0=217.672 Tmax=87.3281 TmaxL=87.289 TmaxR=77.3171 fracLeft=0.192801
+TIMING (s): Bfield=11.6981  electrical=78.0111  diagnostics=0.569165  fieldAssign=196.696  heatSolve=12.741  bisections=0  ||  stepTotal=299.716
+  -- Solve : 
+          min 77  max 86.8339
+t=11.0036s I0=217.672 Tmax=86.8339 TmaxL=86.7963 TmaxR=77.3297 fracLeft=0.22673
+TIMING (s): Bfield=11.6709  electrical=82.0807  diagnostics=0.582926  fieldAssign=199.9  heatSolve=12.0434  bisections=0  ||  stepTotal=306.279
+  -- Solve : 
+          min 77  max 86.3992
+t=11.0136s I0=217.672 Tmax=86.3992 TmaxL=86.3629 TmaxR=77.3412 fracLeft=0.254234
+TIMING (s): Bfield=12.1253  electrical=88.8202  diagnostics=0.537409  fieldAssign=205.906  heatSolve=13.0968  bisections=0  ||  stepTotal=320.486
+  -- Solve : 
+          min 77  max 86.0134
+t=11.0236s I0=217.672 Tmax=86.0134 TmaxL=85.9783 TmaxR=77.3518 fracLeft=0.276694
+TIMING (s): Bfield=11.8858  electrical=82.0268  diagnostics=0.744346  fieldAssign=216.562  heatSolve=14.1444  bisections=0  ||  stepTotal=325.364
+  -- Solve : 
+          min 77  max 85.668
+t=11.0336s I0=217.672 Tmax=85.668 TmaxL=85.6341 TmaxR=77.3618 fracLeft=0.295231
+TIMING (s): Bfield=14.6256  electrical=90.4166  diagnostics=0.559271  fieldAssign=202.827  heatSolve=11.4425  bisections=0  ||  stepTotal=319.872
+Saved checkpoint at t=11.0336s
+[profile] totalInvocation=6336.74s
+times: compile 0.019093s, execution 6336.74s,  mpirank:0
+ CodeAlloc : nb ptr  9859,  size :691376 mpirank: 0
+Ok: Normal End
+2026-09-25T18:32:20Z $ /usr/freefem/bin/FreeFem++ -nw step_3d_slit_transient_bfield.edp -ratio 0.7 -outprefix runs/r0p7/ -steps-per-invocation 20 -ramprate 20.0 -rampdt 999.0 -rampdt-aboveic 0.002 -tmaxcutoff 900.0 -maxsteprise 500.0 -maxbisections 10 -maxjcfracchange 0.05
+-- FreeFem++ v4.12 (Wed Dec  7 13:22:45 UTC 2022 - git v4.12)
+   file : step_3d_slit_transient_bfield.edp
+ Load: lg_fem lg_mesh lg_mesh3 eigenvalue 
+    1 : // ============================================================
+    2 : // step_3d_slit_transient_bfield.edp
+    3 : // Full transient scenario WITH the slit: ramp current to a target
+    4 : // transport-current ratio (currentRatio*Ic, default 0.7 -- see -ratio)
+    5 : // over the ramp phase, then apply the 2mm x 2mm / 13W / 10ms spot heater
+    6 : // on the LEFT side only (z=width/4), then observe recovery or runaway --
+    7 : // and critically, track how the current SPLIT between left/right
+    8 : // evolves.
+    9 : //
+   10 : // Electrical model: outside the slit's x-range, one equipotential
+   11 : // channel. WITHIN the slit's x-range, current splits into two
+   12 : // independent parallel paths matched by equal voltage drop across the
+   13 : // slit's length (cheap bisection, redone every timestep -- no 3D solve
+   14 : // involved in this sub-solve).
+   15 : // ============================================================
+   16 : 
+   17 : real tInvocationStart = clock();
+   18 : 
+   19 : real tMeshStart = clock();
+   20 : include "../shared/hts_mesh_module_3d_slit.idp"// ============================================================
+    2 : // hts_mesh_module_3d_slit.idp
+    3 : // 3D shell mesh WITH a laser slit down the tape centerline.
+    4 : //
+    5 : // Slit: 5um wide, cuts FULL THICKNESS (top to bottom, severing the
+    6 : // copper shell's top/bottom portions in that region -- only the shell's
+    7 : // SIDE edges remain continuous, providing the one remaining electrical
+    8 : // path between the two halves within the slit's x-extent). Represented
+    9 : // as a "stadium" (capsule) shape in the (x,z) plane: all points within
+   10 : // radius R of the line segment from (xSlitStart, zCenter) to
+   11 : // (xSlitEnd, zCenter) -- gives rounded (semicircular) ends automatically,
+   12 : // no separate case needed for the caps.
+   13 : //
+   14 : // Region 7 = slit (vacuum-like properties, defined in materials module).
+   15 : // Regions 1-6 unchanged from the no-slit shell model.
+   16 : // ============================================================
+   17 : 
+   18 : load "msh3"
+   19 : 
+   20 : real Lx    = 0.20;
+   21 : real tCuB  = 20e-6, tAgB = 1.8e-6, tSub = 50e-6, tBuf = 0.2e-6,
+   22 :      tSc   = 1e-6,  tAgT = 2e-6,  tCuT = 20e-6;
+   23 : real yB0=0, yB1=yB0+tCuB, yB2=yB1+tAgB, yB3=yB2+tSub, yB4=yB3+tBuf,
+   24 :      yB5=yB4+tSc, yB6=yB5+tAgT, yB7=yB6+tCuT;
+   25 : 
+   26 : real width   = 0.012;
+   27 : real tSideCu = 20e-6;
+   28 : real zB0 = 0, zB1 = tSideCu, zB2 = width - tSideCu, zB3 = width;
+   29 : real coreWidth = zB2 - zB1;
+   30 : 
+   31 : // ---- slit geometry ----
+   32 : real slitWidth  = 5e-6;
+   33 : real slitR      = slitWidth/2;
+   34 : real xSlitStart = 0.010, xSlitEnd = 0.190;
+   35 : real zSlitCenter = width/2;
+   36 : 
+   37 : // distance from (px,pz) to the slit's centerline segment
+   38 : func real distToSlitSegment(real px, real pz){
+   39 :   real xa = xSlitStart, xb = xSlitEnd, zc = zSlitCenter;
+   40 :   real xq = px;
+   41 :   if (xq < xa) xq = xa;
+   42 :   if (xq > xb) xq = xb;
+   43 :   return sqrt((px-xq)^2 + (pz-zc)^2);
+   44 : }
+   45 : func bool inSlit(real px, real pz){
+   46 :   return distToSlitSegment(px,pz) <= slitR;
+   47 : }
+   48 : 
+   49 : int nx = 100;   // dx ~ 2mm (rounded-cap curvature at R=2.5um isn't resolved
+   50 :                 // at this scale regardless of x-resolution -- see discussion)
+   51 : int nCuB=8, nAgB=2, nSub=6, nBuf=1, nSc=2, nAgT=2, nCuT=8;
+   52 : int ny = nCuB+nAgB+nSub+nBuf+nSc+nAgT+nCuT;
+   53 : 
+   54 : // z structure: shell | core-left-of-slit | slit band | core-right-of-slit | shell
+   55 : int nzShell=2, nzCoreOuter=10, nzSlitBand=4;
+   56 : int nz = 2*nzShell + 2*nzCoreOuter + nzSlitBand;
+   57 : 
+   58 : real zSlitLo = zSlitCenter-slitR, zSlitHi = zSlitCenter+slitR;
+   59 : 
+   60 : func real yphys(real s){
+   61 :   real fCuB=nCuB*1.0/ny, fAgB=nAgB*1.0/ny, fSub=nSub*1.0/ny, fBuf=nBuf*1.0/ny,
+   62 :        fSc=nSc*1.0/ny, fAgT=nAgT*1.0/ny, fCuT=nCuT*1.0/ny;
+   63 :   real c0=0, c1=c0+fCuB, c2=c1+fAgB, c3=c2+fSub, c4=c3+fBuf, c5=c4+fSc, c6=c5+fAgT, c7=c6+fCuT;
+   64 :   if (s<=c1) return yB0 + (yB1-yB0)*(s-c0)/(c1-c0);
+   65 :   if (s<=c2) return yB1 + (yB2-yB1)*(s-c1)/(c2-c1);
+   66 :   if (s<=c3) return yB2 + (yB3-yB2)*(s-c2)/(c3-c2);
+   67 :   if (s<=c4) return yB3 + (yB4-yB3)*(s-c3)/(c4-c3);
+   68 :   if (s<=c5) return yB4 + (yB5-yB4)*(s-c4)/(c5-c4);
+   69 :   if (s<=c6) return yB5 + (yB6-yB5)*(s-c5)/(c6-c5);
+   70 :   return yB6 + (yB7-yB6)*(s-c6)/(c7-c6);
+   71 : }
+   72 : 
+   73 : func real zphys(real s){
+   74 :   real fSh=nzShell*1.0/nz, fCo=nzCoreOuter*1.0/nz, fSl=nzSlitBand*1.0/nz;
+   75 :   real c0=0, c1=c0+fSh, c2=c1+fCo, c3=c2+fSl, c4=c3+fCo, c5=c4+fSh;
+   76 :   if (s<=c1) return zB0 + (zB1-zB0)*(s-c0)/(c1-c0);
+   77 :   if (s<=c2) return zB1 + (zSlitLo-zB1)*(s-c1)/(c2-c1);
+   78 :   if (s<=c3) return zSlitLo + (zSlitHi-zSlitLo)*(s-c2)/(c3-c2);
+   79 :   if (s<=c4) return zSlitHi + (zB2-zSlitHi)*(s-c3)/(c4-c3);
+   80 :   return zB2 + (zB3-zB2)*(s-c4)/(c5-c4);
+   81 : }
+   82 : 
+   83 : mesh3 Th3 = cube(nx, ny, nz, [Lx*x, yphys(y), zphys(z)]);
+   84 : 
+   85 : fespace Ph3region(Th3, P0);
+   86 : Ph3region region0 = 7*(inSlit(x,z))
+   87 :                    + (1-inSlit(x,z))*(
+   88 :                        (y<=yB1 || y>yB6 || z<=zB1 || z>=zB2)*1
+   89 :                      + (y>yB1 && y<=yB2 && z>zB1 && z<zB2)*2
+   90 :                      + (y>yB2 && y<=yB3 && z>zB1 && z<zB2)*3
+   91 :                      + (y>yB3 && y<=yB4 && z>zB1 && z<zB2)*4
+   92 :                      + (y>yB4 && y<=yB5 && z>zB1 && z<zB2)*5
+   93 :                      + (y>yB5 && y<=yB6 && z>zB1 && z<zB2)*6 );
+   94 : Th3 = change(Th3, fregion=region0(x,y,z));
+   95 : 
+   21 : real tMeshDone = clock();
+   22 : include "../shared/hts_materials.idp"// ============================================================
+    2 : // hts_materials.idp
+    3 : // Loads all tabulated (T, property) data and defines material
+    4 : // property functions exactly matching the user's COMSOL model.
+    5 : // Requires hts_mesh_module.idp to already be included (uses Lx etc. only
+    6 : // indirectly; no hard dependency, but kept together by convention).
+    7 : // ============================================================
+    8 : 
+    9 : // ---- generic linear interpolation table loader ----
+   10 : func int loadTable(string fname, int n, real[int] &T, real[int] &V){
+   11 :   ifstream f(fname);
+   12 :   for(int i=0;i<n;i++){ f >> T[i] >> V[i]; }
+   13 :   return n;
+   14 : }
+   15 : 
+   16 : // Binary search, NOT a linear scan -- verified bit-for-bit identical to
+   17 : // the original linear-scan implementation across every real data table
+   18 : // in this project (1342 test queries: every breakpoint, every midpoint,
+   19 : // off-center points, and out-of-range queries -- zero mismatches).
+   20 : // Deliberately replicates the linear scan's exact tie-breaking (when Tq
+   21 : // lands exactly on an interior breakpoint, uses the interval BELOW it,
+   22 : // same as the original "first matching i" loop would) -- this is why it
+   23 : // searches for "smallest index with T[j] >= Tq" rather than a generic
+   24 : // floor/ceiling search, which would pick the interval above instead and
+   25 : // give a numerically close but not bit-identical result at breakpoints.
+   26 : func real interp1(real[int] &T, real[int] &V, int nn, real Tq){
+   27 :   if (Tq <= T[0])    return V[0];
+   28 :   if (Tq >= T[nn-1]) return V[nn-1];
+   29 :   int lo = 0, hi = nn-1;
+   30 :   while (lo < hi){
+   31 :     int mid = (lo+hi)/2;
+   32 :     if (T[mid] < Tq) lo = mid+1; else hi = mid;
+   33 :   }
+   34 :   int i = lo-1;
+   35 :   real fr = (Tq-T[i])/(T[i+1]-T[i]);
+   36 :   return V[i] + fr*(V[i+1]-V[i]);
+   37 : }
+   38 : 
+   39 : // ---- load every table (row counts match `wc -l` on each file) ----
+   40 : real[int] TcpAg(71),   VcpAg(71);      int ncpAg   = loadTable("../shared/data/cp_ag.txt",   71, TcpAg, VcpAg);
+   41 : real[int] TcpBuf(132), VcpBuf(132);    int ncpBuf  = loadTable("../shared/data/cp_buff.txt", 132, TcpBuf, VcpBuf);
+   42 : real[int] TcpCu(16),   VcpCu(16);      int ncpCu   = loadTable("../shared/data/cp_cu.txt",   16, TcpCu, VcpCu);
+   43 : real[int] TcpHast(43), VcpHast(43);    int ncpHast = loadTable("../shared/data/cp_hast.txt", 43, TcpHast, VcpHast);
+   44 : real[int] TcpSc(34),   VcpSc(34);      int ncpSc   = loadTable("../shared/data/cp_rebco.txt",34, TcpSc, VcpSc);
+   45 : 
+   46 : real[int] TkAg(29),    VkAg(29);       int nkAg    = loadTable("../shared/data/k_ag.txt",    29, TkAg, VkAg);
+   47 : real[int] TkBuf(23),   VkBuf(23);      int nkBuf   = loadTable("../shared/data/k_buff.txt",  23, TkBuf, VkBuf);
+   48 : real[int] TkCu(16),    VkCu(16);       int nkCu    = loadTable("../shared/data/k_cu.txt",    16, TkCu, VkCu);
+   49 : real[int] TkHast(47),  VkHast(47);     int nkHast  = loadTable("../shared/data/k_hast.txt",  47, TkHast, VkHast);
+   50 : real[int] TkSc(13),    VkSc(13);       int nkSc    = loadTable("../shared/data/k_rebco.txt", 13, TkSc, VkSc);
+   51 : 
+   52 : real[int] TrhoCu(16),   VrhoCu(16);    int nrhoCu   = loadTable("../shared/data/rho_cu.txt", 16, TrhoCu, VrhoCu); // real measured data (note: possible anomaly at 273/300K, see discussion)
+   53 : real[int] TrhoHast(39), VrhoHast(39);  int nrhoHast = loadTable("../shared/data/rho_hast.txt", 39, TrhoHast, VrhoHast);
+   54 : real[int] TrhoAg(19),   VrhoAg(19);    int nrhoAg   = loadTable("../shared/data/rho_silver.txt", 19, TrhoAg, VrhoAg);
+   55 : 
+   56 : // ---- convenience wrappers: property(T) for each material ----
+   57 : func real cpAg(real T)   { return interp1(TcpAg,   VcpAg,   ncpAg,   T); }
+   58 : func real cpBuf(real T)  { return interp1(TcpBuf,  VcpBuf,  ncpBuf,  T); }
+   59 : func real cpCu(real T)   { return interp1(TcpCu,   VcpCu,   ncpCu,   T); }
+   60 : func real cpHast(real T) { return interp1(TcpHast, VcpHast, ncpHast, T); }
+   61 : func real cpSc(real T)   { return interp1(TcpSc,   VcpSc,   ncpSc,   T); }
+   62 : 
+   63 : func real kAg(real T)    { return interp1(TkAg,  VkAg,  nkAg,  T); }
+   64 : func real kBuf(real T)   { return interp1(TkBuf, VkBuf, nkBuf, T); }
+   65 : func real kCu(real T)    { return interp1(TkCu,  VkCu,  nkCu,  T); }
+   66 : func real kHast(real T)  { return interp1(TkHast,VkHast,nkHast,T); }
+   67 : func real kSc(real T)    { return interp1(TkSc,  VkSc,  nkSc,  T); }
+   68 : 
+   69 : func real rhoCu(real T)   { return interp1(TrhoCu,  VrhoCu,  nrhoCu,  T); }  // real measured data (flag: non-monotonic 273->300K point, see discussion)
+   70 : func real rhoHast(real T) { return interp1(TrhoHast,VrhoHast,nrhoHast,T); }
+   71 : func real rhoAg(real T)   { return interp1(TrhoAg,  VrhoAg,  nrhoAg,  T); }
+   72 : 
+   73 : // ---- densities [kg/m^3] (from *_vars.csv) ----
+   74 : real rhomCu   = 8960.0;
+   75 : real rhomAg   = 10490.0;
+   76 : real rhomHast = 8890.0;
+   77 : real rhomBuf  = 3600.0;
+   78 : real rhomSc   = 6390.0;
+   79 : 
+   80 : // ---- REBCO superconducting parameters (from comsol_params.csv / rebco_vars.csv) ----
+   81 : real Jc0       = 8.0e10;   // A/m^2
+   82 : real Tc        = 90.0;     // K
+   83 : real n0        = 20.0;     // n-value reference
+   84 : real E0        = 1.0e-4;   // V/m  (1 uV/cm criterion)
+   85 : real Einit     = 1.0e-10;  // V/m  (numerical floor ONLY, to avoid literal E=0 singularity --
+   86 :                             // NOT the critical-field criterion. Was mistakenly set equal to
+   87 :                             // E0 (1e-4), which clamped the entire below-Ic operating regime
+   88 :                             // into an artificially resistive state. See discussion.)
+   89 : real sigmaRebco= 1.0e6;    // S/m  (REBCO normal-state floor conductivity)
+   90 : real sigmaMax  = 1.0e20;   // raised: 1e16 was binding at the nominal 0.7Ic/77K operating point   // S/m  (numerical cap)
+   91 : real sigmaBuf  = 1.0e-10;  // S/m  (buffer, effectively insulating)
+   92 : 
+   93 : func real JcT(real T){
+   94 :   // Jc0*(Tc-T)*(T<Tc)/(Tc-50) + (T>=Tc)   -- floor of 1 A/m^2 above Tc (numerical safety)
+   95 :   if (T < Tc) return Jc0*(Tc-T)/(Tc-50.0);
+   96 :   else return 1.0;
+   97 : }
+   98 : func real nT(real T){
+   99 :   // (n0-10)*(Tc-T)*(T<Tc)/(Tc-50) + 10     -- floor of n=10 above Tc
+  100 :   if (T < Tc) return (n0-10.0)*(Tc-T)/(Tc-50.0) + 10.0;
+  101 :   else return 10.0;
+  102 : }
+  103 : 
+  104 : // total REBCO conductivity given local |E| and T (scalar E assumed ~ Ex, dominant
+  105 : // component along the tape length -- consistent with the 1D-per-layer approach)
+  106 : func real sigmaSc(real Emag, real T){
+  107 :   real Estab = max(abs(Emag), Einit);
+  108 :   real JcVal   = JcT(T);
+  109 :   real nVal    = nT(T);
+  110 :   real scTerm = (JcVal/Estab) * (Estab/E0)^(1.0/nVal);
+  111 :   return min(scTerm, sigmaMax) + sigmaRebco;
+  112 : }
+  113 : 
+   23 : real tMaterialsDone = clock();
+   24 : include "getARGV.idp" // for gestion of FreeFem++ argument and in version 3.10-1 FH
+    2 :  // F. Hecht 
+    3 :  // Usage:  getARGV(n,defaultvalue) // get the fist used default valeu
+    4 :  //  or     getARGV(after,defaultvalue) // get the arg after after 
+    5 :  // the type of delfaut value given the return type: int,double, string
+    6 :  // Modif version 3.54-2  Jan 2018 (add ones include)
+    7 :  IFMACRO(!getARGVidp)
+    8 &  macro getARGVidp 1 //
+    9 &  
+   10 &  
+   11 &  func int usedARGV(int n)
+   12 & {
+   13 &   int k=1,ii=1,kk=1,ret=-1;
+   14 &   for(int i=1;i<ARGV.n;++i)
+   15 &    {
+   16 &    // cout <<i<< " "<< ARGV[i] << " " <<(ARGV[i]=="-v") << " " << kk << "==" 
+   17 &    //      << n << " " << ARGV[i].rfind("dp") << " " <<ARGV[i].length-2  << endl;
+   18 &         
+   19 &        if(ARGV[i]=="-v") i++;
+   20 &        else if(ARGV[i]=="-fglut") i++;
+   21 &        else if(ARGV[i]=="-ffg") i++;
+   22 &        else if(ARGV[i]=="-glut") i++;
+   23 &        else if(ARGV[i]=="-f") i++;
+   24 &        else if(ARGV[i]=="-nw") ii;
+   25 &        else if(ARGV[i]=="-wait") ii;
+   26 &        else if(ARGV[i]=="-ne") ii;
+   27 &        else if(ARGV[i]=="-cd") ii;
+   28 &        //else if(ARGV[i].rfind(".edp")==ARGV[i].length-4 ) ii;
+   29 &        else if(i==1) ii;
+   30 &        else if(kk++==n) {ret=i;}
+   31 &       // else cout << " +++ \n";
+   32 &      }
+   33 &    //  cout << ret << endl;
+   34 &     return ret;
+   35 & }
+   36 & 
+   37 & func int usedARGV(string after)
+   38 & {
+   39 &   int ret=-1;
+   40 &   for(int i=ARGV.n-1;i>=0;--i)        
+   41 &        if(ARGV[i]==after) { ret=++i; break;}
+   42 &   if(ARGV.n<ret) ret=-1;
+   43 &   return ret;
+   44 & }
+   45 & 
+   46 & func int getARGV(int n,int default)
+   47 & {
+   48 &    int d=default;
+   49 &    int k=usedARGV(n);
+   50 &    if(k>0) d=strtol(ARGV[k]);
+   51 &     return d;
+   52 & }
+   53 & func real getARGV(int n,real default)
+   54 & {
+   55 &    real d=default;
+   56 &    int k=usedARGV(n);
+   57 &    if(k>0) d=strtod(ARGV[k]);
+   58 &    return d;
+   59 & }
+   60 & func string getARGV(int n,string default)
+   61 & {
+   62 &    string d=default;
+   63 &    int k=usedARGV(n);
+   64 &    if(k>0) d=ARGV[k];
+   65 &     return d;
+   66 & }
+   67 & 
+   68 & func int getARGV(string after,int default)
+   69 & {
+   70 &    int d=default;
+   71 &    int k=usedARGV(after);
+   72 &    if(k>0) d=strtol(ARGV[k]);
+   73 &     return d;
+   74 & }
+   75 & func real getARGV(string after,real default)
+   76 & {
+   77 &    real d=default;
+   78 &    int k=usedARGV(after);
+   79 &    if(k>0) d=strtod(ARGV[k]);
+   80 &    return d;
+   81 & }
+   82 & func string getARGV(string after,string default)
+   83 & {
+   84 &    string d=default;
+   85 &    int k=usedARGV(after);
+   86 &    if(k>0) d=ARGV[k];
+   87 &     return d;
+   88 & }
+   89 & 
+   90 & /*
+   91 & cout << getARGV(1,100) << endl;
+   92 & cout << getARGV(2,200.) << endl;
+   93 & cout << getARGV(3,"300.000") << endl;
+   94 & cout << getARGV("-n"," xxx") << endl;
+   95 & */
+   96 & ENDIFMACRO
+    8 @  macro getARGVidp 1 //
+    9 @  
+   10 @  
+   11 @  func int usedARGV(int n)
+   12 @ {
+   13 @   int k=1,ii=1,kk=1,ret=-1;
+   14 @   for(int i=1;i<ARGV.n;++i)
+   15 @    {
+   16 @    // cout <<i<< " "<< ARGV[i] << " " <<(ARGV[i]=="-v") << " " << kk << "==" 
+   17 @    //      << n << " " << ARGV[i].rfind("dp") << " " <<ARGV[i].length-2  << endl;
+   18 @         
+   19 @        if(ARGV[i]=="-v") i++;
+   20 @        else if(ARGV[i]=="-fglut") i++;
+   21 @        else if(ARGV[i]=="-ffg") i++;
+   22 @        else if(ARGV[i]=="-glut") i++;
+   23 @        else if(ARGV[i]=="-f") i++;
+   24 @        else if(ARGV[i]=="-nw") ii;
+   25 @        else if(ARGV[i]=="-wait") ii;
+   26 @        else if(ARGV[i]=="-ne") ii;
+   27 @        else if(ARGV[i]=="-cd") ii;
+   28 @        //else if(ARGV[i].rfind(".edp")==ARGV[i].length-4 ) ii;
+   29 @        else if(i==1) ii;
+   30 @        else if(kk++==n) {ret=i;}
+   31 @       // else cout << " +++ \n";
+   32 @      }
+   33 @    //  cout << ret << endl;
+   34 @     return ret;
+   35 @ }
+   36 @ 
+   37 @ func int usedARGV(string after)
+   38 @ {
+   39 @   int ret=-1;
+   40 @   for(int i=ARGV.n-1;i>=0;--i)        
+   41 @        if(ARGV[i]==after) { ret=++i; break;}
+   42 @   if(ARGV.n<ret) ret=-1;
+   43 @   return ret;
+   44 @ }
+   45 @ 
+   46 @ func int getARGV(int n,int default)
+   47 @ {
+   48 @    int d=default;
+   49 @    int k=usedARGV(n);
+   50 @    if(k>0) d=strtol(ARGV[k]);
+   51 @     return d;
+   52 @ }
+   53 @ func real getARGV(int n,real default)
+   54 @ {
+   55 @    real d=default;
+   56 @    int k=usedARGV(n);
+   57 @    if(k>0) d=strtod(ARGV[k]);
+   58 @    return d;
+   59 @ }
+   60 @ func string getARGV(int n,string default)
+   61 @ {
+   62 @    string d=default;
+   63 @    int k=usedARGV(n);
+   64 @    if(k>0) d=ARGV[k];
+   65 @     return d;
+   66 @ }
+   67 @ 
+   68 @ func int getARGV(string after,int default)
+   69 @ {
+   70 @    int d=default;
+   71 @    int k=usedARGV(after);
+   72 @    if(k>0) d=strtol(ARGV[k]);
+   73 @     return d;
+   74 @ }
+   75 @ func real getARGV(string after,real default)
+   76 @ {
+   77 @    real d=default;
+   78 @    int k=usedARGV(after);
+   79 @    if(k>0) d=strtod(ARGV[k]);
+   80 @    return d;
+   81 @ }
+   82 @ func string getARGV(string after,string default)
+   83 @ {
+   84 @    string d=default;
+   85 @    int k=usedARGV(after);
+   86 @    if(k>0) d=ARGV[k];
+   87 @     return d;
+   88 @ }
+   89 @ 
+   90 @ /*
+   91 @ cout << getARGV(1,100) << endl;
+   92 @ cout << getARGV(2,200.) << endl;
+   93 @ cout << getARGV(3,"300.000") << endl;
+   94 @ cout << getARGV("-n"," xxx") << endl;
+   95 @ */
+   96 @ 
+   25 : 
+   26 : // currentRatio/outPrefix let a run_transient.py-style wrapper drive this
+   27 : // script without editing it -- ported from electrothermal/
+   28 : // step_3d_slit_transient_diag.edp. Defaults reproduce this script's
+   29 : // exact prior hardcoded behavior (ratio=0.7, output files in the CWD)
+   30 : // when invoked with no extra flags.
+   31 : real currentRatio = getARGV("-ratio", 0.7);
+   32 : string outPrefix  = getARGV("-outprefix", "");
+   33 : cout << "[profile] meshBuild=" << (tMeshDone-tMeshStart) << "s materialsLoad="
+   34 :      << (tMaterialsDone-tMeshDone) << "s" << endl;
+   35 : 
+   36 : real Tcold = 77.0;
+   37 : real IcRebcoActual = JcT(77.0)*tSc*coreWidth;
+   38 : real I0Target = currentRatio * IcRebcoActual;
+   39 : 
+   40 : real shellAreaFull = width*yB7 - coreWidth*(yB6-yB1);
+   41 : real leftCoreWidth  = (zSlitCenter-slitR) - zB1;
+   42 : real rightCoreWidth = zB2 - (zSlitCenter+slitR);
+   43 : real leftShellArea  = tSideCu*yB7 + (tCuB+tCuT)*leftCoreWidth;
+   44 : real rightShellArea = tSideCu*yB7 + (tCuB+tCuT)*rightCoreWidth;
+   45 : 
+   46 : real xHeatC = Lx/2, zHeatC = width/4;   // LEFT side only
+   47 : real xHeatLo = xHeatC-1e-3, xHeatHi = xHeatC+1e-3;
+   48 : real zHeatLo = zHeatC-1e-3, zHeatHi = zHeatC+1e-3;
+   49 : real heaterPower = 13.0;
+   50 : real qHeater = heaterPower/(2e-3*2e-3);
+   51 : 
+   52 : // rampRateTarget (-ramprate, A/s) / rampDt (-rampdt) / rampDtAboveIc
+   53 : // (-rampdt-aboveic, MUTATED by the step loop's adaptive controller below)
+   54 : // / maxJcFracChange (-maxjcfracchange) -- ported verbatim from
+   55 : // electrothermal/step_3d_slit_transient_diag.edp, including the
+   56 : // jcRef-vs-Tcold fix already applied there (see the step loop below for
+   57 : // why jcRef, not the local jcBefore, is used as the fractional-change
+   58 : // denominator). Defaults reproduce this script's exact prior fixed-0.5s-
+   59 : // ramp behavior when unflagged.
+   60 : real rampRateTarget = getARGV("-ramprate", 0.0);
+   61 : real rampDt = getARGV("-rampdt", 0.05);
+   62 : real rampDtAboveIc = getARGV("-rampdt-aboveic", 0.002);
+   63 : real maxJcFracChange = getARGV("-maxjcfracchange", 0.05);
+   64 : real Tramp = 0.5;
+   65 : if (rampRateTarget > 0.0) Tramp = I0Target/rampRateTarget;
+   66 : // tCrossIc: when I0(t)=I0Target*(tt/Tramp) first reaches IcRebcoActual.
+   67 : // For currentRatio<=1, I0(t) never reaches Ic during the ramp, so this
+   68 : // equals Tramp exactly -- dtRaw/phaseBounds below are then byte-for-byte
+   69 : // unchanged from this script's pre-parameterization behavior.
+   70 : real tCrossIc = (currentRatio > 1.0) ? Tramp/currentRatio : Tramp;
+   71 : real tPulseStart = Tramp, tPulseDur = 0.01, tPulseEnd = tPulseStart+tPulseDur;
+   72 : real tEnd = tPulseEnd + 1.5;
+   73 : 
+   74 : func real I0ofT(real tt){
+   75 :   if (tt < Tramp) return I0Target*(tt/Tramp);
+   76 :   return I0Target;
+   77 : }
+   78 : real[int] phaseBounds = [tCrossIc, Tramp, tPulseStart, tPulseEnd, tEnd];
+   79 : func real dtRaw(real tt){
+   80 :   if (tt < tCrossIc) return rampDt;
+   81 :   if (tt < Tramp) return rampDtAboveIc;
+   82 :   if (tt < tPulseEnd) return 0.002;
+   83 :   if (tt > tPulseEnd + 0.2) return 0.02;
+   84 :   return 0.01;
+   85 : }
+   86 : func real dtCapped(real tt){
+   87 :   real d = dtRaw(tt);
+   88 :   for (int i=0;i<5;i++) if (tt < phaseBounds[i]-1e-9 && tt+d > phaseBounds[i]) d = phaseBounds[i]-tt;
+   89 :   return d;
+   90 : }
+   91 : 
+   92 : func real kOf(int rg, real Tl)
+ *** Warning  The identifier Tl hide a Global identifier  
+{
+   93 :   if (rg==1) return kCu(Tl);
+   94 :   if (rg==2 || rg==6) return kAg(Tl);
+   95 :   if (rg==3) return kHast(Tl);
+   96 :   if (rg==4) return kBuf(Tl);
+   97 :   if (rg==5) return kSc(Tl);
+   98 :   if (rg==7) return 1e-2;
+   99 :   return 1.0;
+  100 : }
+  101 : func real sourceOfFull(int rg, real Ef, real Tl)
+ *** Warning  The identifier Tl hide a Global identifier  
+{
+  102 :   if (rg==1) return Ef^2/rhoCu(Tl);
+  103 :   if (rg==2 || rg==6) return Ef^2/rhoAg(Tl);
+  104 :   if (rg==3) return Ef^2/rhoHast(Tl);   // Hastelloy: now a genuine parallel branch, not excluded
+  105 :   if (rg==5) return sigmaSc(Ef,Tl)*Ef^2;
+  106 :   return 0.0;   // region 4 (buffer) remains excluded -- see bfield_3d_slit.idp header note
+  107 : }
+  108 : func real rhoCpOf(int rg, real Tl)
+ *** Warning  The identifier Tl hide a Global identifier  
+{
+  109 :   if (rg==1) return rhomCu*cpCu(Tl);
+  110 :   if (rg==2 || rg==6) return rhomAg*cpAg(Tl);
+  111 :   if (rg==3) return rhomHast*cpHast(Tl);
+  112 :   if (rg==4) return rhomBuf*cpBuf(Tl);
+  113 :   if (rg==5) return rhomSc*cpSc(Tl);
+  114 :   return 1.0;   // region 7 (slit): nominal small value for well-posedness
+  115 : }
+  116 : 
+  117 : // (The non-B-aware ItotFull/solveEFull/ItotHalf/solveEHalf that used to
+  118 : // live here were dead code -- never called; the actual solve uses only
+  119 : // the B-aware solveEFullB/solveEHalfB from bfield_3d_slit.idp. Removed
+  120 : // rather than left stale, since leaving them would mean an un-fixed
+  121 : // duplicate missing the Hastelloy branch below sitting right next to
+  122 : // the real implementation.)
+  123 : 
+  124 : int nxs = 60;
+  125 : real[int] xSample(nxs+1), Earr(nxs+1), ElArr(nxs+1), ErArr(nxs+1);
+  126 : for (int i=0;i<=nxs;i++) xSample[i] = Lx*i/nxs;
+  127 : func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
+  128 : func real ElFun(real xx){ return interp1(xSample, ElArr, nxs+1, xx); }
+  129 : func real ErFun(real xx){ return interp1(xSample, ErArr, nxs+1, xx); }
+  130 : 
+  131 : // Diagnostics (voltage taps / RTDs / Hall-probe placeholders) -- must be
+  132 : // included after Efun/ElFun/ErFun above, per that file's header comment.
+  133 : include "../shared/diagnostics_3d_slit.idp"// ============================================================
+    2 : // diagnostics_3d_slit.idp
+    3 : // Lab-instrumentation-style diagnostics export for the 3D slit model.
+    4 : //
+    5 : // Mimics a real diagnostics board (see user-provided layout diagram):
+    6 : //   - 10 voltage taps per side (20 total), evenly spaced over 80% of
+    7 : //     the slit length, centered on the slit/heater x-location.
+    8 : //   - 8 RTD-style point temperature sensors per side (16 total),
+    9 : //     nested at the midpoint of each tap-to-tap gap EXCEPT the one
+   10 : //     gap that straddles the heater/Hall-probe location (no RTD
+   11 : //     there, matching the diagram).
+   12 : //   - 2 Hall-probe position placeholders (one per side, co-located
+   13 : //     with the heater), reserved but NOT wired to any B-field
+   14 : //     computation yet -- exported as a fixed sentinel value until the
+   15 : //     self-field roadmap item is implemented.
+   16 : //   - V_CL+ / V_CL- : the current-lead voltage reference points at the
+   17 : //     tape ends (x=0, x=Lx), outside the slit -- single channel there.
+   18 : //
+   19 : // IMPORTANT -- scope/inclusion requirements:
+   20 : //   This file assumes the INCLUDING script has ALREADY defined, with
+   21 : //   exactly these names (as step_3d_slit_transient.edp does):
+   22 : //     real Lx, width, xSlitStart, xSlitEnd, yB7
+   23 : //     func real Efun(real xx)   -- full-channel E, valid outside slit range
+   24 : //     func real ElFun(real xx)  -- left-channel E,  valid inside slit range
+   25 : //     func real ErFun(real xx)  -- right-channel E, valid inside slit range
+   26 : //   Include this file AFTER those are defined (i.e. after the E-field
+   27 : //   sampling arrays for the current timestep have been filled), not
+   28 : //   at the top of the script, since tap voltages must reflect the
+   29 : //   CURRENT timestep's field. Positions/metadata below are static and
+   30 : //   only need to be computed once, but voltage evaluation
+   31 : //   (diagVoltage/diagAllTapVoltages) must be called freshly each step.
+   32 : // ============================================================
+   33 : 
+   34 : // ---- physical z-locations representing "side" (matches TmaxLeft/
+   35 : // TmaxRight convention already used elsewhere in the transient script) ----
+   36 : real zDiagLeft  = width/4;
+   37 : real zDiagRight = 3*width/4;
+   38 : 
+   39 : // ---- tap layout: 10 per side, 80% of slit length, centered on slit ----
+   40 : int nTapsPerSide = 10;
+   41 : real slitLen    = xSlitEnd - xSlitStart;
+   42 : real spanCenter = 0.5*(xSlitStart + xSlitEnd);
+   43 : real spanFrac   = 0.8;
+   44 : real spanLen    = spanFrac*slitLen;
+   45 : real xSpanLo    = spanCenter - 0.5*spanLen;
+   46 : real xSpanHi    = spanCenter + 0.5*spanLen;
+   47 : real tapSpacing = spanLen/(nTapsPerSide-1);
+   48 : 
+   49 : real[int] xTap(nTapsPerSide);
+   50 : for (int i=0; i<nTapsPerSide; i++) xTap[i] = xSpanLo + i*tapSpacing;
+   51 : 
+   52 : // ---- RTD layout: one at the midpoint of each tap-gap, except the
+   53 : // gap straddling spanCenter (heater/Hall location) ----
+   54 : int nGaps = nTapsPerSide - 1;
+   55 : int heaterGapIdx = -1;
+   56 : for (int i=0; i<nGaps; i++)
+   57 :   if (xTap[i] <= spanCenter+1e-12 && xTap[i+1] >= spanCenter-1e-12) heaterGapIdx = i;
+   58 : 
+   59 : int nRTDsPerSide = nGaps - 1;
+   60 : real[int] xRTD(nRTDsPerSide);
+   61 : {
+   62 :   int k = 0;
+   63 :   for (int i=0; i<nGaps; i++){
+   64 :     if (i == heaterGapIdx) continue;
+   65 :     xRTD[k] = 0.5*(xTap[i] + xTap[i+1]);
+   66 :     k++;
+   67 :   }
+   68 : }
+   69 : 
+   70 : // ---- Hall probe placeholder positions (reserved, not yet computed) ----
+   71 : real xHall = spanCenter;   // co-located with heater, per diagram (H_1/H_2)
+   72 : real hallNotModeled = -999.0;   // sentinel: B-field modeling not yet implemented
+   73 : 
+   74 : // ---- field integration: honors the slit's L/R channel split ----
+   75 : // side: -1 = left (z=zDiagLeft), +1 = right (z=zDiagRight)
+   76 : func real diagEfield(real xx, int side){
+   77 :   if (xx < xSlitStart || xx > xSlitEnd) return Efun(xx);
+   78 :   return (side < 0) ? ElFun(xx) : ErFun(xx);
+   79 : }
+   80 : 
+   81 : // Cumulative voltage from x=0 (V_CL+ reference) out to xx, along the
+   82 : // given side's physical conductor path. Midpoint-rule integration --
+   83 : // cheap (interpolation lookups only, no solve) so a fine sub-count is
+   84 : // fine even though this runs every timestep.
+   85 : func real diagVcum(real xx, int side){
+   86 :   int nSub = 400;
+   87 :   real h = xx/nSub;
+   88 :   real sum = 0.0;
+   89 :   for (int j=0; j<nSub; j++){
+   90 :     real xm = (j+0.5)*h;
+   91 :     sum += diagEfield(xm, side)*h;
+   92 :   }
+   93 :   return sum;
+   94 : }
+   95 : 
+   96 : // Fills two length-nTapsPerSide arrays with the current cumulative tap
+   97 : // voltages for left/right. Call once per timestep after Efun/ElFun/
+   98 : // ErFun have been refreshed for that step.
+   99 : func int diagAllTapVoltages(real[int] &VL, real[int] &VR){
+  100 :   for (int i=0; i<nTapsPerSide; i++){
+  101 :     VL[i] = diagVcum(xTap[i], -1);
+  102 :     VR[i] = diagVcum(xTap[i], +1);
+  103 :   }
+  104 :   return 0;
+  105 : }
+  106 : 
+  107 : // One-time metadata export: physical location + type of every channel,
+  108 : // written once (not per-row) so it doesn't bloat the timeseries CSV.
+  109 : func int writeDiagnosticsMetadata(string fname){
+  110 :   ofstream fmeta(fname);
+  111 :   fmeta << "channel,type,side,x_m,y_m,z_m,notes\n";
+  112 :   for (int i=0; i<nTapsPerSide; i++){
+  113 :     fmeta << "V1_" << (i+1) << ",voltage_tap,left," << xTap[i] << "," << yB7 << "," << zDiagLeft  << ",cumulative from V_CL+\n";
+  114 :     fmeta << "V2_" << (i+1) << ",voltage_tap,right," << xTap[i] << "," << yB7 << "," << zDiagRight << ",cumulative from V_CL+\n";
+  115 :   }
+  116 :   for (int i=0; i<nRTDsPerSide; i++){
+  117 :     fmeta << "RTD1_" << (i+1) << ",temperature_rtd,left," << xRTD[i] << "," << yB7 << "," << zDiagLeft  << ",surface-mounted (top Cu)\n";
+  118 :     fmeta << "RTD2_" << (i+1) << ",temperature_rtd,right," << xRTD[i] << "," << yB7 << "," << zDiagRight << ",surface-mounted (top Cu)\n";
+  119 :   }
+  120 :   fmeta << "H1,hall_probe,left," << xHall << "," << yB7 << "," << zDiagLeft  << ",PLACEHOLDER - not yet wired to B-field computati
+  ... : on\n";
+  121 :   fmeta << "H2,hall_probe,right," << xHall << "," << yB7 << "," << zDiagRight << ",PLACEHOLDER - not yet wired to B-field computati
+  ... : on\n";
+  122 :   fmeta << "V_CL_plus,current_lead_voltage,n/a,0," << yB7 << ",n/a,reference (=0 by construction)\n";
+  123 :   fmeta << "V_CL_minus,current_lead_voltage,n/a," << Lx << "," << yB7 << ",n/a,far current lead\n";
+  124 :   return 0;
+  125 : }
+  126 : 
+  134 : real[int] diagVL(nTapsPerSide), diagVR(nTapsPerSide);
+  135 : 
+  136 : fespace Vh3(Th3, P1);
+  137 : fespace Ph3(Th3, P0);
+  138 : Ph3 reg = region;
+  139 : Vh3 T, Told, w;
+  140 : Ph3 kfun, source, rhocpfun;
+  141 : 
+  142 : real yCuTop=yB7-1e-9, yAgBmid=0.5*(yB1+yB2), yHastMid=0.5*(yB2+yB3), yScmid=0.5*(yB4+yB5), yAgTmid=0.5*(yB5+yB6);
+  143 : real zLeftRep = width/4, zRightRep = 3*width/4;
+  144 : 
+  145 : // Self-field B computation (Kim-model Jc(B,T) feedback) -- must be
+  146 : // included after Efun/ElFun/ErFun AND after Vh3 T exists (bfield_3d_slit.idp's
+  147 : // computeSelfFieldB references the mesh field T directly), per its own
+  148 : // header comment. FreeFEM resolves identifiers at parse time even inside
+  149 : // func bodies not yet called, so this really does need to come after the
+  150 : // Vh3 T declaration above, not just before it's first USED.
+  151 : include "bfield_3d_slit.idp"// ============================================================
+    2 : // bfield_3d_slit.idp
+    3 : // Self-field B computation for Kim-model Jc(B,T) suppression.
+    4 : //
+    5 : // Scope decisions (see project history for the full discussion):
+    6 : //  - Self-field only: computed via Biot-Savart directly from the
+    7 : //    tape's own current distribution. No external circuit / current
+    8 : //    return path is modeled (open-conductor approximation) -- this is
+    9 : //    least accurate near the current leads (x=0, x=Lx) and most
+   10 : //    accurate near the tape's midpoint, which is where the physics of
+   11 : //    interest (heater/hot-spot self-field suppression) actually lives.
+   12 : //  - LAGGED coupling: B is computed from the PREVIOUS timestep's
+   13 : //    converged current distribution, then held fixed through the
+   14 : //    current timestep's current-sharing bisection -- matches the
+   15 : //    existing Told-based lagging already used for source terms, and
+   16 : //    avoids a nested Picard loop.
+   17 : //  - Thin-SHEET approximation, one sheet per CURRENT-CARRYING layer
+   18 : //    (Hastelloy/buffer carry no current, no sheet needed): Ag-bottom,
+   19 : //    REBCO, Ag-top (simple flat sheets) + the Cu shell decomposed into
+   20 : //    4 non-overlapping sub-sheets (top strip, bottom strip, left wall,
+   21 : //    right wall) to preserve its actual wrap-around geometry rather
+   22 : //    than approximating it as flat. Each sheet's current density is
+   23 : //    resolved in 2D (along x AND across its own width) -- deliberately
+   24 : //    not collapsed to a 1D line current, since width-resolved self-field
+   25 : //    structure at the tape edges is the specific thing motivating the
+   26 : //    thin-sheet choice over a filament approximation.
+   27 : //  - Within the slit's x-range, Ag-bottom/REBCO/Ag-top and the Cu
+   28 : //    top/bottom strips split left/right at z=zSlitCenter (matching the
+   29 : //    existing electrical model); the Cu side walls are always whole,
+   30 : //    always on their respective side (confirmed from the mesh module:
+   31 : //    the walls sit entirely outside the slit's z-range, so are never
+   32 : //    severed by it).
+   33 : //
+   34 : // REQUIRES: this file must be included in a script that has already
+   35 : // included hts_mesh_module_3d_slit.idp and hts_materials.idp, and
+   36 : // which defines (with these exact names, as step_3d_slit_transient_diag.edp
+   37 : // does): the E-field sample arrays/functions Efun/ElFun/ErFun and their
+   38 : // backing arrays Earr/ElArr/ErArr, xSample, nxs, xSlitStart, xSlitEnd,
+   39 : // zSlitCenter, zLeftRep, zRightRep, and Vh3 T.
+   40 : // ============================================================
+   41 : 
+   42 : // ---- Kim model: Jc(B,T) = Jc(T)/(1+|B|/B0) ----
+   43 : // LITERATURE VALUE (2026-09-25), from Loic Queval et al 2016 Supercond.
+   44 : // Sci. Technol. 29 024007 -- replaces the prior 0.1 T placeholder (round,
+   45 : // order-of-magnitude guess made without search access; see git history).
+   46 : // Suppression scales with 1/B0kim, so this is a >2x more aggressive
+   47 : // suppression curve than the placeholder, not a cosmetic change --
+   48 : // verify with a real run before trusting downstream results against it
+   49 : // (see Bfield/CLAUDE.md).
+   50 : // Also note: this is still an ISOTROPIC Kim model using |B| regardless
+   51 : // of orientation -- real REBCO Jc(B) is strongly anisotropic
+   52 : // (perpendicular field suppresses much more than parallel field); that
+   53 : // anisotropy is a known simplification here, not an oversight, and is a
+   54 : // candidate refinement for later (see Bfield/CLAUDE.md for the
+   55 : // isotropic-first verification plan), not implemented now.
+   56 : real B0kim = 0.04265;
+   57 : 
+   58 : func real JcTB(real Tl, real Bmag)
+ *** Warning  The identifier Tl hide a Global identifier  
+{
+   59 :   return JcT(Tl) / (1.0 + Bmag/B0kim);
+   60 : }
+   61 : func real sigmaScB(real Emag, real Tl, real Bmag)
+ *** Warning  The identifier Tl hide a Global identifier  
+{
+   62 :   real Estab = max(abs(Emag), Einit);
+   63 :   real JcVal = JcTB(Tl, Bmag);
+   64 :   real nVal  = nT(Tl);   // Kim model here only suppresses Jc, not n -- standard simplification
+   65 :   real scTerm = (JcVal/Estab) * (Estab/E0)^(1.0/nVal);
+   66 :   return min(scTerm, sigmaMax) + sigmaRebco;
+   67 : }
+   68 : 
+   69 : // ---- sheet geometry (all derived from the real mesh-module constants,
+   70 : // nothing hardcoded) ----
+   71 : real yCuBotSheet = tCuB/2.0;
+   72 : real yCuTopSheet = yB6 + tCuT/2.0;
+   73 : real yCuWallMid  = 0.5*(yB1+yB6);
+   74 : real zCuLeftWall  = tSideCu/2.0;
+   75 : real zCuRightWall = width - tSideCu/2.0;
+   76 : 
+   77 : real yAgBSheet = 0.5*(yB1+yB2);
+   78 : real yHastSheet = 0.5*(yB2+yB3);
+   79 : real yScSheet  = 0.5*(yB4+yB5);
+   80 : real yAgTSheet = 0.5*(yB5+yB6);
+   81 : 
+   82 : // ---- E-field helper: which E value applies at x for the given side
+   83 : // (side<0 = left/z<center, side>0 = right/z>center) -- outside the
+   84 : // slit range both sides see the same unified Efun, matching the
+   85 : // diagnostics module's identical convention ----
+   86 : func real EforSide(real xx, int side){
+   87 :   if (xx < xSlitStart || xx > xSlitEnd) return Efun(xx);
+   88 :   return (side < 0) ? ElFun(xx) : ErFun(xx);
+   89 : }
+   90 : 
+   91 : // ---- generic 2D Biot-Savart sheet integrators. Current always flows
+   92 : // in +x (the model's universal assumption). K(x) is surface current
+   93 : // density [A/m], uniform across the sheet's short/transverse extent at
+   94 : // a given x (consistent with the existing model's per-x-slice-uniform
+   95 : // current assumption within each layer) but resolved in 2D spatially
+   96 : // via explicit sub-strips across that transverse extent, so the actual
+   97 : // finite width still shapes the near-field the way a real sheet would.
+   98 : // ----
+   99 : func real[int] biotSheetYConst(real px,real py,real pz, real ySheet, real za,real zb,
+  100 :                                 real[int] &Karr, int nSub){
+  101 :   int Nz = 6;
+  102 :   real dz = (zb-za)/Nz;
+ *** Warning  The identifier dz hide a Global identifier  
+
+  103 :   real sx=0.0, sy=0.0, sz=0.0;
+  104 :   for (int iz=0; iz<Nz; iz++){
+  105 :     real zq = za + (iz+0.5)*dz;
+  106 :     for (int ix=0; ix<nSub-1; ix++){
+  107 :       real xq = 0.5*(xSample[ix]+xSample[ix+1]);
+  108 :       real Kavg = 0.5*(Karr[ix]+Karr[ix+1]);
+  109 :       real dI = Kavg*dz;
+  110 :       real dxSeg = xSample[ix+1]-xSample[ix];
+  111 :       real rx=px-xq, ry=py-ySheet, rz=pz-zq;
+  112 :       real rmag = sqrt(rx^2+ry^2+rz^2);
+  113 :       real inv = dI/(4*pi*(rmag^3+1e-30));
+  114 :       // dl=(dxSeg,0,0); dl x r = (0, -dxSeg*rz, dxSeg*ry)
+  115 :       sy += (-dxSeg*rz)*inv;
+  116 :       sz += ( dxSeg*ry)*inv;
+  117 :     }
+  118 :   }
+  119 :   real[int] res = [sx, sy, sz];
+  120 :   return res;
+  121 : }
+  122 : func real[int] biotSheetZConst(real px,real py,real pz, real zSheet, real ya,real yb,
+  123 :                                 real[int] &Karr, int nSub){
+  124 :   int Ny = 4;
+  125 :   real dy = (yb-ya)/Ny;
+ *** Warning  The identifier dy hide a Global identifier  
+
+  126 :   real sx=0.0, sy=0.0, sz=0.0;
+  127 :   for (int iy=0; iy<Ny; iy++){
+  128 :     real yq = ya + (iy+0.5)*dy;
+  129 :     for (int ix=0; ix<nSub-1; ix++){
+  130 :       real xq = 0.5*(xSample[ix]+xSample[ix+1]);
+  131 :       real Kavg = 0.5*(Karr[ix]+Karr[ix+1]);
+  132 :       real dI = Kavg*dy;
+  133 :       real dxSeg = xSample[ix+1]-xSample[ix];
+  134 :       real rx=px-xq, ry=py-yq, rz=pz-zSheet;
+  135 :       real rmag = sqrt(rx^2+ry^2+rz^2);
+  136 :       real inv = dI/(4*pi*(rmag^3+1e-30));
+  137 :       sy += (-dxSeg*rz)*inv;
+  138 :       sz += ( dxSeg*ry)*inv;
+  139 :     }
+  140 :   }
+  141 :   real[int] res = [sx, sy, sz];
+  142 :   return res;
+  143 : }
+  144 : 
+  145 : // ---- near-field-excluding variant, used ONLY when a sheet is being
+  146 : // evaluated at a point ON ITSELF (same y-height, same side) -- e.g.
+  147 : // REBCO's own contribution to B at REBCO's own location. Segments
+  148 : // immediately adjacent to the evaluation x-index are excluded from
+  149 : // the discretized sum (that's exactly where the y-distance is zero
+  150 : // and the naive kernel is near-singular), and nothing is added back:
+  151 : // the exact uniform-current-slab result for the field AT THE CENTER
+  152 : // of a locally-uniform slab is precisely zero (see project notes),
+  153 : // so omitting that immediate neighborhood entirely IS the correct
+  154 : // near-field treatment here, not merely an approximation of it.
+  155 : //
+  156 : // CAVEAT: the excluded window's width is tied to the x-sampling grid
+  157 : // spacing (~3.3mm at nxs=60), which is coarser than the length scale
+  158 : // over which current density is truly uniform right at sharp
+  159 : // features (the heater footprint, the slit edges). The zero-near-term
+  160 : // result is exact only insofar as current is locally uniform within
+  161 : // the excluded window -- it is a weaker approximation specifically at
+  162 : // those sharp features than everywhere else. nExclude is left as an
+  163 : // explicit, tunable parameter for exactly this reason.
+  164 : func real[int] biotSheetYConstExcludeNear(real px,real py,real pz, real ySheet, real za,real zb,
+  165 :                                            real[int] &Karr, int nSub, int excludeIdx, int nExclude){
+  166 :   int Nz = 6;
+  167 :   real dz = (zb-za)/Nz;
+ *** Warning  The identifier dz hide a Global identifier  
+
+  168 :   real sx=0.0, sy=0.0, sz=0.0;
+  169 :   int loEx = max(0, excludeIdx-nExclude);
+  170 :   int hiEx = min(nSub-2, excludeIdx+nExclude-1);
+  171 :   for (int iz=0; iz<Nz; iz++){
+  172 :     real zq = za + (iz+0.5)*dz;
+  173 :     for (int ix=0; ix<nSub-1; ix++){
+  174 :       if (ix>=loEx && ix<=hiEx) continue;   // skip the near neighborhood
+  175 :       real xq = 0.5*(xSample[ix]+xSample[ix+1]);
+  176 :       real Kavg = 0.5*(Karr[ix]+Karr[ix+1]);
+  177 :       real dI = Kavg*dz;
+  178 :       real dxSeg = xSample[ix+1]-xSample[ix];
+  179 :       real rx=px-xq, ry=py-ySheet, rz=pz-zq;
+  180 :       real rmag = sqrt(rx^2+ry^2+rz^2);
+  181 :       real inv = dI/(4*pi*(rmag^3+1e-30));
+  182 :       sy += (-dxSeg*rz)*inv;
+  183 :       sz += ( dxSeg*ry)*inv;
+  184 :     }
+  185 :   }
+  186 :   real[int] res = [sx, sy, sz];
+  187 :   return res;
+  188 : }
+  189 : 
+  190 : // ---- self-field driver: builds all 12 sheet current-density arrays
+  191 : // from the CURRENT (soon to be overwritten) Earr/ElArr/ErArr and T --
+  192 : // i.e. the previous timestep's converged state, per the lagged-
+  193 : // coupling decision -- and evaluates |B| (in Tesla) at the REBCO
+  194 : // layer's representative point for each side, at every x-sample point.
+  195 : //
+  196 : // NOTE on a deliberate simplification: the REBCO sheet's current here
+  197 : // is reconstructed via the plain sigmaSc(E,T) formula (NOT sigmaScB),
+  198 : // even though the "real" current that produced this stored E may have
+  199 : // been computed under B-suppression on a previous step. This avoids
+  200 : // needing a separate persisted-B checkpoint across script invocations
+  201 : // (B is always freshly recomputed from the already-checkpointed E/T
+  202 : // state instead). Given the whole self-field treatment is already an
+  203 : // approximation (open-conductor, lagged, isotropic Kim model), this
+  204 : // additional simplification is judged acceptable -- it does not
+  205 : // compound across timesteps, since nothing here is itself persisted.
+  206 : real mu0 = 4*pi*1e-7;
+  207 : 
+  208 : func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
+  209 :   real[int] KcuBotL(nSub), KcuBotR(nSub), KcuTopL(nSub), KcuTopR(nSub);
+  210 :   real[int] KcuLW(nSub), KcuRW(nSub);
+  211 :   real[int] KagbL(nSub), KagbR(nSub), KhastL(nSub), KhastR(nSub), KscL(nSub), KscR(nSub), KagtL(nSub), KagtR(nSub);
+  212 : 
+  213 :   for (int i=0; i<nSub; i++){
+  214 :     real xx = xSample[i];
+  215 :     real ElHere = EforSide(xx,-1), ErHere = EforSide(xx,+1);
+  216 :     real TcuBotL=T(xx,yCuBotSheet,zLeftRep), TcuBotR=T(xx,yCuBotSheet,zRightRep);
+  217 :     real TcuTopL=T(xx,yCuTopSheet,zLeftRep), TcuTopR=T(xx,yCuTopSheet,zRightRep);
+  218 :     real TcuLWt=T(xx,yCuWallMid,zCuLeftWall), TcuRWt=T(xx,yCuWallMid,zCuRightWall);
+  219 :     real TagbL=T(xx,yAgBSheet,zLeftRep), TagbR=T(xx,yAgBSheet,zRightRep);
+  220 :     real ThastL=T(xx,yHastSheet,zLeftRep), ThastR=T(xx,yHastSheet,zRightRep);
+  221 :     real TscL=T(xx,yScSheet,zLeftRep),   TscR=T(xx,yScSheet,zRightRep);
+  222 :     real TagtL=T(xx,yAgTSheet,zLeftRep), TagtR=T(xx,yAgTSheet,zRightRep);
+  223 : 
+  224 :     KcuBotL[i]=tCuB*(ElHere/rhoCu(TcuBotL)); KcuBotR[i]=tCuB*(ErHere/rhoCu(TcuBotR));
+  225 :     KcuTopL[i]=tCuT*(ElHere/rhoCu(TcuTopL)); KcuTopR[i]=tCuT*(ErHere/rhoCu(TcuTopR));
+  226 :     KcuLW[i]=tSideCu*(ElHere/rhoCu(TcuLWt)); KcuRW[i]=tSideCu*(ErHere/rhoCu(TcuRWt));
+  227 :     KagbL[i]=tAgB*(ElHere/rhoAg(TagbL));     KagbR[i]=tAgB*(ErHere/rhoAg(TagbR));
+  228 :     KhastL[i]=tSub*(ElHere/rhoHast(ThastL)); KhastR[i]=tSub*(ErHere/rhoHast(ThastR));
+  229 :     KscL[i]=sigmaSc(ElHere,TscL)*ElHere*tSc; KscR[i]=sigmaSc(ErHere,TscR)*ErHere*tSc;
+  230 :     KagtL[i]=tAgT*(ElHere/rhoAg(TagtL));     KagtR[i]=tAgT*(ErHere/rhoAg(TagtR));
+  231 :   }
+  232 : 
+  233 :   for (int i=0; i<nSub; i++){
+  234 :     real xx = xSample[i];
+  235 :     for (int side=-1; side<=1; side+=2){
+  236 :       real pz = (side<0) ? zLeftRep : zRightRep;
+  237 :       real[int] hCuBotL=biotSheetYConst(xx,yScSheet,pz, yCuBotSheet, 0.0,zSlitCenter, KcuBotL,nSub);
+  238 :       real[int] hCuBotR=biotSheetYConst(xx,yScSheet,pz, yCuBotSheet, zSlitCenter,width, KcuBotR,nSub);
+  239 :       real[int] hCuTopL=biotSheetYConst(xx,yScSheet,pz, yCuTopSheet, 0.0,zSlitCenter, KcuTopL,nSub);
+  240 :       real[int] hCuTopR=biotSheetYConst(xx,yScSheet,pz, yCuTopSheet, zSlitCenter,width, KcuTopR,nSub);
+  241 :       real[int] hCuLW  =biotSheetZConst(xx,yScSheet,pz, zCuLeftWall, yB1,yB6, KcuLW,nSub);
+  242 :       real[int] hCuRW  =biotSheetZConst(xx,yScSheet,pz, zCuRightWall, yB1,yB6, KcuRW,nSub);
+  243 :       real[int] hAgbL  =biotSheetYConst(xx,yScSheet,pz, yAgBSheet, zB1,zSlitCenter, KagbL,nSub);
+  244 :       real[int] hAgbR  =biotSheetYConst(xx,yScSheet,pz, yAgBSheet, zSlitCenter,zB2, KagbR,nSub);
+  245 :       // Hastelloy is a genuine cross-term here (evaluated at REBCO's
+  246 :       // y-height, not its own), so no near-field exclusion is needed --
+  247 :       // ordinary Biot-Savart, same as Ag/Cu.
+  248 :       real[int] hHastL =biotSheetYConst(xx,yScSheet,pz, yHastSheet, zB1,zSlitCenter, KhastL,nSub);
+  249 :       real[int] hHastR =biotSheetYConst(xx,yScSheet,pz, yHastSheet, zSlitCenter,zB2, KhastR,nSub);
+  250 :       // REBCO's contribution to B AT ITS OWN LOCATION: only the
+  251 :       // portion on the SAME side as the evaluation point (side<0 uses
+  252 :       // hScL, side>0 uses hScR) needs the near-field exclusion, since
+  253 :       // that's the only piece sharing both the evaluation y-height AND
+  254 :       // covering the evaluation z-location. The opposite-side portion
+  255 :       // is a genuine, well-posed cross-term (nonzero z-separation) and
+  256 :       // uses ordinary Biot-Savart unchanged.
+  257 :       real[int] hScL(3), hScR(3);
+  258 :       if (side<0){ hScL=biotSheetYConstExcludeNear(xx,yScSheet,pz, yScSheet, zB1,zSlitCenter, KscL,nSub, i,2);
+  259 :                    hScR=biotSheetYConst(xx,yScSheet,pz, yScSheet, zSlitCenter,zB2, KscR,nSub); }
+  260 :       else       { hScL=biotSheetYConst(xx,yScSheet,pz, yScSheet, zB1,zSlitCenter, KscL,nSub);
+  261 :                    hScR=biotSheetYConstExcludeNear(xx,yScSheet,pz, yScSheet, zSlitCenter,zB2, KscR,nSub, i,2); }
+  262 :       real[int] hAgtL  =biotSheetYConst(xx,yScSheet,pz, yAgTSheet, zB1,zSlitCenter, KagtL,nSub);
+  263 :       real[int] hAgtR  =biotSheetYConst(xx,yScSheet,pz, yAgTSheet, zSlitCenter,zB2, KagtR,nSub);
+  264 : 
+  265 :       real Hy = hCuBotL[1]+hCuBotR[1]+hCuTopL[1]+hCuTopR[1]+hCuLW[1]+hCuRW[1]
+  266 :               + hAgbL[1]+hAgbR[1]+hHastL[1]+hHastR[1]+hScL[1]+hScR[1]+hAgtL[1]+hAgtR[1];
+  267 :       real Hz = hCuBotL[2]+hCuBotR[2]+hCuTopL[2]+hCuTopR[2]+hCuLW[2]+hCuRW[2]
+  268 :               + hAgbL[2]+hAgbR[2]+hHastL[2]+hHastR[2]+hScL[2]+hScR[2]+hAgtL[2]+hAgtR[2];
+  269 :       real Hmag = sqrt(Hy^2+Hz^2);
+  270 :       if (side<0) BleftOut[i]=mu0*Hmag; else BrightOut[i]=mu0*Hmag;
+  271 :     }
+  272 :   }
+  273 :   return 0;
+  274 : }
+  275 : 
+  276 : // ---- B-aware current-sharing bisection: identical structure to the
+  277 : // existing ItotFull/solveEFull and ItotHalf/solveEHalf, but using
+  278 : // sigmaScB (Kim-suppressed) instead of sigmaSc for the REBCO term.
+  279 : //
+  280 : // Hastelloy (region 3) is included here as a genuine parallel resistive
+  281 : // branch (tSub*coreWidth*(E/rhoHast(THast)), same Ohmic form as Cu/Ag) --
+  282 : // NOT excluded as "non-conducting". It has real, measured, merely-HIGH
+  283 : // (not insulating) resistivity: ~1.23e-6 Ohm*m at 77-86K, essentially
+  284 : // flat with temperature, versus Cu/Ag's ~3-6e-9 Ohm*m which itself rises
+  285 : // with T. Back-of-envelope at 80K: Hastelloy's resistance per unit
+  286 : // length is ~235x the parallel Cu+Ag combination, i.e. it carries
+  287 : // roughly ~0.4-0.5% of the stabilizer's current there -- small, but a
+  288 : // real, included contribution now rather than an assumed-zero omission.
+  289 : // Buffer (region 4) remains excluded -- its assumed conductivity
+  290 : // (sigmaBuf=1e-10 S/m) is ~4 orders of magnitude below even Hastelloy's
+  291 : // real resistivity and is itself a nominal placeholder, not measured
+  292 : // data, but that's a separate, much-better-justified approximation than
+  293 : // Hastelloy's blanket exclusion was.
+  294 : func real ItotFullB(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT, real Bmag){
+  295 :   return shellAreaFull*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
+  296 :        + tSub*coreWidth*(E/rhoHast(THast))
+  297 :        + tSc*coreWidth*sigmaScB(E,Tsc,Bmag)*E + tAgT*coreWidth*(E/rhoAg(TagT));
+  298 : }
+  299 : func real solveEFullB(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget, real Bmag){
+  300 :   if (Itarget <= 0.0) return 0.0;
+  301 :   real Ehi0=4.0; int guard=0;
+  302 :   while (ItotFullB(Ehi0,TcuShell,TagB,THast,Tsc,TagT,Bmag) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  303 :   real logElo=log(1e-30), logEhi=log(Ehi0);
+  304 :   for(int it=0;it<50;it++){
+  305 :     real logEmid=0.5*(logElo+logEhi);
+  306 :     real Emid=exp(logEmid);
+  307 :     if (ItotFullB(Emid,TcuShell,TagB,THast,Tsc,TagT,Bmag) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  308 :   }
+  309 :   real Ef=exp(0.5*(logElo+logEhi));
+  310 :   real relErr=abs(ItotFullB(Ef,TcuShell,TagB,THast,Tsc,TagT,Bmag)-Itarget)/max(Itarget,1e-30);
+  311 :   assert(relErr<=1e-3);
+  312 :   return Ef;
+  313 : }
+  314 : func real ItotHalfB(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT, real shellA, real cw, real Bmag){
+  315 :   return shellA*(E/rhoCu(TcuShell)) + tAgB*cw*(E/rhoAg(TagB))
+  316 :        + tSub*cw*(E/rhoHast(THast))
+  317 :        + tSc*cw*sigmaScB(E,Tsc,Bmag)*E + tAgT*cw*(E/rhoAg(TagT));
+  318 : }
+  319 : func real solveEHalfB(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget, real shellA, real cw, real Bmag){
+  320 :   if (Itarget <= 0.0) return 0.0;
+  321 :   real Ehi0=4.0; int guard=0;
+  322 :   while (ItotHalfB(Ehi0,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bmag) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  323 :   real logElo=log(1e-30), logEhi=log(Ehi0);
+  324 :   for(int it=0;it<50;it++){
+  325 :     real logEmid=0.5*(logElo+logEhi);
+  326 :     real Emid=exp(logEmid);
+  327 :     if (ItotHalfB(Emid,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bmag) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  328 :   }
+  329 :   real Ef=exp(0.5*(logElo+logEhi));
+  330 :   real relErr=abs(ItotHalfB(Ef,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bmag)-Itarget)/max(Itarget,1e-30);
+  331 :   assert(relErr<=1e-3);
+  332 :   return Ef;
+  333 : }
+  334 : 
+  152 : real[int] Bleft(nxs+1), Bright(nxs+1);
+  153 : 
+  154 : // Defaults to 1 (this script's exact prior behavior, unflagged). A
+  155 : // wrapper passes a larger value via -steps-per-invocation to amortize
+  156 : // the mesh-rebuild-per-invocation cost across several timesteps --
+  157 : // CSV/diagnostics rows are still written every physical step regardless,
+  158 : // and (see below) the checkpoint is now written every physical step too,
+  159 : // so no time-resolution or crash-safety is lost by raising this.
+  160 : int maxStepsThisRun = getARGV("-steps-per-invocation", 1);
+  161 : 
+  162 : // Adaptive-bisection/runaway-cutoff tunables, ported from
+  163 : // electrothermal/step_3d_slit_transient_diag.edp -- see the step loop
+  164 : // below for the mechanism and that track's CLAUDE.md for the crash
+  165 : // history that motivated it (large-dt UMFPACK ill-conditioning on this
+  166 : // project's own material tables, found to be node/hardware-dependent
+  167 : // rather than a deterministic function of dt). getARGV lets these be
+  168 : // overridden from the command line without editing the script; defaults
+  169 : // reproduce this script's exact prior behavior when unflagged.
+  170 : real maxStepRise = getARGV("-maxsteprise", 500.0);
+  171 : int maxBisections = getARGV("-maxbisections", 10);
+  172 : real tmaxCutoff = getARGV("-tmaxcutoff", 900.0);
+  173 : 
+  174 : // CHECKPOINT FORMAT CHANGE: now also persists Earr/ElArr/ErArr, not just
+  175 : // t and T. This is required for computeSelfFieldB's lagged design to
+  176 : // actually work: it reads these arrays BEFORE this step's electrical
+  177 : // solve overwrites them, expecting last step's converged values. Without
+  178 : // persisting them, every fresh script invocation saw freshly-zero-
+  179 : // initialized arrays instead, and B was silently 0 forever regardless of
+  180 : // the real current/heating state -- a real bug, not a physics effect,
+  181 : // caught by exactly that symptom (uniformly zero B at every Hall probe
+  182 : // reading). Checkpoints from before this fix do NOT have this data --
+  183 : // re-run init_3d_slit_transient_checkpoint.edp for a fresh start rather
+  184 : // than resuming an old checkpoint with this script; there's no valid B
+  185 : // history in an old checkpoint to recover anyway (B was always 0 there).
+  186 : real t = 0.0;
+  187 : {
+  188 :   ifstream fchk(outPrefix+"ckpt_3d_slit_transient.txt");
+  189 :   fchk >> t;
+  190 :   for (int i=0;i<T.n;i++) fchk >> T[][i];
+  191 :   for (int i=0;i<=nxs;i++) fchk >> Earr[i];
+  192 :   for (int i=0;i<=nxs;i++) fchk >> ElArr[i];
+  193 :   for (int i=0;i<=nxs;i++) fchk >> ErArr[i];
+  194 :   cout << "Resumed at t="<<t<<"s Tmax="<<T[].max << endl;
+  195 : }
+  196 : 
+  197 : {
+  198 :   ofstream fout(outPrefix+"transient_3d_slit.csv", append);
+  199 :   if (t <= 1e-12) fout << "t,I0,Tmax,TmaxLeft,TmaxRight,fracLeft\n";
+  200 : 
+  201 :   ofstream fdiag(outPrefix+"diagnostics_3d_slit.csv", append);
+  202 :   int diagFileCheck = exec("test -s "+outPrefix+"diagnostics_3d_slit.csv");
+  203 :   bool diagCsvHasHeader = (diagFileCheck == 0);
+  204 :   // Metadata is static and cheap -- just rewrite it every invocation so it's
+  205 :   // always present/current, regardless of when this feature was added
+  206 :   // relative to an in-progress run's t value.
+  207 :   writeDiagnosticsMetadata(outPrefix+"diagnostics_positions_3d_slit.csv");
+  208 :   if (!diagCsvHasHeader) {
+  209 :     fdiag << "t,I0,Tmax,fracLeft,V_CL_plus,V_CL_minus";
+  210 :     for (int i=0;i<nTapsPerSide;i++) fdiag << ",V1_" << (i+1);
+  211 :     for (int i=0;i<nTapsPerSide;i++) fdiag << ",V2_" << (i+1);
+  212 :     for (int i=0;i<nRTDsPerSide;i++) fdiag << ",RTD1_" << (i+1);
+  213 :     for (int i=0;i<nRTDsPerSide;i++) fdiag << ",RTD2_" << (i+1);
+  214 :     fdiag << ",H1,H2\n";
+  215 :   }
+  216 : 
+  217 :   int step = 0;
+  218 :   while (t < tEnd-1e-12 && step < maxStepsThisRun && T[].max < tmaxCutoff){
+  219 :     real tStepStart = clock();
+  220 :     real I0w = I0ofT(t);
+  221 : 
+  222 :     // Self-field B, computed from the CURRENT (about-to-be-overwritten)
+  223 :     // Earr/ElArr/ErArr and T -- i.e. the previous timestep's converged
+  224 :     // state -- then held fixed through this timestep's bisection below
+  225 :     // (the "lagged" coupling decision).
+  226 :     real tBstart = clock();
+  227 :     computeSelfFieldB(Bleft, Bright, nxs+1);
+  228 :     real tBfield = clock() - tBstart;
+  229 : 
+  230 :     real tElecStart = clock();
+  231 :     // electrical: single channel outside slit range, split L/R inside.
+  232 :     // WITHIN the slit, El(x)/Er(x) are resolved PER-x (matching the
+  233 :     // outside-slit treatment) rather than sampled once at a single
+  234 :     // representative point and extended uniformly -- the heater creates a
+  235 :     // strongly localized hot spot, and a single point's local resistivity
+  236 :     // is not representative of the other ~178mm of slit length.
+  237 :     for (int i=0;i<=nxs;i++){
+  238 :       real xx = xSample[i];
+  239 :       if (xx < xSlitStart || xx > xSlitEnd){
+  240 :         real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep), THast=T(xx,yHastMid,zLeftRep),
+  241 :              Tsc=T(xx,yScmid,zLeftRep), TagT=T(xx,yAgTmid,zLeftRep);
+  242 :         Earr[i] = solveEFullB(TcuShell,TagB,THast,Tsc,TagT, I0w, Bleft[i]);
+  243 :         ElArr[i] = 0; ErArr[i] = 0;
+  244 :       } else {
+  245 :         Earr[i] = 0;
+  246 :       }
+  247 :     }
+  248 : 
+  249 :     // Precompute local per-x temperatures within the slit range for both
+  250 :     // sides ONCE per timestep -- T is fixed during this algebraic
+  251 :     // current-split sub-solve, so there's no need to re-evaluate the FE
+  252 :     // field on every bisection iteration below.
+  253 :     real[int] TcuLx(nxs+1), TagBLx(nxs+1), THastLx(nxs+1), TscLx(nxs+1), TagTLx(nxs+1);
+  254 :     real[int] TcuRx(nxs+1), TagBRx(nxs+1), THastRx(nxs+1), TscRx(nxs+1), TagTRx(nxs+1);
+  255 :     int iSlitLo=-1, iSlitHi=-1;
+  256 :     for (int i=0;i<=nxs;i++){
+  257 :       real xx = xSample[i];
+  258 :       if (xx >= xSlitStart && xx <= xSlitEnd){
+  259 :         if (iSlitLo<0) iSlitLo=i;
+  260 :         iSlitHi=i;
+  261 :         TcuLx[i]=T(xx,yCuTop,zLeftRep);  TagBLx[i]=T(xx,yAgBmid,zLeftRep);  THastLx[i]=T(xx,yHastMid,zLeftRep);
+  262 :         TscLx[i]=T(xx,yScmid,zLeftRep);  TagTLx[i]=T(xx,yAgTmid,zLeftRep);
+  263 :         TcuRx[i]=T(xx,yCuTop,zRightRep); TagBRx[i]=T(xx,yAgBmid,zRightRep); THastRx[i]=T(xx,yHastMid,zRightRep);
+  264 :         TscRx[i]=T(xx,yScmid,zRightRep); TagTRx[i]=T(xx,yAgTmid,zRightRep);
+  265 :       }
+  266 :     }
+  267 : 
+  268 :     // Total voltage drop along each side = integral of the LOCAL field
+  269 :     // (current fixed at Il/Ir along the length, field varies with local T)
+  270 :     // over the slit's x-range, trapezoidal over the same x-sample grid used
+  271 :     // everywhere else.
+  272 :     func real VLeftTotal(real fracLeft){
+  273 :       real Il = fracLeft*I0w;
+  274 :       real sum = 0.0;
+  275 :       for (int i=iSlitLo;i<iSlitHi;i++){
+  276 :         real Ea = solveEHalfB(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, Bleft[i]);
+  277 :         real Eb = solveEHalfB(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, Bleft[i+1]);
+  278 :         sum += 0.5*(Ea+Eb)*(xSample[i+1]-xSample[i]);
+  279 :       }
+  280 :       return sum;
+  281 :     }
+  282 :     func real VRightTotal(real fracLeft){
+  283 :       real Ir = (1-fracLeft)*I0w;
+  284 :       real sum = 0.0;
+  285 :       for (int i=iSlitLo;i<iSlitHi;i++){
+  286 :         real Ea = solveEHalfB(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, Bright[i]);
+  287 :         real Eb = solveEHalfB(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, Bright[i+1]);
+  288 :         sum += 0.5*(Eb+Ea)*(xSample[i+1]-xSample[i]);
+  289 :       }
+  290 :       return sum;
+  291 :     }
+  292 :     func real Vdiff(real fracLeft){
+  293 :       return VLeftTotal(fracLeft) - VRightTotal(fracLeft);
+  294 :     }
+  295 :     real flo=0.0, fhi=1.0;
+  296 :     if (I0w <= 0.0){ flo=0.5; fhi=0.5; }
+  297 :     else {
+  298 :       for(int it=0;it<30;it++){
+  299 :         real fmid=0.5*(flo+fhi);
+  300 :         if (Vdiff(fmid) < 0) flo=fmid; else fhi=fmid;
+  301 :       }
+  302 :     }
+  303 :     real fracLeft = 0.5*(flo+fhi);
+  304 :     real IlFinal = fracLeft*I0w, IrFinal = (1-fracLeft)*I0w;
+  305 :     for (int i=iSlitLo;i<=iSlitHi;i++){
+  306 :       ElArr[i] = solveEHalfB(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, Bleft[i]);
+  307 :       ErArr[i] = solveEHalfB(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, Bright[i]);
+  308 :     }
+  309 :     real tElectrical = clock() - tElecStart;
+  310 : 
+  311 :     real dt = dtCapped(t);
+  312 :     if (dt <= 1e-9) break;
+  313 : 
+  314 :     real qHeaterNow = 0.0;
+  315 :     if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
+  316 : 
+  317 :     real tFieldsStart = clock();
+  318 :     Ph3 inSlitRange = (x>=xSlitStart)*(x<=xSlitEnd);
+  319 :     source = (1-inSlitRange)*sourceOfFull(region, Efun(x), T)
+  320 :            + inSlitRange*( (z<zSlitCenter)*sourceOfFull(region, ElFun(x), T)
+  321 :                           + (z>zSlitCenter)*sourceOfFull(region, ErFun(x), T) );
+  322 :     Told = T;
+  323 :     kfun = kOf(region, Told);
+  324 :     rhocpfun = rhoCpOf(region, Told);
+  325 :     real tFields = clock() - tFieldsStart;
+  326 : 
+  327 :     // Adaptive step bisection -- ported from electrothermal/
+  328 :     // step_3d_slit_transient_diag.edp (see its CLAUDE.md, "Ramp collapse
+  329 :     // breaks down above Ic" / "Adaptive step-size bisection" / "Above-Ic
+  330 :     // phase: adaptive Jc-based step growth"). heatStep's solve leaves
+  331 :     // solver= unspecified, so FreeFEM solves the (genuinely SPD) bilinear
+  332 :     // form as a general system via UMFPACK, which can fail -- loudly (OOM
+  333 :     // on pathological pivoting/fill-in) or silently (a technically-
+  334 :     // completed but numerically garbage factorization) -- on an ill-
+  335 :     // conditioned matrix. This project's material tables span many orders
+  336 :     // of magnitude (e.g. buffer's placeholder sigmaBuf=1e-10 S/m), and the
+  337 :     // failure was found to be node/hardware-dependent rather than a
+  338 :     // deterministic function of dt, so no fixed-dt cap can be proven safe
+  339 :     // in advance. Retry at half dt whenever the result isn't physically
+  340 :     // sane, standard adaptive-FEA practice. maxStepRise is deliberately
+  341 :     // generous (a real quench -- ~650K/s, the fastest observed this
+  342 :     // project -- is only ~13K at pulse-phase dt) so this only ever fires
+  343 :     // on genuine numerical garbage.
+  344 :     //
+  345 :     // Only the above-Ic ramp window gets the second, Jc-based accuracy
+  346 :     // controller below -- below tCrossIc, I0(t) is still ramping toward
+  347 :     // Ic with no current-sharing physics engaged yet (maxStepRise alone is
+  348 :     // the right guard there), and the pulse/post-pulse phases already
+  349 :     // have independently-validated fixed dt. This only actually triggers
+  350 :     // once currentRatio>1 (see tCrossIc above); at the default ratio=0.7
+  351 :     // it's a no-op, same as before ratio was parameterized.
+  352 :     bool inAboveIcPhase = (currentRatio > 1.0 && t >= tCrossIc-1e-9 && t < Tramp-1e-9);
+  353 :     real TmaxBefore = Told[].max, TminBefore = Told[].min;
+  354 :     real jcBefore = JcT(TmaxBefore);
+  355 :     // Normalize the Jc swing against a FIXED reference (Jc at the cold
+  356 :     // base temperature), not the local jcBefore -- JcT is linear and hits
+  357 :     // exactly 0 at Tc=90K, so as Tmax approaches Tc, jcBefore->0 and a
+  358 :     // fraction normalized by it becomes unsatisfiable regardless of how
+  359 :     // small dt gets. Ported already-fixed (see electrothermal/CLAUDE.md's
+  360 :     // "Jc bisect fix" for the live bug this avoids: r1p36 spun for 13.3
+  361 :     // hours approaching T=90K without ever crossing it under the original,
+  362 :     // locally-normalized version of this check).
+  363 :     real jcRef = JcT(Tcold);
+  364 :     real dtTry = dt;
+  365 :     int bisectCount = 0;
+  366 :     real jcFrac = 0.0;
+  367 :     bool solveOk = false;
+  368 :     real tHeatStart = clock();
+  369 :     while (!solveOk){
+  370 :       solve heatStep(T, w) =
+  371 :           int3d(Th3)( rhocpfun*T*w/dtTry + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
+  372 :         - int3d(Th3)( rhocpfun*Told*w/dtTry + source*w )
+  373 :         - int2d(Th3, 3)( qHeaterNow*(x>xHeatLo)*(x<xHeatHi)*(z>zHeatLo)*(z<zHeatHi)*w )
+  374 :         + on(2, 4, T=Tcold);
+  375 :       // NaN checked separately from the rise bound -- a NaN comparison
+  376 :       // against a finite bound via ">" is always false in IEEE-754, so a
+  377 :       // diverged-to-NaN solve would otherwise never trip the bisection.
+  378 :       bool isNan = (T[].max != T[].max) || (T[].min != T[].min);
+  379 :       bool blewUp = isNan || (T[].max-TmaxBefore > maxStepRise) || (TminBefore-T[].min > maxStepRise);
+  380 :       // Accuracy check, above-Ic phase only. Skipped once blewUp is
+  381 :       // already true: no point computing Jc off catastrophically garbage
+  382 :       // T[].max.
+  383 :       bool jcTooFast = false;
+  384 :       if (inAboveIcPhase && !blewUp){
+  385 :         jcFrac = abs(JcT(T[].max)-jcBefore)/max(jcRef, 1e-30);
+  386 :         jcTooFast = jcFrac > maxJcFracChange;
+  387 :       }
+  388 :       if (!blewUp && !jcTooFast) solveOk = true;
+  389 :       else {
+  390 :         bisectCount++;
+  391 :         cout << "[bisect] step=" << step << " t=" << t << " dtTry=" << dtTry
+  392 :              << " jcFrac=" << jcFrac << " Tmax=" << T[].max << " Tmin=" << T[].min
+  393 :              << " -- halving (attempt " << bisectCount << "/" << maxBisections << ")" << endl;
+  394 :         if (bisectCount > maxBisections){
+  395 :           cout << "FATAL: heatStep did not stabilize after " << maxBisections
+  396 :                << " bisections at t=" << t << " (started from dt=" << dt << ")" << endl;
+  397 :           assert(false);
+  398 :         }
+  399 :         dtTry = dtTry/2.0;
+  400 :       }
+  401 :     }
+  402 :     dt = dtTry;   // the committed dt, possibly smaller than originally requested
+  403 :     // Grow the above-Ic guess for the NEXT step if this one was comfortably
+  404 :     // inside the accuracy band; otherwise just carry forward whatever dt
+  405 :     // actually worked, rather than re-attempting the same too-large value.
+  406 :     if (inAboveIcPhase){
+  407 :       if (jcFrac < 0.5*maxJcFracChange) rampDtAboveIc = dtTry*2.0;
+  408 :       else rampDtAboveIc = dtTry;
+  409 :     }
+  410 :     real tHeatSolve = clock() - tHeatStart;
+  411 : 
+  412 :     t += dt;
+  413 :     for (int i=0;i<5;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
+  414 :     step++;
+  415 : 
+  416 :     // CSV/diagnostic write moved to AFTER the (possibly-bisected) solve and
+  417 :     // AFTER advancing t -- ported from the same electrothermal fix, and
+  418 :     // fixing the identical bug here: writing before the solve meant a CSV
+  419 :     // row's Tmax was always one physical step stale relative to what the
+  420 :     // checkpoint ended up holding, so the truly-final row before an early
+  421 :     // exit (tmaxCutoff, a bisection FATAL) would never reach
+  422 :     // transient_3d_slit.csv at all. Voltage/Hall-probe diagnostics still
+  423 :     // reflect the electrical solve computed from the step's STARTING
+  424 :     // temperature (the model's existing staggered-scheme convention,
+  425 :     // unchanged) -- only Tmax/TmaxLeft/TmaxRight need the post-solve,
+  426 :     // just-committed state.
+  427 :     real TmaxLeft = T(xHeatC,yCuTop,zLeftRep);
+  428 :     real TmaxRight = T(xHeatC,yCuTop,zRightRep);
+  429 :     // I0w (used above, in the solve and the electrical/voltage sub-solve)
+  430 :     // is deliberately evaluated at the PRE-increment t -- an explicit,
+  431 :     // frozen-coefficient source consistent with kfun/rhocpfun/Told, same
+  432 :     // convention as fracLeft/voltages below. But I0 itself is an exactly-
+  433 :     // known, purely time-driven function (no solve involved) -- there is
+  434 :     // no reason to log a stale value for it. I0Now re-evaluates I0ofT at
+  435 :     // the now-current (post-increment) t so the logged "I0" column
+  436 :     // actually matches the timestamp it's printed against. Ported from
+  437 :     // electrothermal/step_3d_slit_transient_diag.edp's "fix write lag
+  438 :     // issue" -- see that track's CLAUDE.md for where it was first found
+  439 :     // (r1p26's CSV showed I0=0 at its very first row because that row's
+  440 :     // I0w was I0ofT(0) from the ramp's true start).
+  441 :     real I0Now = I0ofT(t);
+  442 :     cout << "t="<<t<<"s I0="<<I0Now<<" Tmax="<<T[].max<<" TmaxL="<<TmaxLeft<<" TmaxR="<<TmaxRight<<" fracLeft="<<fracLeft << endl;
+  443 :     fout << t << "," << I0Now << "," << T[].max << "," << TmaxLeft << "," << TmaxRight << "," << fracLeft << "\n";
+  444 : 
+  445 :     real tDiagStart = clock();
+  446 :     diagAllTapVoltages(diagVL, diagVR);
+  447 :     real VclPlus = 0.0;
+  448 :     real VclMinus = diagVcum(Lx, -1);   // == diagVcum(Lx,+1) by the slit's equal-voltage-drop closure condition
+  449 :     // (I0Now above is the one exception to "diagnostics reflect the
+  450 :     // step's starting state" -- it's not re-derived from a solve, just
+  451 :     // re-evaluating the same closed-form ramp function at the correct
+  452 :     // time, so there's no such tradeoff for it.)
+  453 :     fdiag << t << "," << I0Now << "," << T[].max << "," << fracLeft << "," << VclPlus << "," << VclMinus;
+  454 :     for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVL[i];
+  455 :     for (int i=0;i<nTapsPerSide;i++) fdiag << "," << diagVR[i];
+  456 :     for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagLeft);
+  457 :     for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagRight);
+  458 :     real BatHallLeft = interp1(xSample, Bleft, nxs+1, xHall);
+  459 :     real BatHallRight = interp1(xSample, Bright, nxs+1, xHall);
+  460 :     fdiag << "," << BatHallLeft << "," << BatHallRight << "\n";
+  461 :     real tDiag = clock() - tDiagStart;
+  462 : 
+  463 :     real tStepTotal = clock() - tStepStart;
+  464 :     cout << "TIMING (s): Bfield=" << tBfield << "  electrical=" << tElectrical
+  465 :          << "  diagnostics=" << tDiag << "  fieldAssign=" << tFields << "  heatSolve=" << tHeatSolve
+  466 :          << "  bisections=" << bisectCount << "  ||  stepTotal=" << tStepTotal << endl;
+  467 : 
+  468 :     // Checkpoint after EVERY physical step, not just once at invocation
+  469 :     // end -- ported from electrothermal's identical fix, now actually
+  470 :     // relevant here too since -steps-per-invocation can exceed 1. Without
+  471 :     // this, a crash/preemption partway through a multi-step invocation
+  472 :     // would leave the checkpoint behind the CSV rows already written,
+  473 :     // and --resume (once this workflow has one) would re-write
+  474 :     // duplicate/overlapping t rows. Mesh-rebuild amortization (the reason
+  475 :     // for -steps-per-invocation>1) is unaffected -- the mesh is only
+  476 :     // built once per invocation regardless of how often this (cheap)
+  477 :     // checkpoint file is rewritten.
+  478 :     {
+  479 :       ofstream fchkOut(outPrefix+"ckpt_3d_slit_transient.txt");
+  480 :       fchkOut.precision(12);
+  481 :       fchkOut << t << "\n";
+  482 :       for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+  483 :       for (int i=0;i<=nxs;i++) fchkOut << Earr[i] << "\n";
+  484 :       for (int i=0;i<=nxs;i++) fchkOut << ElArr[i] << "\n";
+  485 :       for (int i=0;i<=nxs;i++) fchkOut << ErArr[i] << "\n";
+  486 :     }
+  487 :   }
+  488 :   if (T[].max >= tmaxCutoff) cout << "Tmax cutoff " << tmaxCutoff << "K reached (Tmax="
+  489 :        << T[].max << "K) -- stopping early, " << (maxStepsThisRun-step)
+  490 :        << " step(s) skipped this invocation" << endl;
+  491 : }
+  492 : cout << "Saved checkpoint at t="<<t<<"s" << endl;
+  493 : cout << "[profile] totalInvocation=" << (clock()-tInvocationStart) << "s" << endl;
+  494 :  sizestack + 1024 =13368  ( 12344 )
+
+  -- Cube  nv=87870 nt=487200 nbe=26048 kind= 6
+  -- Build Nodes/DF on mesh :   n.v. 87870, n. elmt. 487200, n b. elmt. 26048
+     nb of Nodes 487200    nb of DoF   487200  DFon=0001
+  -- FESpace: Nb of Nodes 487200 Nb of DoF 487200
+[profile] meshBuild=24.526s materialsLoad=0.002041s
+  -- FESpace: Nb of Nodes 87870 Nb of DoF 87870
+  -- Build Nodes/DF on mesh :   n.v. 87870, n. elmt. 487200, n b. elmt. 26048
+     nb of Nodes 487200    nb of DoF   487200  DFon=0001
+  -- FESpace: Nb of Nodes 487200 Nb of DoF 487200
+Resumed at t=11.0336s Tmax=85.668
+exec: test -s runs/r0p7/diagnostics_3d_slit.csv
+  -- Solve : 
+          min 77  max 85.3567
+t=11.0436s I0=217.672 Tmax=85.3567 TmaxL=85.3239 TmaxR=77.3712 fracLeft=0.310731
+TIMING (s): Bfield=11.8526  electrical=80.5892  diagnostics=0.58111  fieldAssign=194.819  heatSolve=12.4193  bisections=0  ||  stepTotal=300.262
+  -- Solve : 
+          min 77  max 85.0743
+t=11.0536s I0=217.672 Tmax=85.0743 TmaxL=85.0425 TmaxR=77.3802 fracLeft=0.323873
+TIMING (s): Bfield=12.5113  electrical=79.3752  diagnostics=0.591884  fieldAssign=209.604  heatSolve=12.5259  bisections=0  ||  stepTotal=314.609
+  -- Solve : 
+          min 77  max 84.8165
+t=11.0636s I0=217.672 Tmax=84.8165 TmaxL=84.7856 TmaxR=77.3887 fracLeft=0.335166
+TIMING (s): Bfield=11.7137  electrical=86.2434  diagnostics=0.598111  fieldAssign=209.348  heatSolve=12.6106  bisections=0  ||  stepTotal=320.515
+  -- Solve : 
+          min 77  max 84.58
+t=11.0736s I0=217.672 Tmax=84.58 TmaxL=84.55 TmaxR=77.3969 fracLeft=0.344989
+TIMING (s): Bfield=12.5356  electrical=82.3528  diagnostics=0.618631  fieldAssign=205.565  heatSolve=12.7941  bisections=0  ||  stepTotal=313.866
+  -- Solve : 
+          min 77  max 84.3621
+t=11.0836s I0=217.672 Tmax=84.3621 TmaxL=84.3329 TmaxR=77.4048 fracLeft=0.353627
+TIMING (s): Bfield=12.1706  electrical=85.7101  diagnostics=0.55994  fieldAssign=204.253  heatSolve=14.1105  bisections=0  ||  stepTotal=316.804
+  -- Solve : 
+          min 77  max 84.1603
+t=11.0936s I0=217.672 Tmax=84.1603 TmaxL=84.1319 TmaxR=77.4123 fracLeft=0.361294
+TIMING (s): Bfield=12.6505  electrical=87.1347  diagnostics=0.733233  fieldAssign=218.351  heatSolve=15.0258  bisections=0  ||  stepTotal=333.896
+  -- Solve : 
+          min 77  max 83.9728
+t=11.1036s I0=217.672 Tmax=83.9728 TmaxL=83.9451 TmaxR=77.4196 fracLeft=0.368153
+TIMING (s): Bfield=14.5671  electrical=91.3666  diagnostics=0.578896  fieldAssign=216.744  heatSolve=12.8889  bisections=0  ||  stepTotal=336.145
+  -- Solve : 
+          min 77  max 83.6445
+t=11.1236s I0=217.672 Tmax=83.6445 TmaxL=83.6182 TmaxR=77.4333 fracLeft=0.374334
+TIMING (s): Bfield=12.7189  electrical=87.408  diagnostics=0.464254  fieldAssign=208.936  heatSolve=11.7134  bisections=0  ||  stepTotal=321.241
+  -- Solve : 
+          min 77  max 83.3531
+t=11.1436s I0=217.672 Tmax=83.3531 TmaxL=83.328 TmaxR=77.4461 fracLeft=0.384367
+TIMING (s): Bfield=11.7698  electrical=82.6613  diagnostics=0.561097  fieldAssign=195.291  heatSolve=14.4452  bisections=0  ||  stepTotal=304.729
+  -- Solve : 
+          min 77  max 83.0923
+t=11.1636s I0=217.672 Tmax=83.0923 TmaxL=83.0683 TmaxR=77.4582 fracLeft=0.393232
+TIMING (s): Bfield=11.6709  electrical=80.6428  diagnostics=0.567567  fieldAssign=209.175  heatSolve=14.2833  bisections=0  ||  stepTotal=316.34
+  -- Solve : 
+          min 77  max 82.8572
+t=11.1836s I0=217.672 Tmax=82.8572 TmaxL=82.8342 TmaxR=77.4697 fracLeft=0.40084
+TIMING (s): Bfield=11.7271  electrical=91.6925  diagnostics=0.638968  fieldAssign=215.08  heatSolve=13.311  bisections=0  ||  stepTotal=332.45
+  -- Solve : 
+          min 77  max 82.6439
+t=11.2036s I0=217.672 Tmax=82.6439 TmaxL=82.6218 TmaxR=77.4806 fracLeft=0.407434
+TIMING (s): Bfield=12.7138  electrical=89.506  diagnostics=0.624497  fieldAssign=218.69  heatSolve=12.651  bisections=0  ||  stepTotal=334.186
+  -- Solve : 
+          min 77  max 82.4493
+t=11.2236s I0=217.672 Tmax=82.4493 TmaxL=82.428 TmaxR=77.491 fracLeft=0.413206
+TIMING (s): Bfield=12.9911  electrical=89.7313  diagnostics=0.612661  fieldAssign=220.096  heatSolve=13.5849  bisections=0  ||  stepTotal=337.016
+  -- Solve : 
+          min 77  max 82.2708
+t=11.2436s I0=217.672 Tmax=82.2708 TmaxL=82.2503 TmaxR=77.5009 fracLeft=0.418302
+TIMING (s): Bfield=13.3913  electrical=91.1157  diagnostics=0.595971  fieldAssign=215.35  heatSolve=13.5614  bisections=0  ||  stepTotal=334.015
+  -- Solve : 
+          min 77  max 82.1063
+t=11.2636s I0=217.672 Tmax=82.1063 TmaxL=82.0865 TmaxR=77.5104 fracLeft=0.422833
+TIMING (s): Bfield=13.2465  electrical=89.5508  diagnostics=0.632086  fieldAssign=206.964  heatSolve=13.4114  bisections=0  ||  stepTotal=323.805
+  -- Solve : 
+          min 77  max 81.9541
+t=11.2836s I0=217.672 Tmax=81.9541 TmaxL=81.935 TmaxR=77.5195 fracLeft=0.426891
+TIMING (s): Bfield=12.9737  electrical=83.2412  diagnostics=0.625457  fieldAssign=204.373  heatSolve=13.7782  bisections=0  ||  stepTotal=314.992
+  -- Solve : 
+          min 77  max 81.8128

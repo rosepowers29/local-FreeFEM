@@ -66,6 +66,43 @@ func real sigmaScB(real Emag, real Tl, real Bmag){
   return min(scTerm, sigmaMax) + sigmaRebco;
 }
 
+// ---- Anisotropic Kim model: Jc(B,T) = Jc(T) / (1 + sqrt(k^2*Bpar^2 + Bperp^2)/B0)^alpha ----
+// LITERATURE VALUES (2026-09-25), same source as B0kim: Loic Queval et al
+// 2016 Supercond. Sci. Technol. 29 024007. NOT YET WIRED into this
+// script's active electrical solve (still isotropic-only, below) -- this
+// is infrastructure built ahead of switching over, once the isotropic
+// B0=0.04265 verification (in flight, see Bfield/CLAUDE.md) lands. See
+// "Anisotropic Kim model infrastructure" in that file for what's built
+// vs. what activation still requires.
+//
+// Bperp/Bpar mapping onto THIS mesh's actual axes -- confirmed explicitly
+// with the user rather than assumed, since getting this backwards would
+// be a silent, plausible-looking bug: current always flows in the mesh's
+// x (tape length), so Biot-Savart from it has NO x-component by
+// construction (dl x r for dl=x-hat always lands in the y-z plane) --
+// the only two components that ever exist here are the mesh's y
+// (layer-stack/THICKNESS direction = c-axis = perpendicular to the
+// tape's broad face) and z (tape-WIDTH direction = ab-plane = parallel
+// to the tape's broad face). Standard REBCO anisotropy gives the
+// perpendicular/c-axis component full weight (it suppresses Jc far more)
+// and down-weights the parallel/ab-plane component by k<1 -- so
+// Bperp = this mesh's y-component (full weight), Bpar = this mesh's
+// z-component (k-weighted).
+real kAniso = 0.29515;
+real alphaKim = 0.7;
+
+func real JcTBAniso(real Tl, real Bperp, real Bpar){
+  real Beff = sqrt(kAniso^2*Bpar^2 + Bperp^2);
+  return JcT(Tl) / (1.0 + Beff/B0kim)^alphaKim;
+}
+func real sigmaScBAniso(real Emag, real Tl, real Bperp, real Bpar){
+  real Estab = max(abs(Emag), Einit);
+  real JcVal = JcTBAniso(Tl, Bperp, Bpar);
+  real nVal  = nT(Tl);   // Kim model here only suppresses Jc, not n -- same simplification as the isotropic version
+  real scTerm = (JcVal/Estab) * (Estab/E0)^(1.0/nVal);
+  return min(scTerm, sigmaMax) + sigmaRebco;
+}
+
 // ---- sheet geometry (all derived from the real mesh-module constants,
 // nothing hardcoded) ----
 real yCuBotSheet = tCuB/2.0;
@@ -205,7 +242,20 @@ func real[int] biotSheetYConstExcludeNear(real px,real py,real pz, real ySheet, 
 // compound across timesteps, since nothing here is itself persisted.
 real mu0 = 4*pi*1e-7;
 
-func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
+// ByLeftOut/ByRightOut/BzLeftOut/BzRightOut: the same Biot-Savart pass's
+// two field components (mesh y = perpendicular/c-axis, mesh z =
+// parallel/ab-plane -- see the anisotropic Kim model comment above),
+// output ALONGSIDE the existing |B| magnitude rather than replacing it,
+// so the isotropic path's output (BleftOut/BrightOut) is byte-for-byte
+// unchanged and every existing call site keeps working unmodified.
+// Computed once here, not duplicated in a second pass, since this
+// function is already one of the more expensive per-step costs (see
+// [profile] Bfield=... in step_3d_slit_transient_bfield.edp's TIMING
+// line).
+func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut,
+                            real[int] &ByLeftOut, real[int] &ByRightOut,
+                            real[int] &BzLeftOut, real[int] &BzRightOut,
+                            int nSub){
   real[int] KcuBotL(nSub), KcuBotR(nSub), KcuTopL(nSub), KcuTopR(nSub);
   real[int] KcuLW(nSub), KcuRW(nSub);
   real[int] KagbL(nSub), KagbR(nSub), KhastL(nSub), KhastR(nSub), KscL(nSub), KscR(nSub), KagtL(nSub), KagtR(nSub);
@@ -267,7 +317,8 @@ func int computeSelfFieldB(real[int] &BleftOut, real[int] &BrightOut, int nSub){
       real Hz = hCuBotL[2]+hCuBotR[2]+hCuTopL[2]+hCuTopR[2]+hCuLW[2]+hCuRW[2]
               + hAgbL[2]+hAgbR[2]+hHastL[2]+hHastR[2]+hScL[2]+hScR[2]+hAgtL[2]+hAgtR[2];
       real Hmag = sqrt(Hy^2+Hz^2);
-      if (side<0) BleftOut[i]=mu0*Hmag; else BrightOut[i]=mu0*Hmag;
+      if (side<0){ BleftOut[i]=mu0*Hmag; ByLeftOut[i]=mu0*Hy; BzLeftOut[i]=mu0*Hz; }
+      else       { BrightOut[i]=mu0*Hmag; ByRightOut[i]=mu0*Hy; BzRightOut[i]=mu0*Hz; }
     }
   }
   return 0;
@@ -328,6 +379,53 @@ func real solveEHalfB(real TcuShell, real TagB, real THast, real Tsc, real TagT,
   }
   real Ef=exp(0.5*(logElo+logEhi));
   real relErr=abs(ItotHalfB(Ef,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bmag)-Itarget)/max(Itarget,1e-30);
+  assert(relErr<=1e-3);
+  return Ef;
+}
+
+// ---- B-aware current-sharing bisection, ANISOTROPIC variant: identical
+// structure to ItotFullB/solveEFullB and ItotHalfB/solveEHalfB above, but
+// taking separate Bperp/Bpar components (not a single Bmag) and using
+// sigmaScBAniso. NOT YET CALLED anywhere in the active step script -- see
+// Bfield/CLAUDE.md's "Anisotropic Kim model infrastructure" for what
+// activation still requires.
+func real ItotFullBAniso(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT, real Bperp, real Bpar){
+  return shellAreaFull*(E/rhoCu(TcuShell)) + tAgB*coreWidth*(E/rhoAg(TagB))
+       + tSub*coreWidth*(E/rhoHast(THast))
+       + tSc*coreWidth*sigmaScBAniso(E,Tsc,Bperp,Bpar)*E + tAgT*coreWidth*(E/rhoAg(TagT));
+}
+func real solveEFullBAniso(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget, real Bperp, real Bpar){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0=4.0; int guard=0;
+  while (ItotFullBAniso(Ehi0,TcuShell,TagB,THast,Tsc,TagT,Bperp,Bpar) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  real logElo=log(1e-30), logEhi=log(Ehi0);
+  for(int it=0;it<50;it++){
+    real logEmid=0.5*(logElo+logEhi);
+    real Emid=exp(logEmid);
+    if (ItotFullBAniso(Emid,TcuShell,TagB,THast,Tsc,TagT,Bperp,Bpar) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  }
+  real Ef=exp(0.5*(logElo+logEhi));
+  real relErr=abs(ItotFullBAniso(Ef,TcuShell,TagB,THast,Tsc,TagT,Bperp,Bpar)-Itarget)/max(Itarget,1e-30);
+  assert(relErr<=1e-3);
+  return Ef;
+}
+func real ItotHalfBAniso(real E, real TcuShell, real TagB, real THast, real Tsc, real TagT, real shellA, real cw, real Bperp, real Bpar){
+  return shellA*(E/rhoCu(TcuShell)) + tAgB*cw*(E/rhoAg(TagB))
+       + tSub*cw*(E/rhoHast(THast))
+       + tSc*cw*sigmaScBAniso(E,Tsc,Bperp,Bpar)*E + tAgT*cw*(E/rhoAg(TagT));
+}
+func real solveEHalfBAniso(real TcuShell, real TagB, real THast, real Tsc, real TagT, real Itarget, real shellA, real cw, real Bperp, real Bpar){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0=4.0; int guard=0;
+  while (ItotHalfBAniso(Ehi0,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bperp,Bpar) < Itarget && guard<40){ Ehi0*=2.0; guard++; }
+  real logElo=log(1e-30), logEhi=log(Ehi0);
+  for(int it=0;it<50;it++){
+    real logEmid=0.5*(logElo+logEhi);
+    real Emid=exp(logEmid);
+    if (ItotHalfBAniso(Emid,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bperp,Bpar) < Itarget) logElo=logEmid; else logEhi=logEmid;
+  }
+  real Ef=exp(0.5*(logElo+logEhi));
+  real relErr=abs(ItotHalfBAniso(Ef,TcuShell,TagB,THast,Tsc,TagT,shellA,cw,Bperp,Bpar)-Itarget)/max(Itarget,1e-30);
   assert(relErr<=1e-3);
   return Ef;
 }

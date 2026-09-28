@@ -79,6 +79,31 @@ condor_submit sweep.sub
 condor_q                                               # watch progress
 ```
 
+`ratios.txt` now has a 4th column, `aniso` (`0`=isotropic, `1`=anisotropic
+Kim model — `sweep.sub` forwards it as `--aniso $(aniso)` to
+`run_bfield_transient.py`, which forwards it to the `.edp` as `-aniso`;
+see `../CLAUDE.md`'s "Anisotropic Kim model infrastructure"). Coupling
+stays lagged in both cases — `-aniso` only selects which Jc(B,T)
+suppression law consumes that lagged B, not whether B is lagged.
+
+To launch an **anisotropic confirmation pair** alongside ratios already
+run isotropic — `make_ratios_list.py --aniso` writes `aniso=1` and
+suffixes every label with `-aniso`, so the runs land in their own
+`runs/<label>-aniso/` and can't collide with the existing isotropic
+`runs/<label>/`:
+
+```bash
+python3 make_ratios_list.py --aniso 0.7 > ratios.txt
+python3 make_ratios_list.py --aniso --runaway-tmax 250 1.2 >> ratios.txt
+# (match runaway_tmax to whatever the isotropic run used, e.g. r1p2's 250 --
+#  make_ratios_list.py doesn't carry ramp-rate/ramp-dt overrides; if the
+#  isotropic run used non-default -ramprate/-rampdt, add
+#  --ramp-rate/--ramp-dt to sweep.sub's `arguments` line to match, or run
+#  that one pair manually via run_bfield_transient.py instead of Condor)
+mkdir -p logs
+condor_submit sweep.sub
+```
+
 Once every job finishes, collect results into the normal `runs/` tree —
 manual, not a Condor `transfer_output_remaps`, same reasoning as
 electrothermal (can't verify that syntax against this pool without

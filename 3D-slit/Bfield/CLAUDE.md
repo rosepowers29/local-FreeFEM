@@ -153,6 +153,80 @@ of flags `electrothermal/step_3d_slit_transient_diag.edp` grew for
   syntax-correct-by-construction but not yet physically validated the way
   electrothermal's copy has been.
 
+## Anisotropic Kim model infrastructure (built, not yet activated)
+
+Built 2026-09-25, while the isotropic `B0=0.04265` verification jobs
+(below) are in flight on the remote Condor pool — deliberately
+**additive only**, so nothing here can affect those already-submitted,
+already-packaged runs.
+
+Model: `Jc(B,T) = Jc(T) / (1 + sqrt(k²·Bpar² + Bperp²)/B0)^α`, with
+`k=0.29515`, `α=0.7`, same source as `B0kim`: Loic Queval et al 2016
+Supercond. Sci. Technol. 29 024007.
+
+**Bperp/Bpar coordinate mapping — confirmed explicitly with the user,
+not assumed** (getting this backwards would be a silent, plausible-
+looking bug, exactly the class this repo's history has been burned by
+before — see root `CLAUDE.md`'s region-labeling warning). The formula's
+`Bx`/`By` are generic tape-local axes (parallel/perpendicular to the
+tape's broad face), not this mesh's literal x/y/z. Current always flows
+in the mesh's `x` (tape length), so Biot-Savart from it has NO
+x-component by construction — the only two components that ever exist
+here are the mesh's `y` (layer-stack/thickness direction = c-axis =
+perpendicular to the broad face) and `z` (tape-width direction = ab-plane
+= parallel to the broad face). Standard REBCO anisotropy gives the
+perpendicular/c-axis component full weight and down-weights the
+parallel/ab-plane component by `k<1` — so **`Bperp` = mesh `y`-component
+(full weight), `Bpar` = mesh `z`-component (`k`-weighted)**.
+
+What's built, all in `bfield_3d_slit.idp`:
+- `computeSelfFieldB` now outputs the component-wise fields
+  (`ByLeft`/`ByRight`/`BzLeft`/`BzRight`) alongside the existing `|B|`
+  magnitude (`Bleft`/`Bright`), from the same single Biot-Savart pass —
+  not a duplicated second pass. The isotropic output is byte-for-byte
+  unchanged; every existing isotropic call site keeps working unmodified.
+- `JcTBAniso`/`sigmaScBAniso`: the anisotropic Jc/conductivity functions,
+  parallel to the existing `JcTB`/`sigmaScB`.
+- `ItotFullBAniso`/`solveEFullBAniso`/`ItotHalfBAniso`/`solveEHalfBAniso`:
+  the anisotropic current-sharing bisection functions, parallel to the
+  existing `ItotFullB`/`solveEFullB`/`ItotHalfB`/`solveEHalfB`, taking
+  separate `Bperp`/`Bpar` arguments instead of one `Bmag`.
+
+**Activated 2026-09-28** via a runtime toggle (the second option above,
+not a straight swap): `step_3d_slit_transient_bfield.edp` now takes
+**`-aniso`** (`getARGV("-aniso", 0)`, default `0` = isotropic, unchanged
+behavior when unflagged). All 5 call sites that used to call
+`solveEFullB`/`solveEHalfB` unconditionally (the outside-slit per-x loop,
+`VLeftTotal`/`VRightTotal`'s two calls each, and the final
+`ElArr`/`ErArr` assignment) now branch on `useAniso` via FreeFEM's
+ternary operator, calling the `*BAniso` variant with `ByLeft[i]`/
+`BzLeft[i]` (or `ByRight`/`BzRight`) in place of `Bleft[i]`/`Bright[i]`
+when set. `run_bfield_transient.py` grew a matching `--aniso {0,1}` CLI
+flag (forwarded as `-aniso`), and the Condor chain
+(`condor/make_ratios_list.py --aniso`, `condor/sweep.sub`'s `aniso`
+queue column) can launch an anisotropic confirmation sweep alongside an
+isotropic one without label collisions — see `condor/README.md`.
+
+Chose the toggle over a straight swap specifically so the pending
+isotropic-vs-anisotropic confirmation comparison (see "Isotropic
+verification before anisotropic Kim model" below) stays a clean,
+single-variable change, decoupled from the separate self-consistent
+(non-lagged) B solve now planned as a follow-on (decided 2026-09-28,
+not yet started — see the lagged-coupling oscillation artifact found in
+`r1p2`'s Hall-probe data near `Tc`, session history) — the anisotropic
+confirmation runs deliberately still use the existing LAGGED coupling,
+not a moving target.
+
+**Verified**: `-aniso 0` reproduces this script's exact prior output
+(confirmed byte-identical against the pre-toggle baseline), and `-aniso
+1` runs a real invocation end-to-end (`Ok: Normal End`) exercising the
+`*BAniso` call sites for the first time — see the Docker verification
+run in this session's history for the actual numbers. **Still open**:
+no real Condor run comparing isotropic vs. anisotropic *outcomes*
+(Tmax/fracLeft/H1/H2 over a full transient) has landed yet — that's the
+confirmation pair this toggle exists to enable, not something the
+syntax/wiring check above establishes on its own.
+
 ## Isotropic verification before anisotropic Kim model
 
 Decided 2026-09-25, when a literature-informed `B0` value became
@@ -173,11 +247,18 @@ anisotropic Jc(B,θ) model straight away. Two reasons:
   of BOTH an unvalidated baseline AND a just-changed suppression scale
   would make a weird result hard to attribute to either change.
 
-**Next step**: a real run reaching nonzero current/self-field (past the
-ramp's opening steps) with the corrected isotropic `B0`, checking that
-`H1`/`H2` (Hall-probe self-field diagnostics) and the resulting
-current-sharing behavior are physically sane, before starting on
-anisotropy.
+**Landed 2026-09-25/26**: two real Condor runs, `r0p7` (ratio=0.7,
+`reached_end_deviated`) and `r1p2` (ratio=1.2, `runaway`), both reaching
+real nonzero self-field past the ramp's opening steps and producing
+physically sane `H1`/`H2` traces (plotted via
+`../shared/plot_diagnostics_3d_slit.py`) alongside a real, characterized
+lagged-coupling oscillation artifact near `Tc` in `r1p2` — isotropic
+verification's goal met. **Next step (now in progress, 2026-09-28)**:
+the anisotropic confirmation pair (`-aniso 1`, see "Anisotropic Kim
+model infrastructure" above) at the same ratios, still under the
+existing lagged coupling — a separate, non-lagged self-consistent B
+solve is planned afterward as its own follow-on, not bundled into this
+comparison.
 
 ## I0 write-lag fix (ported from `electrothermal/`'s "fix write lag issue")
 
