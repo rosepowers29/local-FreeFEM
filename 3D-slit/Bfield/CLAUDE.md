@@ -307,6 +307,139 @@ still `77` throughout as expected this early.
   bisection verification carried before real-hardware exposure found
   `r1p36`/`r1p83`/`r1p474`.
 
+## Self-consistent (non-lagged) B<->E Picard solve
+
+Built 2026-09-28, once the isotropic-vs-anisotropic confirmation pair
+(above) had landed and a real, characterized artifact was found in
+`r1p2`: as `Tmax` approaches `Tc` during the above-`Ic` ramp phase,
+`H1`/`H2` genuinely oscillate step-to-step. Mechanism: this step's
+(lagged) B suppresses this step's Jc, which shifts this step's E, which
+becomes *next* step's lagged B — a one-step-delayed feedback loop that
+rings once the loop gain is high enough, worsened by the corrected,
+steeper `B0=0.04265` suppression curve.
+
+**`-selfconsistent 1`** replaces the across-timestep lag with a
+within-timestep self-consistent (Picard) solve: at the frozen entering
+`T`/`I0w`, the self-field + electrical solve block (`computeSelfFieldB`
+through the final `ElArr`/`ErArr` assignment) now runs inside a `for`
+loop, iterating {compute B from current E} → {re-solve electrical for E
+from that B} until E stops changing (or `-maxpicarditer` is hit).
+Default `0` (lagged) runs this loop exactly once — today's exact
+behavior, byte-identical when unflagged (verified: `I0=21.7672 Tmax=77`
+at `t=0.05s`, matching the established baseline).
+
+**New flags** (all `getARGV`, matching this file's existing convention):
+`-selfconsistent` (default `0`), `-maxpicarditer` (default `20`),
+`-picardtol` (default `1e-3`), `-picardomega` (default `0.5`).
+
+**Deliberately NOT nested inside the `dtTry` bisection loop.** The
+self-field/electrical sub-problem depends only on the frozen entering
+`T` and `I0w` — neither depends on `dt` at all (`dt` first enters
+downstream, in `heatStep`'s own diffusion solve). Retrying this
+sub-problem at a smaller `dtTry` would hand it identical inputs and
+cannot change whether it has/finds a fixed point — under-relaxation
+(`-picardomega`), not `dt`, is the only real lever against
+non-convergence here.
+
+**Convergence criterion**: max relative change in `Earr`/`ElArr`/`ErArr`
+between iterations (not `Bleft`/`Bright`) — E is what actually feeds
+`source`/Joule heating downstream, and is the output of the power-law-
+sensitive `sigmaScB` bisection right at the stiff Kim-model knee, so
+it's the more conservative gate; B (a spatial Biot-Savart integral)
+smooths that stiffness out and would risk declaring convergence early.
+Normalized by a **global** `max(maxE_this_iteration, E0)`
+(`E0=1.0e-4` V/m, `hts_materials.idp`'s 1 µV/cm criterion) — not a
+per-point previous-value denominator, which would blow up at any
+x-sample point sitting near zero (common during the ramp).
+
+**Under-relaxation + adaptive backtrack**: `Earr = omega*Earr_new +
+(1-omega)*Earr_old` before the next `computeSelfFieldB` call
+(`omega=0.5` default — pure Picard, `omega=1`, is exactly the case
+suspected to ring in the regime under investigation). If a given
+iteration's residual is *larger* than the previous one (diverging —
+the literal symptom under investigation), `omega` halves (floor `0.05`)
+for the rest of *that step's* loop only, resetting to the flag default
+at the start of every new physical step.
+
+**Non-convergence: logs a warning and proceeds, does NOT
+`assert(false)`.** A Picard non-convergence at a given `(T, I0w)` is
+deterministic (same mesh, same materials) — unlike the node-dependent
+UMFPACK issue `condor/sweep.sub`'s `on_exit_hold`/`periodic_release`
+retry mechanism (capped at 4 starts, then held indefinitely) was built
+for, retrying the identical invocation would fail identically every
+time. A hard assert here would burn all 4 retries re-attempting the
+same failing step, then silently stall the run under Condor hold with
+no further signal. Instead, hitting `-maxpicarditer` without converging
+logs a greppable `PICARD-NOT-CONVERGED` line and proceeds with the
+best-available under-relaxed E/B state — a bounded, one-step
+residual-error degradation, strictly better than an unattended sweep
+silently stalling.
+
+**Checkpoint format: unchanged.** `Earr`/`ElArr`/`ErArr` are still
+persisted every step, just reinterpreted as "last step's converged E,
+used as this step's Picard warm-start initial guess for iteration 0"
+rather than "the lagged value directly consumed."
+
+**Composability with `-aniso`**: the Picard loop just re-executes
+whichever `useAniso ? solveE*BAniso(...) : solveE*B(...)` branch is
+already selected each iteration — `-selfconsistent 1 -aniso 0/1` both
+work with no combinatorial special-casing, and `computeSelfFieldB`
+always computes both isotropic and anisotropic outputs from one
+Biot-Savart pass regardless, so there's no cost asymmetry. Verify the
+two rollouts one at a time before combining both in a real sweep, same
+discipline already applied to landing `-aniso` itself.
+
+**New diagnostics columns**: `diagnostics_3d_slit.csv` gained
+`picardIters`,`picardRelErr`, **always** emitted regardless of
+`-selfconsistent` (`picardIters=1`/`picardRelErr=-999` sentinel in
+lagged mode, matching this file's own `H1`/`H2`-style `-999`
+convention) — the header shape is keyed by file-existence-on-disk per
+run/label, not per-invocation flags, so making these columns
+conditional on the flag would risk silently corrupting the CSV if a run
+were ever re-invoked with a different flag mid-run. `TIMING` cout line
+also gained `picardIters=`/`picardOmegaFinal=`; `Bfield=`/`electrical=`
+now sum across all Picard iterations in the step, not just one pass.
+
+**Cost**: `computeSelfFieldB` (~13-16s/call under this sandbox's
+amd64-emulated Docker) dominates — the per-x electrical solve stays
+cheap (~0.02s) regardless of iteration count. So N Picard iterations
+cost roughly `N × 13-16s` extra emulated per step, layered before
+`heatStep` (~1000-1700s emulated/step, itself highly variable under
+Docker resource contention — see below). Real/native hardware is
+documented elsewhere in this repo as ~8-15x faster, but `heatStep`'s
+own cost shrinks by roughly the same factor, so the *relative*
+inflation from Picard iterations in the worst-case (near-`Tc`) window
+could be comparable on native hardware to what the emulated numbers
+suggest, not smaller — get a real wall-clock read before trusting
+`-maxpicarditer 20`'s cost on a full unattended sweep.
+
+**Verified** (Docker, this sandbox): `-selfconsistent 0` (default)
+reproduces the exact established baseline (`I0=21.7672 Tmax=77` at
+`t=0.05s`, `picardIters=1`, `picardRelErr=-999`) — zero regression to
+the unflagged path. `-selfconsistent 1 -aniso 0` runs a real invocation
+to `Ok: Normal End` from a fresh checkpoint, correctly threading the
+new diagnostics columns (`picardIters=1`, `picardRelErr=0` — this
+first step has `I0w<=0` so both `solveEFullB`/`solveEHalfB`
+short-circuit to `E=0` identically every iteration, giving an exact
+zero residual; this is the same "first-step" edge case already
+documented under "Anisotropic Kim model infrastructure" above, not yet
+a real test of the iteration actually doing work).
+
+**Not yet verified — the actual point of this feature**: no real run
+has yet exercised the Picard loop with genuinely nonzero, non-trivial B
+(i.e. several steps into a real ramp), and no run has yet confirmed
+`H1`/`H2` stop oscillating in `r1p2`'s near-`Tc` window under
+`-selfconsistent 1` — that requires either re-running a ramp from
+scratch with the flag set (expensive under this sandbox's emulation;
+cheap on the user's native remote install) or restarting from `r1p2`'s
+actual on-disk final checkpoint (`t=18.48s`, already deep in runaway,
+`Tmax=423K` — a valid stress test of the Picard loop under an extreme
+state, but not a reproduction of the specific ringing window, since
+checkpoints aren't archived per-step and only the run's final state
+survived). **Next step**: run this real comparison on the remote
+install, where a full multi-step sequence is actually affordable, before
+trusting this feature beyond the smoke-test level above.
+
 ## Continuous-solve wrapper (`run_bfield_transient.py`)
 
 Ported from `electrothermal/run_transient.py` now that the step script

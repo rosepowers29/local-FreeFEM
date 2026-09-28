@@ -83,6 +83,13 @@ DEFAULT_MAX_JC_FRAC_CHANGE = 0.05
 # see bfield_3d_slit.idp). Coupling stays lagged either way -- this only
 # selects which Jc(B,T) suppression law the lagged B is fed into.
 DEFAULT_ANISO = 0
+# 0 = lagged B<->E coupling (original design), 1 = within-timestep
+# self-consistent (Picard) coupling -- see step_3d_slit_transient_bfield.edp's
+# -selfconsistent flag comment and Bfield/CLAUDE.md for the full design.
+DEFAULT_SELFCONSISTENT = 0
+DEFAULT_MAX_PICARD_ITER = 20
+DEFAULT_PICARD_TOL = 1e-3
+DEFAULT_PICARD_OMEGA = 0.5
 
 
 def ts():
@@ -211,7 +218,11 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             max_step_rise=DEFAULT_MAX_STEP_RISE,
             max_bisections=DEFAULT_MAX_BISECTIONS,
             max_jc_frac_change=DEFAULT_MAX_JC_FRAC_CHANGE,
-            aniso=DEFAULT_ANISO):
+            aniso=DEFAULT_ANISO,
+            selfconsistent=DEFAULT_SELFCONSISTENT,
+            max_picard_iter=DEFAULT_MAX_PICARD_ITER,
+            picard_tol=DEFAULT_PICARD_TOL,
+            picard_omega=DEFAULT_PICARD_OMEGA):
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -243,7 +254,11 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                                             "-maxsteprise", str(max_step_rise),
                                             "-maxbisections", str(max_bisections),
                                             "-maxjcfracchange", str(max_jc_frac_change),
-                                            "-aniso", str(int(aniso))],
+                                            "-aniso", str(int(aniso)),
+                                            "-selfconsistent", str(int(selfconsistent)),
+                                            "-maxpicarditer", str(max_picard_iter),
+                                            "-picardtol", str(picard_tol),
+                                            "-picardomega", str(picard_omega)],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
             # once steps_per_invocation > 1 -- see CLAUDE.md.
@@ -394,6 +409,22 @@ def main():
                         "suppression law fed by that lagged B "
                         f"(default: {DEFAULT_ANISO}). See bfield_3d_slit.idp's "
                         "\"Anisotropic Kim model infrastructure\".")
+    p.add_argument("--selfconsistent", type=int, choices=[0, 1], default=DEFAULT_SELFCONSISTENT,
+                   help="1 = within-timestep self-consistent (Picard) B<->E "
+                        "coupling, 0 = original lagged (across-timestep) "
+                        f"coupling (default: {DEFAULT_SELFCONSISTENT}). See "
+                        "step_3d_slit_transient_bfield.edp's -selfconsistent "
+                        "flag comment and Bfield/CLAUDE.md.")
+    p.add_argument("--max-picard-iter", type=int, default=DEFAULT_MAX_PICARD_ITER,
+                   help=f"Cap on Picard iterations per step when --selfconsistent 1 "
+                        f"(default: {DEFAULT_MAX_PICARD_ITER}).")
+    p.add_argument("--picard-tol", type=float, default=DEFAULT_PICARD_TOL,
+                   help=f"Relative-change tolerance on E that declares the Picard "
+                        f"loop converged (default: {DEFAULT_PICARD_TOL}).")
+    p.add_argument("--picard-omega", type=float, default=DEFAULT_PICARD_OMEGA,
+                   help=f"Starting under-relaxation factor for the Picard loop "
+                        f"(default: {DEFAULT_PICARD_OMEGA}); auto-halves (floor "
+                        f"0.05) within a step if the residual is diverging.")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
@@ -403,7 +434,8 @@ def main():
             args.steps_per_invocation, args.ramp_rate, args.ramp_dt,
             args.ramp_dt_above_ic, args.settle_tmax_max,
             args.max_step_rise, args.max_bisections, args.max_jc_frac_change,
-            args.aniso)
+            args.aniso, args.selfconsistent, args.max_picard_iter,
+            args.picard_tol, args.picard_omega)
     if summary["status"] in RETRY_WORTHY_STATUSES:
         sys.exit(1)
 

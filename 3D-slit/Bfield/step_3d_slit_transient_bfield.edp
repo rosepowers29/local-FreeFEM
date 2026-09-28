@@ -188,6 +188,33 @@ real tmaxCutoff = getARGV("-tmaxcutoff", 900.0);
 // reproduces this script's exact prior behavior when unflagged.
 int useAniso = getARGV("-aniso", 0);
 
+// -selfconsistent 1 replaces the LAGGED B<->E coupling above with a
+// within-timestep self-consistent (Picard) solve: at the frozen entering
+// T/I0w, iterate {compute B from current E} -> {solve electrical for new
+// E from that B} until E stops changing, before ever touching heatStep.
+// Default 0 (lagged) reproduces this script's exact prior behavior when
+// unflagged -- the loop below runs exactly once, with no residual check
+// or relaxation applied, in that case.
+//
+// Deliberately NOT nested inside the dtTry bisection while-loop further
+// below: the self-field/electrical sub-problem depends only on the
+// frozen entering T and I0w, neither of which depends on dt at all (dt
+// first enters downstream, in heatStep's own diffusion solve). Retrying
+// this sub-problem at a smaller dtTry would hand it the exact same
+// inputs and so cannot change whether it has/finds a fixed point --
+// under-relaxation (picardOmega below), not dt, is the only real lever
+// against non-convergence here. See Bfield/CLAUDE.md's "Self-consistent
+// (non-lagged) B<->E Picard solve" for the full reasoning (including why
+// non-convergence logs a warning and proceeds rather than asserting --
+// unlike heatStep's bisection failure, a Picard non-convergence at a
+// given (T,I0w) is deterministic, so retrying the identical invocation
+// under Condor's on_exit_hold/periodic_release would just fail the same
+// way every time instead of recovering).
+int useSelfConsistent = getARGV("-selfconsistent", 0);
+int maxPicardIter = getARGV("-maxpicarditer", 20);
+real picardTol = getARGV("-picardtol", 1e-3);
+real picardOmega0 = getARGV("-picardomega", 0.5);
+
 // CHECKPOINT FORMAT CHANGE: now also persists Earr/ElArr/ErArr, not just
 // t and T. This is required for computeSelfFieldB's lagged design to
 // actually work: it reads these arrays BEFORE this step's electrical
@@ -228,7 +255,7 @@ real t = 0.0;
     for (int i=0;i<nTapsPerSide;i++) fdiag << ",V2_" << (i+1);
     for (int i=0;i<nRTDsPerSide;i++) fdiag << ",RTD1_" << (i+1);
     for (int i=0;i<nRTDsPerSide;i++) fdiag << ",RTD2_" << (i+1);
-    fdiag << ",H1,H2\n";
+    fdiag << ",H1,H2,picardIters,picardRelErr\n";
   }
 
   int step = 0;
@@ -236,101 +263,170 @@ real t = 0.0;
     real tStepStart = clock();
     real I0w = I0ofT(t);
 
-    // Self-field B, computed from the CURRENT (about-to-be-overwritten)
-    // Earr/ElArr/ErArr and T -- i.e. the previous timestep's converged
-    // state -- then held fixed through this timestep's bisection below
-    // (the "lagged" coupling decision).
-    real tBstart = clock();
-    computeSelfFieldB(Bleft, Bright, ByLeft, ByRight, BzLeft, BzRight, nxs+1);
-    real tBfield = clock() - tBstart;
+    // Self-field B <-> electrical solve. LAGGED mode (-selfconsistent 0,
+    // default): this loop runs exactly once, computing B from the CURRENT
+    // (about-to-be-overwritten) Earr/ElArr/ErArr -- i.e. the previous
+    // timestep's converged state -- then holding it fixed through this
+    // timestep's electrical solve (the original "lagged" coupling
+    // decision). SELF-CONSISTENT mode (-selfconsistent 1): the loop
+    // repeats {compute B from current E} -> {re-solve electrical for E
+    // from that B} until E stops changing (relative to picardTol) or
+    // maxPicardIter is hit, at fixed entering T/I0w throughout -- see the
+    // -selfconsistent flag comment above and Bfield/CLAUDE.md for why this
+    // is NOT nested in the dtTry bisection loop below (dt-independent).
+    int picardOuterCap = useSelfConsistent ? maxPicardIter : 1;
+    real[int] EarrPrev(nxs+1), ElArrPrev(nxs+1), ErArrPrev(nxs+1);
+    bool picardConverged = true;
+    int picardItersUsed = 1;
+    real picardRelErrFinal = -999.0;
+    real omega = picardOmega0;
+    real picardRelErrPrev = 1e300;
+    real tBfieldTotal = 0.0, tElectricalTotal = 0.0;
+    real fracLeft = 0.5;
 
-    real tElecStart = clock();
-    // electrical: single channel outside slit range, split L/R inside.
-    // WITHIN the slit, El(x)/Er(x) are resolved PER-x (matching the
-    // outside-slit treatment) rather than sampled once at a single
-    // representative point and extended uniformly -- the heater creates a
-    // strongly localized hot spot, and a single point's local resistivity
-    // is not representative of the other ~178mm of slit length.
-    for (int i=0;i<=nxs;i++){
-      real xx = xSample[i];
-      if (xx < xSlitStart || xx > xSlitEnd){
-        real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep), THast=T(xx,yHastMid,zLeftRep),
-             Tsc=T(xx,yScmid,zLeftRep), TagT=T(xx,yAgTmid,zLeftRep);
-        Earr[i] = useAniso ? solveEFullBAniso(TcuShell,TagB,THast,Tsc,TagT, I0w, ByLeft[i], BzLeft[i])
-                            : solveEFullB(TcuShell,TagB,THast,Tsc,TagT, I0w, Bleft[i]);
-        ElArr[i] = 0; ErArr[i] = 0;
-      } else {
-        Earr[i] = 0;
-      }
-    }
+    for (int pIter=0; pIter<picardOuterCap; pIter++){
+      EarrPrev = Earr; ElArrPrev = ElArr; ErArrPrev = ErArr;
 
-    // Precompute local per-x temperatures within the slit range for both
-    // sides ONCE per timestep -- T is fixed during this algebraic
-    // current-split sub-solve, so there's no need to re-evaluate the FE
-    // field on every bisection iteration below.
-    real[int] TcuLx(nxs+1), TagBLx(nxs+1), THastLx(nxs+1), TscLx(nxs+1), TagTLx(nxs+1);
-    real[int] TcuRx(nxs+1), TagBRx(nxs+1), THastRx(nxs+1), TscRx(nxs+1), TagTRx(nxs+1);
-    int iSlitLo=-1, iSlitHi=-1;
-    for (int i=0;i<=nxs;i++){
-      real xx = xSample[i];
-      if (xx >= xSlitStart && xx <= xSlitEnd){
-        if (iSlitLo<0) iSlitLo=i;
-        iSlitHi=i;
-        TcuLx[i]=T(xx,yCuTop,zLeftRep);  TagBLx[i]=T(xx,yAgBmid,zLeftRep);  THastLx[i]=T(xx,yHastMid,zLeftRep);
-        TscLx[i]=T(xx,yScmid,zLeftRep);  TagTLx[i]=T(xx,yAgTmid,zLeftRep);
-        TcuRx[i]=T(xx,yCuTop,zRightRep); TagBRx[i]=T(xx,yAgBmid,zRightRep); THastRx[i]=T(xx,yHastMid,zRightRep);
-        TscRx[i]=T(xx,yScmid,zRightRep); TagTRx[i]=T(xx,yAgTmid,zRightRep);
-      }
-    }
+      real tBstart = clock();
+      computeSelfFieldB(Bleft, Bright, ByLeft, ByRight, BzLeft, BzRight, nxs+1);
+      tBfieldTotal += clock() - tBstart;
 
-    // Total voltage drop along each side = integral of the LOCAL field
-    // (current fixed at Il/Ir along the length, field varies with local T)
-    // over the slit's x-range, trapezoidal over the same x-sample grid used
-    // everywhere else.
-    func real VLeftTotal(real fracLeft){
-      real Il = fracLeft*I0w;
-      real sum = 0.0;
-      for (int i=iSlitLo;i<iSlitHi;i++){
-        real Ea = useAniso ? solveEHalfBAniso(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, ByLeft[i],  BzLeft[i])
-                            : solveEHalfB(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, Bleft[i]);
-        real Eb = useAniso ? solveEHalfBAniso(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, ByLeft[i+1],BzLeft[i+1])
-                            : solveEHalfB(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, Bleft[i+1]);
-        sum += 0.5*(Ea+Eb)*(xSample[i+1]-xSample[i]);
+      real tElecStart = clock();
+      // electrical: single channel outside slit range, split L/R inside.
+      // WITHIN the slit, El(x)/Er(x) are resolved PER-x (matching the
+      // outside-slit treatment) rather than sampled once at a single
+      // representative point and extended uniformly -- the heater creates a
+      // strongly localized hot spot, and a single point's local resistivity
+      // is not representative of the other ~178mm of slit length.
+      for (int i=0;i<=nxs;i++){
+        real xx = xSample[i];
+        if (xx < xSlitStart || xx > xSlitEnd){
+          real TcuShell=T(xx,yCuTop,zLeftRep), TagB=T(xx,yAgBmid,zLeftRep), THast=T(xx,yHastMid,zLeftRep),
+               Tsc=T(xx,yScmid,zLeftRep), TagT=T(xx,yAgTmid,zLeftRep);
+          Earr[i] = useAniso ? solveEFullBAniso(TcuShell,TagB,THast,Tsc,TagT, I0w, ByLeft[i], BzLeft[i])
+                              : solveEFullB(TcuShell,TagB,THast,Tsc,TagT, I0w, Bleft[i]);
+          ElArr[i] = 0; ErArr[i] = 0;
+        } else {
+          Earr[i] = 0;
+        }
       }
-      return sum;
-    }
-    func real VRightTotal(real fracLeft){
-      real Ir = (1-fracLeft)*I0w;
-      real sum = 0.0;
-      for (int i=iSlitLo;i<iSlitHi;i++){
-        real Ea = useAniso ? solveEHalfBAniso(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, ByRight[i],  BzRight[i])
-                            : solveEHalfB(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, Bright[i]);
-        real Eb = useAniso ? solveEHalfBAniso(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, ByRight[i+1],BzRight[i+1])
-                            : solveEHalfB(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, Bright[i+1]);
-        sum += 0.5*(Eb+Ea)*(xSample[i+1]-xSample[i]);
+
+      // Precompute local per-x temperatures within the slit range for both
+      // sides ONCE per Picard iteration -- T is fixed during this algebraic
+      // current-split sub-solve, so there's no need to re-evaluate the FE
+      // field on every bisection iteration below.
+      real[int] TcuLx(nxs+1), TagBLx(nxs+1), THastLx(nxs+1), TscLx(nxs+1), TagTLx(nxs+1);
+      real[int] TcuRx(nxs+1), TagBRx(nxs+1), THastRx(nxs+1), TscRx(nxs+1), TagTRx(nxs+1);
+      int iSlitLo=-1, iSlitHi=-1;
+      for (int i=0;i<=nxs;i++){
+        real xx = xSample[i];
+        if (xx >= xSlitStart && xx <= xSlitEnd){
+          if (iSlitLo<0) iSlitLo=i;
+          iSlitHi=i;
+          TcuLx[i]=T(xx,yCuTop,zLeftRep);  TagBLx[i]=T(xx,yAgBmid,zLeftRep);  THastLx[i]=T(xx,yHastMid,zLeftRep);
+          TscLx[i]=T(xx,yScmid,zLeftRep);  TagTLx[i]=T(xx,yAgTmid,zLeftRep);
+          TcuRx[i]=T(xx,yCuTop,zRightRep); TagBRx[i]=T(xx,yAgBmid,zRightRep); THastRx[i]=T(xx,yHastMid,zRightRep);
+          TscRx[i]=T(xx,yScmid,zRightRep); TagTRx[i]=T(xx,yAgTmid,zRightRep);
+        }
       }
-      return sum;
-    }
-    func real Vdiff(real fracLeft){
-      return VLeftTotal(fracLeft) - VRightTotal(fracLeft);
-    }
-    real flo=0.0, fhi=1.0;
-    if (I0w <= 0.0){ flo=0.5; fhi=0.5; }
-    else {
-      for(int it=0;it<30;it++){
-        real fmid=0.5*(flo+fhi);
-        if (Vdiff(fmid) < 0) flo=fmid; else fhi=fmid;
+
+      // Total voltage drop along each side = integral of the LOCAL field
+      // (current fixed at Il/Ir along the length, field varies with local T)
+      // over the slit's x-range, trapezoidal over the same x-sample grid used
+      // everywhere else.
+      func real VLeftTotal(real fracLeftArg){
+        real Il = fracLeftArg*I0w;
+        real sum = 0.0;
+        for (int i=iSlitLo;i<iSlitHi;i++){
+          real Ea = useAniso ? solveEHalfBAniso(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, ByLeft[i],  BzLeft[i])
+                              : solveEHalfB(TcuLx[i],  TagBLx[i],  THastLx[i],  TscLx[i],  TagTLx[i],  Il, leftShellArea, leftCoreWidth, Bleft[i]);
+          real Eb = useAniso ? solveEHalfBAniso(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, ByLeft[i+1],BzLeft[i+1])
+                              : solveEHalfB(TcuLx[i+1],TagBLx[i+1],THastLx[i+1],TscLx[i+1],TagTLx[i+1],Il, leftShellArea, leftCoreWidth, Bleft[i+1]);
+          sum += 0.5*(Ea+Eb)*(xSample[i+1]-xSample[i]);
+        }
+        return sum;
       }
+      func real VRightTotal(real fracLeftArg){
+        real Ir = (1-fracLeftArg)*I0w;
+        real sum = 0.0;
+        for (int i=iSlitLo;i<iSlitHi;i++){
+          real Ea = useAniso ? solveEHalfBAniso(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, ByRight[i],  BzRight[i])
+                              : solveEHalfB(TcuRx[i],  TagBRx[i],  THastRx[i],  TscRx[i],  TagTRx[i],  Ir, rightShellArea, rightCoreWidth, Bright[i]);
+          real Eb = useAniso ? solveEHalfBAniso(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, ByRight[i+1],BzRight[i+1])
+                              : solveEHalfB(TcuRx[i+1],TagBRx[i+1],THastRx[i+1],TscRx[i+1],TagTRx[i+1],Ir, rightShellArea, rightCoreWidth, Bright[i+1]);
+          sum += 0.5*(Eb+Ea)*(xSample[i+1]-xSample[i]);
+        }
+        return sum;
+      }
+      func real Vdiff(real fracLeftArg){
+        return VLeftTotal(fracLeftArg) - VRightTotal(fracLeftArg);
+      }
+      real flo=0.0, fhi=1.0;
+      if (I0w <= 0.0){ flo=0.5; fhi=0.5; }
+      else {
+        for(int it=0;it<30;it++){
+          real fmid=0.5*(flo+fhi);
+          if (Vdiff(fmid) < 0) flo=fmid; else fhi=fmid;
+        }
+      }
+      fracLeft = 0.5*(flo+fhi);
+      real IlFinal = fracLeft*I0w, IrFinal = (1-fracLeft)*I0w;
+      for (int i=iSlitLo;i<=iSlitHi;i++){
+        ElArr[i] = useAniso ? solveEHalfBAniso(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, ByLeft[i], BzLeft[i])
+                             : solveEHalfB(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, Bleft[i]);
+        ErArr[i] = useAniso ? solveEHalfBAniso(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, ByRight[i], BzRight[i])
+                             : solveEHalfB(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, Bright[i]);
+      }
+      tElectricalTotal += clock() - tElecStart;
+
+      picardItersUsed = pIter + 1;
+      if (!useSelfConsistent) break;   // exactly today's single-pass behavior
+
+      // Relative-change residual, computed on the RAW solve output BEFORE
+      // relaxation is applied below -- relaxing first would shrink the
+      // metric by omega and falsely declare convergence early. Normalized
+      // by a single GLOBAL max(|E|), not a per-point previous-value
+      // denominator: E0 (1uV/cm, hts_materials.idp) floors it so points
+      // that happen to sit near zero locally don't blow the ratio up.
+      real maxE = 0.0, maxDiff = 0.0;
+      for (int i=0;i<=nxs;i++){
+        maxE = max(maxE, abs(Earr[i])); maxDiff = max(maxDiff, abs(Earr[i]-EarrPrev[i]));
+        if (xSample[i]>=xSlitStart && xSample[i]<=xSlitEnd){
+          maxE = max(maxE, max(abs(ElArr[i]),abs(ErArr[i])));
+          maxDiff = max(maxDiff, max(abs(ElArr[i]-ElArrPrev[i]), abs(ErArr[i]-ErArrPrev[i])));
+        }
+      }
+      real picardRelErr = maxDiff / max(maxE, E0);
+      picardRelErrFinal = picardRelErr;
+      if (picardRelErr <= picardTol){ picardConverged = true; break; }
+
+      // Adaptive backtrack: if this iteration moved AWAY from convergence
+      // relative to the last one (the oscillation/ringing symptom this
+      // whole feature exists to fix), get more conservative for the rest
+      // of THIS step's loop only -- reset to picardOmega0 at the top of
+      // every new physical step rather than carrying a stiff step's
+      // caution forward into later, possibly well-behaved steps.
+      if (picardRelErr > picardRelErrPrev) omega = max(omega*0.5, 0.05);
+      picardRelErrPrev = picardRelErr;
+
+      Earr  = omega*Earr  + (1-omega)*EarrPrev;
+      ElArr = omega*ElArr + (1-omega)*ElArrPrev;
+      ErArr = omega*ErArr + (1-omega)*ErArrPrev;
+
+      if (pIter == maxPicardIter-1) picardConverged = false;
     }
-    real fracLeft = 0.5*(flo+fhi);
-    real IlFinal = fracLeft*I0w, IrFinal = (1-fracLeft)*I0w;
-    for (int i=iSlitLo;i<=iSlitHi;i++){
-      ElArr[i] = useAniso ? solveEHalfBAniso(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, ByLeft[i], BzLeft[i])
-                           : solveEHalfB(TcuLx[i],TagBLx[i],THastLx[i],TscLx[i],TagTLx[i], IlFinal, leftShellArea, leftCoreWidth, Bleft[i]);
-      ErArr[i] = useAniso ? solveEHalfBAniso(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, ByRight[i], BzRight[i])
-                           : solveEHalfB(TcuRx[i],TagBRx[i],THastRx[i],TscRx[i],TagTRx[i], IrFinal, rightShellArea, rightCoreWidth, Bright[i]);
+    if (useSelfConsistent && !picardConverged){
+      // Deliberately NOT assert(false): a Picard non-convergence at this
+      // (T,I0w) is deterministic (see the flag comment above), so unlike
+      // heatStep's bisection failure below, retrying this exact invocation
+      // under Condor would just fail the same way every time instead of
+      // recovering -- proceed with the best-available under-relaxed
+      // E/B state (bounded, one-step residual error) and surface it loudly
+      // instead of stalling the whole run.
+      cout << "PICARD-NOT-CONVERGED t=" << t << " relErr=" << picardRelErrFinal
+           << " tol=" << picardTol << " after " << picardItersUsed
+           << " iterations -- proceeding with best-available under-relaxed E/B." << endl;
     }
-    real tElectrical = clock() - tElecStart;
 
     real dt = dtCapped(t);
     if (dt <= 1e-9) break;
@@ -481,13 +577,22 @@ real t = 0.0;
     for (int i=0;i<nRTDsPerSide;i++) fdiag << "," << T(xRTD[i], yB7, zDiagRight);
     real BatHallLeft = interp1(xSample, Bleft, nxs+1, xHall);
     real BatHallRight = interp1(xSample, Bright, nxs+1, xHall);
-    fdiag << "," << BatHallLeft << "," << BatHallRight << "\n";
+    // picardIters/picardRelErr: ALWAYS emitted regardless of -selfconsistent
+    // (picardIters=1/picardRelErr=-999 in lagged mode, matching this file's
+    // own H1/H2 -999-sentinel convention) -- the CSV's header shape is keyed
+    // by file-existence-on-disk per run/label (diagCsvHasHeader above), not
+    // per-invocation flags, so making these columns conditional on the flag
+    // risks silently corrupting the file if a run were ever re-invoked with
+    // a different -selfconsistent value mid-run.
+    fdiag << "," << BatHallLeft << "," << BatHallRight
+          << "," << picardItersUsed << "," << picardRelErrFinal << "\n";
     real tDiag = clock() - tDiagStart;
 
     real tStepTotal = clock() - tStepStart;
-    cout << "TIMING (s): Bfield=" << tBfield << "  electrical=" << tElectrical
+    cout << "TIMING (s): Bfield=" << tBfieldTotal << "  electrical=" << tElectricalTotal
          << "  diagnostics=" << tDiag << "  fieldAssign=" << tFields << "  heatSolve=" << tHeatSolve
-         << "  bisections=" << bisectCount << "  ||  stepTotal=" << tStepTotal << endl;
+         << "  bisections=" << bisectCount << "  picardIters=" << picardItersUsed
+         << "  picardOmegaFinal=" << omega << "  ||  stepTotal=" << tStepTotal << endl;
 
     // Checkpoint after EVERY physical step, not just once at invocation
     // end -- ported from electrothermal's identical fix, now actually
