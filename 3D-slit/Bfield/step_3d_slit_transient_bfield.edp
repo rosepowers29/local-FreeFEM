@@ -46,7 +46,16 @@ real rightShellArea = tSideCu*yB7 + (tCuB+tCuT)*rightCoreWidth;
 real xHeatC = Lx/2, zHeatC = width/4;   // LEFT side only
 real xHeatLo = xHeatC-1e-3, xHeatHi = xHeatC+1e-3;
 real zHeatLo = zHeatC-1e-3, zHeatHi = zHeatC+1e-3;
-real heaterPower = 13.0;
+// -heaterpower (W) lets a sweep disable the heater entirely (0.0) to
+// isolate pure above-Ic ramp-driven quench behavior from heater-triggered
+// quench -- default 13.0 reproduces this script's exact prior behavior
+// when unflagged. tPulseStart/tPulseEnd/the pulse-phase dt schedule
+// (dtRaw) are UNCHANGED by this -- qHeaterNow is simply 0 throughout if
+// heaterPower=0, rather than removing the pulse-phase fine-dt window
+// itself, so a 0-heater run still gets the same time resolution through
+// that phase as a real-heater run at the same ratio (needed for a clean
+// apples-to-apples comparison between the two).
+real heaterPower = getARGV("-heaterpower", 13.0);
 real qHeater = heaterPower/(2e-3*2e-3);
 
 // rampRateTarget (-ramprate, A/s) / rampDt (-rampdt) / rampDtAboveIc

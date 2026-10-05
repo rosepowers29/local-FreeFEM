@@ -79,18 +79,30 @@ condor_submit sweep.sub
 condor_q                                               # watch progress
 ```
 
-`ratios.txt` now has a 4th column, `aniso` (`0`=isotropic, `1`=anisotropic
-Kim model — `sweep.sub` forwards it as `--aniso $(aniso)` to
-`run_bfield_transient.py`, which forwards it to the `.edp` as `-aniso`;
-see `../CLAUDE.md`'s "Anisotropic Kim model infrastructure"). Coupling
-stays lagged in both cases — `-aniso` only selects which Jc(B,T)
-suppression law consumes that lagged B, not whether B is lagged.
+`ratios.txt` now has 6 columns: `ratio,label,runaway_tmax,aniso,
+selfconsistent,heaterpower`.
+
+- `aniso` (`0`=isotropic, `1`=anisotropic Kim model) — forwarded as
+  `--aniso $(aniso)` -> `-aniso`. See `../CLAUDE.md`'s "Anisotropic Kim
+  model infrastructure".
+- `selfconsistent` (`0`=lagged, `1`=within-timestep self-consistent
+  Picard solve) — forwarded as `--selfconsistent $(selfconsistent)` ->
+  `-selfconsistent`. See `../CLAUDE.md`'s "Self-consistent (non-lagged)
+  B<->E Picard solve" — **O(hours)/ratio once it enters the above-Ic
+  ramp window**, not the O(minutes) a lagged run costs there. This is
+  the single biggest cost lever in this file; don't set it to `1` across
+  a big sweep without having read that section's landed cost numbers.
+- `heaterpower` (W; `13.0`=heater on, `0.0`=heater disabled) — forwarded
+  as `--heater-power $(heaterpower)` -> `-heaterpower`. Isolates pure
+  above-Ic ramp-driven quench from heater-triggered quench.
+
+`aniso`/`selfconsistent`/`heaterpower=0` each append a distinct label
+suffix (`-aniso`/`-sc`/`-noheater`) so sweeps over the same ratios under
+different flag combinations land in their own `runs/<label>...` and
+can't collide with each other.
 
 To launch an **anisotropic confirmation pair** alongside ratios already
-run isotropic — `make_ratios_list.py --aniso` writes `aniso=1` and
-suffixes every label with `-aniso`, so the runs land in their own
-`runs/<label>-aniso/` and can't collide with the existing isotropic
-`runs/<label>/`:
+run isotropic:
 
 ```bash
 python3 make_ratios_list.py --aniso 0.7 > ratios.txt
@@ -103,6 +115,31 @@ python3 make_ratios_list.py --aniso --runaway-tmax 250 1.2 >> ratios.txt
 mkdir -p logs
 condor_submit sweep.sub
 ```
+
+To launch a **full aniso+self-consistent sweep, heater on vs. off** (two
+separate ratios files, two separate `condor_submit` calls — this is a
+LOT of jobs; see the cost/preemption warnings below before running
+this for real):
+
+```bash
+python3 make_ratios_list.py --aniso --selfconsistent --runaway-tmax 250 \
+    --range 0.700 1.500 0.001 > ratios.txt     # 801 ratios, heater on
+mkdir -p logs
+condor_submit sweep.sub
+
+python3 make_ratios_list.py --aniso --selfconsistent --no-heater --runaway-tmax 250 \
+    --range 0.700 1.500 0.001 > ratios.txt     # overwrite -- different labels (-noheater), no collision with the above
+condor_submit sweep.sub
+```
+
+**Before submitting either of those for real**, strongly consider a
+small pilot first: a handful of representative ratios (e.g. one well
+below `Ic`, one right at it, one or two above) through the exact same
+flags, to confirm the new `heaterpower`/`selfconsistent` columns and
+`arguments` line are wired correctly end-to-end and to get a real
+per-ratio cost read for *your* pool's hardware before committing
+hundreds of multi-hour jobs to it — the `-heaterpower 0.0` path in
+particular has never been run for real yet (see `../CLAUDE.md`).
 
 Once every job finishes, collect results into the normal `runs/` tree —
 manual, not a Condor `transfer_output_remaps`, same reasoning as
@@ -131,7 +168,14 @@ mode it's guarding against is shared code, not workflow-specific.
 ## Known limitations (v1, deliberately simple — inherited from electrothermal)
 
 - **No resume-on-preemption** — see `electrothermal/condor/README.md`'s
-  identical section; the same tradeoff applies unchanged.
+  identical section; the same tradeoff applies unchanged, but the STAKES
+  are much higher once `selfconsistent=1` ratios are in the above-Ic
+  regime: a preempted job there has no choice but to restart from `t=0`
+  and re-burn the full O(hours) cost, not just the few minutes a lagged
+  run would lose. At sweep scale (hundreds of such ratios), expect SOME
+  preemptions on a shared pool — budget for re-runs, or treat building
+  real resume support as worth doing before a sweep this size rather
+  than after losing the first few jobs to it.
 - **CPU-only**, same reasoning as electrothermal.
 - `request_memory`/`request_disk`/the container syntax block are
   first-pass guesses **carried over from electrothermal's measurements**,

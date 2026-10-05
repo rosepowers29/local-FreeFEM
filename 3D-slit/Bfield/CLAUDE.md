@@ -65,11 +65,21 @@ FreeFem++ -nw step_3d_slit_transient_bfield.edp       # repeat to advance; 1 tim
 
 Both scripts now take `-ratio`/`-outprefix`, and the step script also
 takes `-steps-per-invocation`/`-ramprate`/`-rampdt`/`-rampdt-aboveic`/
-`-maxjcfracchange`/`-maxsteprise`/`-maxbisections`/`-tmaxcutoff` — see
-"Ratio/wrapper parameterization" below. All default to this script's
-original hardcoded behavior when unflagged. In practice, drive this
-through `run_bfield_transient.py` (see "Continuous-solve wrapper" below)
-rather than invoking these by hand for a real run.
+`-maxjcfracchange`/`-maxsteprise`/`-maxbisections`/`-tmaxcutoff`/`-aniso`/
+`-selfconsistent`/`-maxpicarditer`/`-picardtol`/`-picardomega`/
+`-heaterpower` — see "Ratio/wrapper parameterization" below. All default
+to this script's original hardcoded behavior when unflagged. In
+practice, drive this through `run_bfield_transient.py` (see
+"Continuous-solve wrapper" below) rather than invoking these by hand for
+a real run.
+
+**`-heaterpower`** (W, default `13.0`): `0.0` disables the heater
+entirely, isolating pure above-Ic ramp-driven quench from
+heater-triggered quench — e.g. the full sweep's "without heater" pass
+(see "Large aniso+self-consistent sweep" below). Doesn't touch
+`tPulseStart`/`tPulseEnd`/the pulse-phase fine-dt schedule — a 0-heater
+run still gets the same time resolution through that window as a
+real-heater run at the same ratio, for a clean comparison.
 
 ## Adaptive bisection / runaway cutoff (ported from `electrothermal/`)
 
@@ -400,18 +410,16 @@ were ever re-invoked with a different flag mid-run. `TIMING` cout line
 also gained `picardIters=`/`picardOmegaFinal=`; `Bfield=`/`electrical=`
 now sum across all Picard iterations in the step, not just one pass.
 
-**Cost**: `computeSelfFieldB` (~13-16s/call under this sandbox's
-amd64-emulated Docker) dominates — the per-x electrical solve stays
-cheap (~0.02s) regardless of iteration count. So N Picard iterations
-cost roughly `N × 13-16s` extra emulated per step, layered before
-`heatStep` (~1000-1700s emulated/step, itself highly variable under
-Docker resource contention — see below). Real/native hardware is
-documented elsewhere in this repo as ~8-15x faster, but `heatStep`'s
-own cost shrinks by roughly the same factor, so the *relative*
-inflation from Picard iterations in the worst-case (near-`Tc`) window
-could be comparable on native hardware to what the emulated numbers
-suggest, not smaller — get a real wall-clock read before trusting
-`-maxpicarditer 20`'s cost on a full unattended sweep.
+**Cost (superseded by real numbers below — kept for the reasoning, not
+the estimate)**: originally assumed `computeSelfFieldB` (~13-16s/call
+under Docker emulation) dominates and the per-x electrical solve stays
+uniformly cheap (~0.02s) regardless of iteration count, based on
+early-ramp (cold, low-current) profiling data. **Wrong** — see the
+landed `r1p2-sc` results below: the electrical solve's own per-call cost
+is NOT uniform, and near `Tc` it becomes the dominant cost, not
+`computeSelfFieldB`. The real number for `-maxpicarditer 20`'s cost on
+a full above-`Ic` ramp is O(hours) on native hardware, not the tens of
+seconds/step this estimate implied.
 
 **Verified** (Docker, this sandbox): `-selfconsistent 0` (default)
 reproduces the exact established baseline (`I0=21.7672 Tmax=77` at
@@ -425,20 +433,101 @@ zero residual; this is the same "first-step" edge case already
 documented under "Anisotropic Kim model infrastructure" above, not yet
 a real test of the iteration actually doing work).
 
-**Not yet verified — the actual point of this feature**: no real run
-has yet exercised the Picard loop with genuinely nonzero, non-trivial B
-(i.e. several steps into a real ramp), and no run has yet confirmed
-`H1`/`H2` stop oscillating in `r1p2`'s near-`Tc` window under
-`-selfconsistent 1` — that requires either re-running a ramp from
-scratch with the flag set (expensive under this sandbox's emulation;
-cheap on the user's native remote install) or restarting from `r1p2`'s
-actual on-disk final checkpoint (`t=18.48s`, already deep in runaway,
-`Tmax=423K` — a valid stress test of the Picard loop under an extreme
-state, but not a reproduction of the specific ringing window, since
-checkpoints aren't archived per-step and only the run's final state
-survived). **Next step**: run this real comparison on the remote
-install, where a full multi-step sequence is actually affordable, before
-trusting this feature beyond the smoke-test level above.
+**Landed 2026-09-29 — `r1p2-sc` (native remote install, interactive
+node, `runs/r1p2-sc/`)**: a real from-scratch ramp run at the exact same
+parameters as the original lagged `r1p2` (`-ratio 1.2 -ramprate 20.0
+-rampdt 999.0 -tmaxcutoff 250.0`), with `-selfconsistent 1`. This is the
+actual point of the feature, and it confirms the fix:
+
+- **The oscillation is gone.** `H1`/`H2` move smoothly and monotonically
+  through the entire near-`Tc` window (`t=18.09-18.42s`) — no step-to-
+  step zigzag anywhere, vs. `r1p2`'s genuine ringing in that exact
+  window. See `runs/compare_r1p2/chart_bfield_lag_vs_selfconsistent.png`
+  (generated via the new `shared/plot_compare_bfield_runs.py`).
+- **The final outcome barely moved**: `r1p2-sc` hits runaway at
+  `t=18.4165s, Tmax=421.169K` vs. `r1p2`'s `t=18.48s, Tmax=423.646K` —
+  within ~0.3-0.6% of each other, `fracLeft=0.5` in both. The lag was
+  producing noisy intermediate diagnostics, not a wrong aggregate
+  quench-timing/severity conclusion — reassuring for anything that
+  already leaned on the lagged `r1p2` result.
+- **Past `t~18.2` (deep runaway, `Tmax` 220K->421K in both), the two
+  traces diverge in a notable way**: self-consistent `H1` plateaus at
+  ~6.6mT while lagged `H1` keeps declining sharply toward ~4.0mT, even
+  though both end at nearly the same `Tmax`. Plausible read (not
+  independently verified beyond this observation): self-field mainly
+  tracks TOTAL current through the tape's cross-section, which is
+  externally driven and roughly independent of which internal layer
+  carries it — so it should stay fairly flat as current redistributes
+  from REBCO into the resistive stabilizer during runaway, which is
+  what the self-consistent trace does. The lagged trace's decline right
+  when the state is changing fastest is consistent with its self-field
+  diagnostic becoming actively stale (not just noisy) during exactly
+  the part of the trajectory you'd most want it to be trustworthy.
+- **No real non-convergence, no runaway bisection behavior**: `run.log`
+  has 3 literal hits for the string "PICARD-NOT-CONVERGED", but all 3
+  are FreeFEM's own source-line echo from each invocation's startup
+  parse trace (`426 :  cout << "PICARD-NOT-CONVERGED...`), not the
+  warning actually firing — the Picard loop converged every step.
+  `picardIters` peaked at 13 (well under `maxpicarditer=20`);
+  `picardRelErr` stayed under `1e-3` throughout. The `[bisect]` heatStep
+  dt-halving safety net (pre-existing, unrelated to Picard) genuinely
+  fired 8 times as `Tmax` approached `Tc` (`jcFrac` 0.05-0.17), one
+  halving each time, same as it does in the lagged runs.
+- **Cost was real**: `wall_clock_seconds: 29629.5` (~8.2 hours) for the
+  full run on native hardware — 3 invocations, dominated by the
+  electrical solve's per-call cost ballooning near `Tc` (its internal
+  doubling-guard bisection needs many more brackets once resistivity
+  rises and `Jc(T)` shrinks — an existing property of `solveEFullB`/
+  `solveEHalfB`, not something the Picard restructuring introduced, but
+  only visible once Picard multiplies it by iteration count) combined
+  with 8-13 Picard iterations/step in the stiffest window. The original
+  cost estimate above (from early-ramp, cold, cheap-electrical profiling
+  data) badly undersold this — treat "~15-25 min" as wrong for anything
+  that actually reaches the above-`Ic` ramp window; O(hours) is the
+  right expectation there. User's assessment: acceptable given a
+  parallelized (Condor) workflow.
+
+**Landed 2026-09-29 — `r1p2-aniso-sc`** (same parameters as `r1p2-aniso`,
+`-selfconsistent 1 -aniso 1`): the natural follow-up, comparing against
+`r1p2-aniso` (lagged, anisotropic). Result is more nuanced than the pure
+isotropic comparison above — **two distinct phenomena, only one of which
+this feature actually fixes**:
+
+- **Pre-pulse near-`Tc` ringing (the thing this feature targets)**:
+  confirmed fixed here too. `H1`/`H2` rise smoothly with no step-to-step
+  zigzag through the whole pre-pulse ramp (`t=15.55-18.66s`), same as the
+  isotropic case. See
+  `runs/compare_r1p2_aniso/chart_bfield_aniso_lag_vs_selfconsistent.png`.
+- **Post-heater-pulse transient (anisotropic model only) is NOT a lag
+  artifact.** `fracLeft` swings `0.5 -> ~0.37 -> ~0.63 ->` partial
+  damping in BOTH the lagged (`r1p2-aniso`: trough `0.363`, peak `0.636`,
+  final `0.566`) and self-consistent (`r1p2-aniso-sc`: trough `0.371`,
+  peak `0.633`, final `0.525`) runs — nearly the same shape and
+  magnitude either way. Every individual step's Picard loop converged
+  cleanly throughout this window (`picardRelErr<1e-3`, no
+  non-convergence), so this isn't the lagged-coupling ringing this
+  feature was built to fix — it looks like genuine current-sharing
+  dynamics: the heater's sharp, left-side-only, step-function
+  perturbation interacting with the anisotropic model's directionally-
+  dependent Jc suppression, which the purely-resistive current-split
+  bisection can plausibly overshoot/ring in response to regardless of
+  how B is coupled. Self-consistency does damp it SOMEWHAT (final
+  `fracLeft` closer to 0.5: `0.525` vs `0.567`), just not dominantly.
+- `wall_clock_seconds: 19512.2` (~5.4 hours, 2 invocations) — cheaper
+  overall than the isotropic `r1p2-sc` comparison (~8.2 hours, 3
+  invocations) despite the anisotropic path doing marginally more work
+  per call; likely reflects this trajectory needing fewer total
+  physical steps to reach the same `tmaxCutoff`, not a per-call cost
+  difference. Not independently confirmed.
+
+**Open question, not yet investigated**: whether the post-pulse
+`fracLeft` transient is a genuine, physically-expected response (a
+real current-sharing overshoot to a sudden local perturbation) or
+reflects some other modeling simplification worth examining (e.g. the
+purely-algebraic per-timestep current-split bisection has no notion of
+inductance/inertia, so a real circuit would damp an equivalent
+perturbation over some L/R time constant this model doesn't
+represent). Flagged, not pursued further without explicit direction.
 
 ## Continuous-solve wrapper (`run_bfield_transient.py`)
 
@@ -489,3 +578,55 @@ Outputs land in this directory: `transient_3d_slit.csv`
 `-999` sentinel used by the no-B-field workflow), and
 `diagnostics_positions_3d_slit.csv` (sensor geometry metadata, rewritten
 each invocation).
+
+## Large aniso+self-consistent sweep (0.7-1.5 Ic, heater on/off)
+
+Decided 2026-10-02, once the four-way lagged/self-consistent x
+isotropic/anisotropic comparison at `ratio=1.2` landed (above): run two
+full 801-ratio sweeps (`0.700` to `1.500`, step `0.001`) at
+`-aniso 1 -selfconsistent 1` throughout, one with the heater firing
+normally and one with `-heaterpower 0.0`, to characterize the full
+transport-current-ratio quench-threshold curve under the validated
+(self-consistent, anisotropic) physics instead of just the handful of
+spot-checked ratios so far.
+
+**This required adding `-heaterpower`** (see above) — the heater had no
+on/off toggle before this, so the "without heater" half of the ask
+wasn't possible until it was built.
+
+**User explicitly chose full 0.1% granularity across the whole range**
+(801 ratios x 2 sweeps = 1602 jobs) over a calibrate-first or tiered-
+granularity alternative, after being shown the cost asymmetry already
+on record here: self-consistent cost is O(minutes) for ratios that
+never approach `Ic`/`Tc`, but O(hours) (5.4-8.2h, see above) for ratios
+that enter the above-Ic ramp window — and this track's very first cost
+estimate for this feature was off by ~20-30x, so any extrapolation
+across the full range is a guess, not a measurement, until real jobs
+land.
+
+**Known real risks at this scale** (see `condor/README.md`'s expanded
+"Known limitations" for the full version):
+- **No resume-on-preemption**: a preempted self-consistent job in the
+  above-Ic regime restarts from `t=0` and re-burns its full O(hours)
+  cost. At ~800 such ratios per sweep on a shared pool, expect some
+  preemptions — this is a real, not hypothetical, cost multiplier here,
+  unlike for the one-off comparisons run so far.
+- **`request_memory`/`request_disk` are still first-pass guesses**
+  carried over from electrothermal, never stress-tested at this job
+  count.
+- **The `-heaterpower 0.0` code path has never been run for real** —
+  only reasoned about from the diff (see the flag's own comment above).
+  `condor/README.md` recommends a small pilot (a handful of
+  representative ratios) before committing the full 1602-job
+  submission; whether that pilot was actually run before the full
+  sweep is not yet recorded here — check `runs/` for pilot-labeled
+  results or ask before assuming the full sweep already reflects a
+  verified `-heaterpower 0.0` path.
+
+**Status**: infrastructure built (`-heaterpower` flag, 6-column
+`ratios.txt` schema, `sweep.sub`/`make_ratios_list.py`/
+`run_bfield_transient.py` updated) and documented in
+`condor/README.md`. Not yet confirmed whether the full sweeps have
+actually been submitted/landed — update this section once they have,
+with real per-ratio cost data and the resulting quench-threshold curve
+(the actual research deliverable this sweep exists to produce).

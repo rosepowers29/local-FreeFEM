@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-make_ratios_list.py -- generates the ratio,label,runaway_tmax rows
-sweep.sub's `queue ratio,label,runaway_tmax from ratios.txt` reads,
+make_ratios_list.py -- generates the ratio,label,runaway_tmax,aniso,
+selfconsistent,heaterpower rows sweep.sub's `queue ratio,label,
+runaway_tmax,aniso,selfconsistent,heaterpower from ratios.txt` reads,
 using run_bfield_transient.py's own sanitize_label() so Condor job
 labels always match what run_bfield_transient.py would derive itself.
 Ported from electrothermal/condor/make_ratios_list.py -- identical
@@ -9,14 +10,15 @@ logic, only the imported module differs.
 
 Also checks for label collisions before writing anything -- two ratios
 that sanitize to the same label would both write to the same Condor
-output path and clobber each other. --aniso automatically suffixes
-"-aniso" onto every label in THIS invocation, so an isotropic and an
-anisotropic sweep over the same ratios (the normal way to run a
-confirmation pair) don't collide with each other -- or with an existing
-isotropic runs/<label>/ from an earlier sweep.
+output path and clobber each other. --aniso/--selfconsistent/--no-heater
+each append a distinct suffix ("-aniso"/"-sc"/"-noheater") onto every
+label in THIS invocation, so sweeps over the same ratios under different
+flag combinations (the normal way to run a confirmation pair, or a
+with-heater/without-heater pair) don't collide with each other -- or
+with an existing runs/<label>/ from an earlier sweep.
 
 Usage:
-  # explicit list, default runaway_tmax (900), isotropic (aniso=0)
+  # explicit list, all defaults (isotropic, lagged, heater on, runaway_tmax 900)
   python3 make_ratios_list.py 0.7 > ratios.txt
 
   # range: START STOP STEP, STOP inclusive
@@ -30,6 +32,12 @@ Usage:
   # run isotropic -- labels get a distinct "-aniso" suffix automatically
   python3 make_ratios_list.py --aniso 0.7 > ratios.txt
   python3 make_ratios_list.py --aniso --runaway-tmax 250 1.2 >> ratios.txt
+
+  # full aniso+self-consistent sweep, heater on vs off (two separate files)
+  python3 make_ratios_list.py --aniso --selfconsistent --runaway-tmax 250 \\
+      --range 0.700 1.500 0.001 > ratios_heater.txt
+  python3 make_ratios_list.py --aniso --selfconsistent --no-heater --runaway-tmax 250 \\
+      --range 0.700 1.500 0.001 > ratios_noheater.txt
 """
 import argparse
 import sys
@@ -69,6 +77,22 @@ def main():
                         "'-aniso' to every label so it can't collide with "
                         "an isotropic run of the same ratio). Default: "
                         "isotropic (aniso=0, no label suffix).")
+    p.add_argument("--selfconsistent", action="store_true",
+                   help="Mark every ratio in THIS invocation as using the "
+                        "self-consistent (non-lagged) B<->E Picard solve "
+                        "(writes selfconsistent=1, appends '-sc' to every "
+                        "label). Default: lagged coupling (selfconsistent=0, "
+                        "no label suffix). See Bfield/CLAUDE.md's "
+                        "\"Self-consistent (non-lagged) B<->E Picard solve\" "
+                        "-- O(hours)/ratio once it enters the above-Ic ramp "
+                        "window, not the O(minutes) a lagged run costs there.")
+    p.add_argument("--no-heater", action="store_true",
+                   help="Disable the heater entirely for every ratio in THIS "
+                        "invocation (writes heaterpower=0.0, appends "
+                        "'-noheater' to every label) -- isolates pure "
+                        "above-Ic ramp-driven quench from heater-triggered "
+                        "quench. Default: heater on (heaterpower=13.0, no "
+                        "label suffix).")
     args = p.parse_args()
 
     if args.range and args.ratios:
@@ -82,7 +106,8 @@ def main():
         sys.exit("Provide explicit ratios or --range START STOP STEP")
 
     ratios = sorted(ratios)
-    suffix = "-aniso" if args.aniso else ""
+    suffix = ("-aniso" if args.aniso else "") + ("-sc" if args.selfconsistent else "") \
+             + ("-noheater" if args.no_heater else "")
     labels = [rt.sanitize_label(r) + suffix for r in ratios]
 
     seen = {}
@@ -95,8 +120,10 @@ def main():
                  f"anything: {detail}")
 
     aniso_val = 1 if args.aniso else 0
+    selfconsistent_val = 1 if args.selfconsistent else 0
+    heaterpower_val = 0.0 if args.no_heater else rt.DEFAULT_HEATER_POWER
     for ratio, label in zip(ratios, labels):
-        print(f"{ratio},{label},{args.runaway_tmax},{aniso_val}")
+        print(f"{ratio},{label},{args.runaway_tmax},{aniso_val},{selfconsistent_val},{heaterpower_val}")
 
 
 if __name__ == "__main__":

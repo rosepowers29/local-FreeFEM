@@ -90,6 +90,10 @@ DEFAULT_SELFCONSISTENT = 0
 DEFAULT_MAX_PICARD_ITER = 20
 DEFAULT_PICARD_TOL = 1e-3
 DEFAULT_PICARD_OMEGA = 0.5
+# W. 0.0 disables the heater entirely (isolates pure above-Ic ramp-driven
+# quench from heater-triggered quench) -- see step_3d_slit_transient_bfield.edp's
+# -heaterpower flag comment. Default matches that script's original hardcoded value.
+DEFAULT_HEATER_POWER = 13.0
 
 
 def ts():
@@ -222,7 +226,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             selfconsistent=DEFAULT_SELFCONSISTENT,
             max_picard_iter=DEFAULT_MAX_PICARD_ITER,
             picard_tol=DEFAULT_PICARD_TOL,
-            picard_omega=DEFAULT_PICARD_OMEGA):
+            picard_omega=DEFAULT_PICARD_OMEGA,
+            heater_power=DEFAULT_HEATER_POWER):
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -258,7 +263,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                                             "-selfconsistent", str(int(selfconsistent)),
                                             "-maxpicarditer", str(max_picard_iter),
                                             "-picardtol", str(picard_tol),
-                                            "-picardomega", str(picard_omega)],
+                                            "-picardomega", str(picard_omega),
+                                            "-heaterpower", str(heater_power)],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
             # once steps_per_invocation > 1 -- see CLAUDE.md.
@@ -425,6 +431,10 @@ def main():
                    help=f"Starting under-relaxation factor for the Picard loop "
                         f"(default: {DEFAULT_PICARD_OMEGA}); auto-halves (floor "
                         f"0.05) within a step if the residual is diverging.")
+    p.add_argument("--heater-power", type=float, default=DEFAULT_HEATER_POWER,
+                   help=f"Heater power in W; 0.0 disables the heater entirely, "
+                        f"isolating pure above-Ic ramp-driven quench from "
+                        f"heater-triggered quench (default: {DEFAULT_HEATER_POWER}).")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
@@ -435,7 +445,7 @@ def main():
             args.ramp_dt_above_ic, args.settle_tmax_max,
             args.max_step_rise, args.max_bisections, args.max_jc_frac_change,
             args.aniso, args.selfconsistent, args.max_picard_iter,
-            args.picard_tol, args.picard_omega)
+            args.picard_tol, args.picard_omega, args.heater_power)
     if summary["status"] in RETRY_WORTHY_STATUSES:
         sys.exit(1)
 
