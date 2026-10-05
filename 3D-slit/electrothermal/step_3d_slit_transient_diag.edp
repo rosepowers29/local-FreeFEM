@@ -42,7 +42,15 @@ real rightShellArea = tSideCu*yB7 + (tCuB+tCuT)*rightCoreWidth;
 real xHeatC = Lx/2, zHeatC = width/4;   // LEFT side only
 real xHeatLo = xHeatC-1e-3, xHeatHi = xHeatC+1e-3;
 real zHeatLo = zHeatC-1e-3, zHeatHi = zHeatC+1e-3;
-real heaterPower = 13.0;
+// heaterPower (-heaterpower): 0 disables the heater pulse entirely (qHeater
+// becomes 0, so qHeaterNow is always 0 regardless of tPulseStart/tPulseEnd)
+// -- for a pure-ramp sweep with no localized perturbation at all. tPulseStart/
+// tPulseEnd/tEnd stay exactly as they are either way: they're defined by ramp
+// completion (Tramp) and a fixed post-ramp window, not by whether a heater
+// actually fires, so the dt-schedule/phase-boundary logic and the prePulse
+// column's "quenched during ramp vs. during the post-ramp hold" distinction
+// both stay meaningful with heaterPower=0 -- see CLAUDE.md.
+real heaterPower = getARGV("-heaterpower", 13.0);
 real qHeater = heaterPower/(2e-3*2e-3);
 
 // rampRateTarget (-ramprate, A/s): if >0, Tramp is derived so the ramp

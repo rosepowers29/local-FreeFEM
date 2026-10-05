@@ -739,3 +739,53 @@ could still be checked by hand (I0 strictly increasing == still
 ramping == pre-pulse; I0 flat between the last two rows == ramp already
 complete) if it ever matters for a specific historical run, but no
 batch-wide reclassification has been done.
+
+## Pure-ramp (no-heater) sweep
+
+A second sweep, same 801-ratio `ratios.txt` (0.7-1.5 @ 0.001, same
+`900`/`250` `runaway_tmax` split), requested as a control dataset: pure
+transport current with NO localized heater perturbation at all, to
+isolate how much of the original dataset's quench/recovery behavior was
+heater-driven vs. current-driven alone.
+
+**Mechanism**: `step_3d_slit_transient_diag.edp`'s `heaterPower` is now a
+`getARGV("-heaterpower", 13.0)` knob (was hardcoded `13.0`) --
+`--heater-power 0` threaded through `run_transient.py`/`sweep_transient.py`
+disables the pulse entirely (`qHeaterNow` stays `0` for the whole run).
+`tPulseStart`/`tPulseEnd`/`tEnd`/the dt-schedule are all defined by ramp
+completion (`Tramp`), not by whether a heater fires, so none of that
+timing logic needed to change -- including the `prePulse` column, which
+still correctly distinguishes "quenched during the ramp" from "quenched
+during the post-ramp hold" with the heater off.
+
+**What changes in the output, expected not a bug**: the richer stable-
+outcome taxonomy (`settled`/`recovering (asymptotic)`/
+`plateaued_off_parity`) is entirely heater-driven -- it all hinges on
+`fracLeft` deviating from 0.5, which only happens because the heater
+breaks left/right symmetry. With no heater, every genuinely-stable ratio
+will just land in `reached_end_no_deviation` (`fracLeft` stays symmetric
+throughout, same as every `runaway_before_pulse` case already in the
+heater dataset shows). The `runaway`/`runaway_before_pulse` split stays
+meaningful either way (see above -- it's ramp-timing-based, not
+heater-based).
+
+**Output isolation**: `run_transient.py` always writes to
+`<base_dir>/<label>/` using the SAME labels as the heater sweep (`r0p7`,
+`r0p701`, ...) -- transferring a no-heater batch's output into the same
+local `runs/granular_sweep/` would silently clobber the heater dataset's
+identically-named directories. Fixed structurally rather than relying on
+careful copying: the no-heater Condor submit file passes
+`--base-dir runs_noheater` and transfers `work/runs_noheater/$(label)`,
+so the two datasets can never collide even if copied into the same local
+parent directory.
+
+**Smoketest first (in progress)**: `condor/sweep_noheater_smoketest.sub`
++ `condor/ratios_noheater_smoketest.txt` (14 ratios: spread across the
+full range, with extra density right at the historically-interesting
+0.90-0.911 boundary) -- exists specifically to answer the open question
+of whether near-boundary ratios need a LONGER post-ramp observation
+window than the heater dataset's ~1.5s to show up as genuinely
+runaway-trending, now that there's no heater to kick-start instability.
+Check whether any boundary ratio's `Tmax` is still visibly climbing at
+cutoff before deciding whether to extend `tEnd` for the real ~800-job
+batch, or ship with the unchanged window.

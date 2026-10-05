@@ -21,6 +21,11 @@ Produces:
                                            overlaid line plots to stay legible
        chart_summary_peak_voltage.png  -- peak V_CL_minus (total end-to-end
                                            tape voltage) vs ratio
+       chart_summary_peak_segment_voltage.png -- peak single-segment (tap-
+                                           to-tap) voltage vs ratio -- how
+                                           hot the single worst patch of
+                                           tape got, as opposed to how much
+                                           of its length went resistive
        chart_summary_recovery_margin.png -- time from heater-pulse-end to
                                            Tmax's own turning point vs ratio,
                                            for runs that actually turn over
@@ -71,6 +76,15 @@ def detect_pulse_start(transient, default=PULSE_START):
     # directly from the run's own I0(t) plateau instead of assumed, so
     # this stays correct for both the fixed- and variable-ramp scenarios
     # without needing to know which one produced this data.
+    #
+    # Returns None if no genuine plateau was ever reached -- a
+    # runaway_before_pulse run (see CLAUDE.md) gets cut off by the Tmax
+    # cutoff WHILE STILL RAMPING, before I0 ever levels off, so its own
+    # historical max is just its last recorded (still-climbing) value, not
+    # a real plateau. Found live: r1p45's animation mislabeled its very
+    # last frame "[heater ON]" -- I0 was still strictly increasing through
+    # that row. Callers must handle None (no pulse detected in this run's
+    # recorded window), not assume a float.
     t, I0 = transient.get("t"), transient.get("I0")
     if t is None or I0 is None or len(I0) == 0:
         return default
@@ -78,6 +92,12 @@ def detect_pulse_start(transient, default=PULSE_START):
     if i0max <= 0:
         return default
     idx = int(np.argmax(I0 >= 0.999 * i0max))
+    # A genuine plateau holds for the rest of the run (pulse + tEnd's fixed
+    # 1.5s post-pulse window -- always many more rows); if the candidate is
+    # the very last recorded row, there was no such hold, just a still-
+    # rising series whose "max so far" trivially equals its own last value.
+    if idx == len(I0) - 1:
+        return None
     return float(t[idx])
 
 # raw `status` values that need no further interpretation to be meaningful
@@ -284,9 +304,14 @@ def compute_zoom_xlim(runs, pre_margin=0.5, post_margin=0.5):
     # instead of squeezing them into a corner. Computed from the data
     # rather than hardcoded so this stays correct for any sweep's actual
     # ramp/pulse timing, not just this one.
-    pulse_starts = [detect_pulse_start(r["transient"]) for r in runs]
+    # Filter out None (no pulse detected -- e.g. a runaway_before_pulse run
+    # cut off mid-ramp, see detect_pulse_start) before min(): mixing None
+    # with floats raises TypeError, and a never-fired pulse shouldn't be
+    # allowed to pull the zoom window's start time anyway.
+    pulse_starts = [p for p in (detect_pulse_start(r["transient"]) for r in runs) if p is not None]
     final_ts = [r["transient"]["t"][-1] for r in runs]
-    return max(0.0, min(pulse_starts) - pre_margin), max(final_ts) + post_margin
+    start = min(pulse_starts) - pre_margin if pulse_starts else 0.0
+    return max(0.0, start), max(final_ts) + post_margin
 
 
 def make_summary_timeseries(runs, outpath, col, ylabel, title, log_y=False, xlim=None):
@@ -305,13 +330,16 @@ def make_summary_timeseries(runs, outpath, col, ylabel, title, log_y=False, xlim
     # false once --ramp-rate varies Tramp (and therefore the pulse time)
     # per ratio. Drawing one band in that case would shade the wrong
     # region for every ratio except whichever's pulse happens to match it.
-    pulse_starts = [detect_pulse_start(r["transient"]) for r in runs]
-    if max(pulse_starts) - min(pulse_starts) < 1e-6:
+    # None (no pulse detected, e.g. a runaway_before_pulse run cut off
+    # mid-ramp) can't share a band with anything -- excluded before the
+    # min/max comparison rather than crashing on a None-vs-float compare.
+    pulse_starts = [p for p in (detect_pulse_start(r["transient"]) for r in runs) if p is not None]
+    if pulse_starts and max(pulse_starts) - min(pulse_starts) < 1e-6:
         ax.axvspan(pulse_starts[0], pulse_starts[0] + PULSE_DUR, color="red", alpha=0.08,
                    label="heater pulse")
     else:
-        print(f"  (pulse timing varies by ratio in this sweep -- not shown as a "
-              f"shared band on {outpath.name})")
+        print(f"  (pulse timing varies by ratio (or never fires for some) in this sweep -- "
+              f"not shown as a shared band on {outpath.name})")
     ax.set_xlabel("time [s]")
     ax.set_ylabel(ylabel)
     ax.set_title(title, fontsize=13)
@@ -434,8 +462,40 @@ def make_peak_voltage_scatter(runs, outpath):
         if not diag or "V_CL_minus" not in diag or len(diag["V_CL_minus"]) == 0:
             return None
         return float(np.max(diag["V_CL_minus"])) * 1e6
-    _scatter_by_outcome(runs, outpath, peak_voltage, "peak V_CL_minus [µV]",
+    # mathtext ($..._{...}$) renders CL,minus as a real subscript instead of
+    # printing the literal HDF5/CSV column name -- matplotlib has no plain-
+    # text subscript, so underscores in an ordinary label stay literal.
+    _scatter_by_outcome(runs, outpath, peak_voltage, r"peak $V_{CL,minus}$ [µV]",
                         "Peak End-to-End Voltage vs Transport Current Ratio",
+                        skip_note="no diagnostics group")
+
+
+def make_peak_segment_voltage_scatter(runs, outpath):
+    # "Single-segment" = the voltage drop between two ADJACENT taps, i.e.
+    # diff() of the cumulative V1_i/V2_i channels -- the complement to
+    # V_CL_minus's whole-tape integral. Distinguishes "how hot is the
+    # single hottest patch of tape" from "how much of the tape's total
+    # length has gone resistive" (see CLAUDE.md/the peak-voltage
+    # discussion this followed from: the ~1.32-1.36 climb in V_CL_minus
+    # turned out to be the resistive zone WIDENING, not necessarily
+    # getting hotter at its peak). Restricted to the 9 tap-to-tap gaps
+    # per side (18 total) that sit within the slit's instrumented span --
+    # deliberately excludes the two uninstrumented edge segments (V_CL_plus
+    # to the first tap, last tap to V_CL_minus), which also cross out of
+    # the slit's L/R-split region into the single-channel model, a
+    # different physical regime not comparable to the tap-to-tap gaps.
+    def peak_segment_voltage(r):
+        diag = r.get("diagnostics")
+        if not diag or "V1_1" not in diag:
+            return None
+        v1 = np.stack([diag[f"V1_{i+1}"] for i in range(10)])   # (10, n_t)
+        v2 = np.stack([diag[f"V2_{i+1}"] for i in range(10)])
+        seg1 = np.diff(v1, axis=0)   # (9, n_t) -- per-segment voltage over time
+        seg2 = np.diff(v2, axis=0)
+        return float(max(np.max(seg1), np.max(seg2))) * 1e6
+    _scatter_by_outcome(runs, outpath, peak_segment_voltage,
+                        "peak single-segment voltage [µV]",
+                        "Peak Single-Segment Voltage vs Transport Current Ratio",
                         skip_note="no diagnostics group")
 
 
@@ -465,8 +525,10 @@ def detect_tmax_reversal(transient, pulse_end):
 
 def make_recovery_margin_scatter(runs, outpath):
     def margin(r):
-        pulse_end = detect_pulse_start(r["transient"]) + PULSE_DUR
-        return detect_tmax_reversal(r["transient"], pulse_end)
+        pulse_start = detect_pulse_start(r["transient"])
+        if pulse_start is None:   # no pulse fired -- nothing to measure a margin from
+            return None
+        return detect_tmax_reversal(r["transient"], pulse_start + PULSE_DUR)
     _scatter_by_outcome(runs, outpath, margin, "pulse-end -> Tmax turnover [s]",
                         "Recovery Time Margin vs Transport Current Ratio\n"
                         "(runs with no post-pulse Tmax turnover excluded)",
@@ -478,12 +540,22 @@ def per_ratio_plots(run, outdir, with_animation):
     label = run["label"]
     data = run["transient"]
     pulse_start = detect_pulse_start(data)
-    pulse_end = pulse_start + PULSE_DUR
+    pulse_end = pulse_start + PULSE_DUR if pulse_start is not None else None
 
     pst.make_full_timeline_plot(data, pulse_start, pulse_end, TC,
                                  outdir / "chart_slit_transient_full.png", label)
-    pst.make_zoom_plot(data, pulse_start, pulse_end, TC, 0.002, 0.08,
-                        outdir / "chart_slit_transient_zoom.png", label)
+    # make_zoom_plot's entire window is defined RELATIVE to pulse_start (not
+    # just its shading) -- meaningless to "zoom into the heater pulse" for a
+    # run where detect_pulse_start found no genuine pulse at all (e.g.
+    # runaway_before_pulse, cut off mid-ramp -- see CLAUDE.md), so skip it
+    # rather than force a fallback window onto a plot whose whole point is
+    # pulse-relative framing.
+    if pulse_start is not None:
+        pst.make_zoom_plot(data, pulse_start, pulse_end, TC, 0.002, 0.08,
+                            outdir / "chart_slit_transient_zoom.png", label)
+    else:
+        print(f"  [{label}] no pulse detected (still ramping when cut off) -- "
+              f"skipping chart_slit_transient_zoom.png")
 
     diag, positions = run["diagnostics"], run["positions"]
     if diag is None or positions is None:
@@ -523,6 +595,10 @@ def per_ratio_plots(run, outdir, with_animation):
         pds.make_animation(diag, rtd_left, rtd_right, Lx, width, xHeater,
                             f"{label}: RTD Temperature Evolution", "Temperature [K]",
                             outdir / "anim_diagnostics_temperature.gif", pulse_start, pulse_end, unit_scale=1.0)
+        seg_data, seg_left, seg_right = pds.build_segment_channels(diag, taps_left, taps_right, "V1_", "V2_")
+        pds.make_animation(seg_data, seg_left, seg_right, Lx, width, xHeater,
+                            f"{label}: Segment Voltage Evolution", "Segment voltage [µV]",
+                            outdir / "anim_diagnostics_segment_voltage.gif", pulse_start, pulse_end, unit_scale=1e6)
 
 
 def main():
@@ -532,7 +608,21 @@ def main():
     ap.add_argument("--outdir", default="runs/analysis", help="Output directory (relative to this script)")
     ap.add_argument("--with-animation", action="store_true",
                      help="Also regenerate the (slow) per-ratio voltage/temperature GIFs")
+    ap.add_argument("--summary-only", action="store_true",
+                     help="Skip the per-ratio diagnostic subdirectories entirely -- just the "
+                          "cross-ratio chart_summary_*.png plots. On a several-hundred-run sweep "
+                          "the per-ratio loop is the slow part; use this when only a "
+                          "chart_summary_*.png changed and the per-ratio plots don't need "
+                          "regenerating.")
+    ap.add_argument("--per-ratio-only", action="store_true",
+                     help="Skip the cross-ratio chart_summary_*.png plots entirely -- just the "
+                          "per-ratio diagnostic subdirectories. Use this together with --labels "
+                          "when spot-checking a handful of runs, or the cross-ratio summaries "
+                          "silently get REGENERATED FROM ONLY THOSE LABELS and overwrite the "
+                          "full-sweep versions (a real mistake made once already -- see git log).")
     args = ap.parse_args()
+    if args.summary_only and args.per_ratio_only:
+        sys.exit("--summary-only and --per-ratio-only are mutually exclusive")
 
     h5_path = Path(args.h5)
     if not h5_path.is_absolute():
@@ -551,38 +641,52 @@ def main():
 
     outdir.mkdir(parents=True, exist_ok=True)
 
-    print("Cross-ratio summary plots...")
-    trustworthy = [r for r in runs if has_trustworthy_physics(r)]
-    excluded = [r["label"] for r in runs if r not in trustworthy]
-    if excluded:
-        print(f"  excluding {len(excluded)} run(s) with no trustworthy physics "
-              f"(status in {sorted(NO_TRUSTWORTHY_PHYSICS)}): {', '.join(excluded)}")
-    make_summary_timeseries(trustworthy, outdir / "chart_summary_fracleft_vs_t.png", "fracLeft",
-                             "Current fraction on heated side", "fracLeft(t) Across Transport Current Ratios")
-    make_summary_timeseries(trustworthy, outdir / "chart_summary_tmax_vs_t.png", "Tmax",
-                             "Tmax [K]", "Tmax(t) Across Transport Current Ratios")
-    # log-y: recoveries (Tmax drifting a few K around ~80K) and runaways
-    # (Tmax climbing hundreds of K/s up past 1000K) sit at wildly different
-    # scales -- linear axis on chart_summary_tmax_vs_t.png flattens every
-    # recovering ratio into an indistinguishable line near the bottom. Log
-    # scale keeps both regimes' shapes visible in the same window.
-    make_summary_timeseries(trustworthy, outdir / "chart_summary_tmax_vs_t_log.png", "Tmax",
-                             "Tmax [K] (log scale)", "Tmax(t) Across Transport Current Ratios (log scale)",
-                             log_y=True)
-    zoom_xlim = compute_zoom_xlim(trustworthy)
-    make_summary_timeseries(trustworthy, outdir / "chart_summary_tmax_vs_t_zoom.png", "Tmax",
-                             "Tmax [K]", "Tmax(t) Across Transport Current Ratios (zoomed)",
-                             xlim=zoom_xlim)
-    make_final_state_plot(trustworthy, outdir / "chart_summary_final_state.png")
-    make_peak_tmax_scatter(trustworthy, outdir / "chart_summary_peak_tmax.png")
-    make_peak_voltage_scatter(trustworthy, outdir / "chart_summary_peak_voltage.png")
-    make_recovery_margin_scatter(trustworthy, outdir / "chart_summary_recovery_margin.png")
-    print(f"  wrote {outdir}/chart_summary_*.png")
+    if args.per_ratio_only:
+        print("--per-ratio-only: skipping cross-ratio chart_summary_*.png plots")
+    else:
+        print("Cross-ratio summary plots...")
+        # Deliberately built from EVERY label in the h5, not args.labels --
+        # a --labels-filtered spot-check must never regenerate (and thereby
+        # overwrite with a degenerate few-run version) the full-sweep
+        # chart_summary_*.png files. Real mistake made once already: use
+        # --per-ratio-only whenever --labels is meant to scope the per-ratio
+        # subdirectories only.
+        all_runs = load_runs(h5_path, None) if labels else runs
+        trustworthy = [r for r in all_runs if has_trustworthy_physics(r)]
+        excluded = [r["label"] for r in all_runs if r not in trustworthy]
+        if excluded:
+            print(f"  excluding {len(excluded)} run(s) with no trustworthy physics "
+                  f"(status in {sorted(NO_TRUSTWORTHY_PHYSICS)}): {', '.join(excluded)}")
+        make_summary_timeseries(trustworthy, outdir / "chart_summary_fracleft_vs_t.png", "fracLeft",
+                                 "Current fraction on heated side", "fracLeft(t) Across Transport Current Ratios")
+        make_summary_timeseries(trustworthy, outdir / "chart_summary_tmax_vs_t.png", "Tmax",
+                                 "Tmax [K]", "Tmax(t) Across Transport Current Ratios")
+        # log-y: recoveries (Tmax drifting a few K around ~80K) and runaways
+        # (Tmax climbing hundreds of K/s up past 1000K) sit at wildly different
+        # scales -- linear axis on chart_summary_tmax_vs_t.png flattens every
+        # recovering ratio into an indistinguishable line near the bottom. Log
+        # scale keeps both regimes' shapes visible in the same window.
+        make_summary_timeseries(trustworthy, outdir / "chart_summary_tmax_vs_t_log.png", "Tmax",
+                                 "Tmax [K] (log scale)", "Tmax(t) Across Transport Current Ratios (log scale)",
+                                 log_y=True)
+        zoom_xlim = compute_zoom_xlim(trustworthy)
+        make_summary_timeseries(trustworthy, outdir / "chart_summary_tmax_vs_t_zoom.png", "Tmax",
+                                 "Tmax [K]", "Tmax(t) Across Transport Current Ratios (zoomed)",
+                                 xlim=zoom_xlim)
+        make_final_state_plot(trustworthy, outdir / "chart_summary_final_state.png")
+        make_peak_tmax_scatter(trustworthy, outdir / "chart_summary_peak_tmax.png")
+        make_peak_voltage_scatter(trustworthy, outdir / "chart_summary_peak_voltage.png")
+        make_peak_segment_voltage_scatter(trustworthy, outdir / "chart_summary_peak_segment_voltage.png")
+        make_recovery_margin_scatter(trustworthy, outdir / "chart_summary_recovery_margin.png")
+        print(f"  wrote {outdir}/chart_summary_*.png")
 
-    print("Per-ratio diagnostic plots...")
-    for run in runs:
-        print(f"  [{run['label']}]")
-        per_ratio_plots(run, outdir / run["label"], args.with_animation)
+    if args.summary_only:
+        print("--summary-only: skipping per-ratio diagnostic subdirectories")
+    else:
+        print("Per-ratio diagnostic plots...")
+        for run in runs:
+            print(f"  [{run['label']}]")
+            per_ratio_plots(run, outdir / run["label"], args.with_animation)
 
     print(f"Done. Output under {outdir}/")
 

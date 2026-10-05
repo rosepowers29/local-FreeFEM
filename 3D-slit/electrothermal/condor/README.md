@@ -170,3 +170,16 @@ resource-request numbers below.
   settings) -- edit that line directly if a given sweep needs different
   values; not built as a per-job-configurable field since every sweep so
   far has used one ramp scenario at a time.
+
+## Pure-ramp (no-heater) sweep
+
+`sweep_noheater_smoketest.sub` + `ratios_noheater_smoketest.txt` -- same
+payload, same pool, `--heater-power 0` disables the heater pulse
+entirely and `--base-dir runs_noheater` keeps its output from colliding
+with the heater dataset's identically-labeled `runs/<label>` directories.
+See `../CLAUDE.md`'s "Pure-ramp (no-heater) sweep" section for the full
+rationale and what's expected to change in the output. Smoketest first
+(14 ratios, concentrated near the 0.90-0.911 boundary) to check whether
+the unchanged ~1.5s post-ramp observation window is long enough without
+a heater to kick-start instability, before committing to the full
+~800-job batch.

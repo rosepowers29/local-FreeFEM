@@ -10,7 +10,17 @@ Structure written to the output file:
   /<label>                     group, one per run, attrs = that run's
                                 status.json fields (ratio, status, trend,
                                 n_steps, wall_clock_seconds, final_t,
-                                final_Tmax, final_fracLeft)
+                                final_Tmax, final_fracLeft) PLUS `outcome`:
+                                the already-reconciled human-readable label
+                                (analyze_sweep_hdf5.py's outcome_label()),
+                                not just the raw `status` string -- some
+                                statuses (e.g. reached_end_deviated) don't
+                                mean what they sound like on their own (a
+                                handful in this dataset are actually still-
+                                diverging runaways that simply ran out of
+                                observation time) -- `outcome` is the field
+                                a standalone reader of this file (without
+                                also re-deriving that logic) should trust.
   /<label>/transient/<col>     one dataset per transient_3d_slit.csv column
   /<label>/diagnostics/<col>   one dataset per diagnostics_3d_slit.csv column
   /<label>/positions/<col>     one dataset per diagnostics_positions_3d_slit.csv
@@ -80,14 +90,43 @@ def read_csv_columns(csv_path: Path):
 def write_csv_group(parent_group, subgroup_name, csv_path: Path):
     if not csv_path.exists():
         print(f"  ({csv_path.name} not found, skipping /{subgroup_name})")
-        return
+        return None
     columns = read_csv_columns(csv_path)
     if not columns:
         print(f"  ({csv_path.name} empty, skipping /{subgroup_name})")
-        return
+        return None
     sub = parent_group.create_group(subgroup_name)
     for col, arr in columns.items():
         sub.create_dataset(col, data=arr)
+    return columns
+
+
+def compute_outcome(status: dict, transient_columns):
+    # The human-readable, already-reconciled outcome label (see
+    # analyze_sweep_hdf5.py's outcome_label()) baked directly into the
+    # exported file, so a colleague reading sweep.h5 in isolation -- without
+    # also replicating analyze_sweep_hdf5.py's reclassification logic --
+    # doesn't get misled by the raw `status` attr alone. Concretely: this
+    # dataset has runs stored as status="reached_end_deviated" (reads like
+    # "still settling, ran out of time") whose own Tmax was still clearly
+    # diverging when the run ended -- outcome_label() catches exactly this
+    # via recompute_tmax_trend() against the full time series, so this is
+    # that same logic, reused rather than reimplemented, just called here
+    # at export time instead of analysis time (see CLAUDE.md).
+    #
+    # Imports analyze_sweep_hdf5 lazily, not at module load, so this
+    # script's own dependencies stay light (plain csv/json/h5py/numpy) for
+    # anyone who just wants the raw CSV-to-HDF5 conversion -- it pulls in
+    # matplotlib and the shared plotting modules only when an outcome
+    # actually needs computing.
+    import analyze_sweep_hdf5 as ash
+    run = {
+        "status": status.get("status"),
+        "final_Tmax": status.get("final_Tmax"),
+        "trend": status.get("trend"),
+        "transient": transient_columns or {},
+    }
+    return ash.outcome_label(run)
 
 
 def export(labels, base_dir: Path, out_path: Path):
@@ -106,9 +145,10 @@ def export(labels, base_dir: Path, out_path: Path):
             g = hf.create_group(label)
             for k, v in status.items():
                 g.attrs[k] = "" if v is None else v
-            write_csv_group(g, "transient", run_dir / TRANSIENT_CSV)
+            transient_columns = write_csv_group(g, "transient", run_dir / TRANSIENT_CSV)
             write_csv_group(g, "diagnostics", run_dir / DIAGNOSTICS_CSV)
             write_csv_group(g, "positions", run_dir / POSITIONS_CSV)
+            g.attrs["outcome"] = compute_outcome(status, transient_columns)
     print(f"wrote {out_path}")
 
 

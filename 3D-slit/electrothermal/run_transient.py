@@ -87,6 +87,10 @@ DEFAULT_RAMP_DT_ABOVE_IC = 0.002
 DEFAULT_MAX_STEP_RISE = 500.0
 DEFAULT_MAX_BISECTIONS = 10
 DEFAULT_MAX_JC_FRAC_CHANGE = 0.05
+# 13.0 matches the .edp's own default (the original heater-pulse scenario);
+# 0.0 disables the heater pulse entirely for a pure-ramp sweep -- see
+# step_3d_slit_transient_diag.edp's heaterPower comment / CLAUDE.md.
+DEFAULT_HEATER_POWER = 13.0
 
 
 def ts():
@@ -224,7 +228,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             settle_tmax_max=DEFAULT_SETTLE_TMAX_MAX,
             max_step_rise=DEFAULT_MAX_STEP_RISE,
             max_bisections=DEFAULT_MAX_BISECTIONS,
-            max_jc_frac_change=DEFAULT_MAX_JC_FRAC_CHANGE):
+            max_jc_frac_change=DEFAULT_MAX_JC_FRAC_CHANGE,
+            heater_power=DEFAULT_HEATER_POWER):
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -270,7 +275,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                                             "-tmaxcutoff", str(runaway_tmax),
                                             "-maxsteprise", str(max_step_rise),
                                             "-maxbisections", str(max_bisections),
-                                            "-maxjcfracchange", str(max_jc_frac_change)],
+                                            "-maxjcfracchange", str(max_jc_frac_change),
+                                            "-heaterpower", str(heater_power)],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
             # once steps_per_invocation > 1 -- each invocation now advances up
@@ -458,6 +464,10 @@ def main():
                         f"change in JcT(Tmax) allowed per step before halving dt instead "
                         f"of accepting it (default: {DEFAULT_MAX_JC_FRAC_CHANGE}). See "
                         f"CLAUDE.md's adaptive-bisection section.")
+    p.add_argument("--heater-power", type=float, default=DEFAULT_HEATER_POWER,
+                   help=f"Heater pulse power in W (default: {DEFAULT_HEATER_POWER}). 0 "
+                        f"disables the heater pulse entirely -- a pure-ramp run with no "
+                        f"localized perturbation at all. See CLAUDE.md.")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
@@ -466,7 +476,8 @@ def main():
             args.freefem_bin, args.trend_window, args.trend_eps, args.resume,
             args.steps_per_invocation, args.ramp_rate, args.ramp_dt,
             args.ramp_dt_above_ic, args.settle_tmax_max,
-            args.max_step_rise, args.max_bisections, args.max_jc_frac_change)
+            args.max_step_rise, args.max_bisections, args.max_jc_frac_change,
+            args.heater_power)
     # Exit code drives Condor's on_exit_hold/periodic_release retry policy
     # (see condor/sweep.sub) -- without this, the process always exited 0
     # regardless of status, so no exit-code-based retry could ever have

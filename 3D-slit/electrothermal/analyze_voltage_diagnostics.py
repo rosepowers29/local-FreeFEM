@@ -137,6 +137,13 @@ def _post_pulse_local_min(t, values, pulse_start, margin):
     # (an interior turning point the signal has already risen back away
     # from) or just the last recorded row (still falling -- i.e. no
     # turning point observed yet, right-censored).
+    # pulse_start is None when detect_pulse_start found no genuine pulse at
+    # all (e.g. a runaway_before_pulse run cut off mid-ramp -- see
+    # CLAUDE.md) -- there's no "post-pulse" window to speak of, so this is
+    # the same right-censored case as "no data past the pulse", not a
+    # crash on None + margin.
+    if pulse_start is None:
+        return None, False
     mask = t > pulse_start + margin
     if not np.any(mask):
         return None, False
@@ -523,8 +530,11 @@ def make_localization_animation(run, side_prefix, outpath, x_heater, max_frames=
     if vmin == vmax:
         vmax = vmin * 10
 
+    # None if no genuine pulse was detected (e.g. a runaway_before_pulse
+    # run cut off mid-ramp before the heater ever fires -- see CLAUDE.md);
+    # "[heater ON]" should never show for such a run, at any frame.
     pulse_start = ash.detect_pulse_start(run["transient"])
-    pulse_end = pulse_start + ash.PULSE_DUR
+    pulse_end = pulse_start + ash.PULSE_DUR if pulse_start is not None else None
 
     fig, ax = plt.subplots(figsize=(8, 6))
     line, = ax.plot(x_mids, plot_vals[:, frame_idx[0]], "o-", color="tab:green", markersize=5, linewidth=1.5)
@@ -544,7 +554,7 @@ def make_localization_animation(run, side_prefix, outpath, x_heater, max_frames=
         idx = frame_idx[frame_i]
         line.set_ydata(plot_vals[:, idx])
         t_now = t[idx]
-        in_pulse = pulse_start <= t_now <= pulse_end
+        in_pulse = pulse_start is not None and pulse_start <= t_now <= pulse_end
         time_text.set_text(f"t = {t_now:.4f} s" + ("   [heater ON]" if in_pulse else ""))
         return [line, time_text]
 

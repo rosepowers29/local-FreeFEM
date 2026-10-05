@@ -59,6 +59,9 @@ def main():
     p.add_argument("--max-jc-frac-change", type=float, default=rt.DEFAULT_MAX_JC_FRAC_CHANGE,
                    help="Above-Ic adaptive controller's Jc accuracy band -- "
                         "see run_transient.py --help.")
+    p.add_argument("--heater-power", type=float, default=rt.DEFAULT_HEATER_POWER,
+                   help="Heater pulse power in W, 0 disables it entirely -- "
+                        "see run_transient.py --help.")
     p.add_argument("--force", action="store_true")
     p.add_argument("--freefem-bin", default=None,
                    help="Path to the FreeFem++ executable (default: $FREEFEM_BIN "
@@ -83,7 +86,7 @@ def main():
              ramp_rate=args.ramp_rate, ramp_dt=args.ramp_dt,
              ramp_dt_above_ic=args.ramp_dt_above_ic,
              max_step_rise=args.max_step_rise, max_bisections=args.max_bisections,
-             max_jc_frac_change=args.max_jc_frac_change)
+             max_jc_frac_change=args.max_jc_frac_change, heater_power=args.heater_power)
         for ratio in ratios
     ]
 
