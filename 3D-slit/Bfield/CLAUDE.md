@@ -626,7 +626,60 @@ land.
 **Status**: infrastructure built (`-heaterpower` flag, 6-column
 `ratios.txt` schema, `sweep.sub`/`make_ratios_list.py`/
 `run_bfield_transient.py` updated) and documented in
-`condor/README.md`. Not yet confirmed whether the full sweeps have
-actually been submitted/landed — update this section once they have,
-with real per-ratio cost data and the resulting quench-threshold curve
-(the actual research deliverable this sweep exists to produce).
+`condor/README.md`. Full sweeps submitted 2026-10-06. Update this
+section once they land, with the resulting quench-threshold curve (the
+actual research deliverable this sweep exists to produce).
+
+**Major cost-model correction, landed 2026-10-06 (`r0p7-aniso-sc-noheater-pilot`,
+`runs/`)** — supersedes the "near-`Tc` electrical blowup" theory above,
+which was WRONG. This pilot ran the full scripted duration at `ratio=0.7`
+with the heater OFF (`-heaterpower 0.0`) under the real sweep config
+(`-aniso 1 -selfconsistent 1`): `Tmax` stayed flat at ~77.00xK the
+ENTIRE run (never approached `Ic` or `Tc`, exactly as expected with no
+heater at a low ratio) — and it still took `17581.1s` (~4.9 hours) over
+100 physical steps.
+
+Grepping every `TIMING` line (not just the tail, which is all prior
+investigation had looked at) across the full run: `electrical` averaged
+**49.0s/step** and `fieldAssign` averaged **108.5s/step**, both
+essentially CONSTANT across all 100 steps regardless of temperature.
+Only the very first step of any fresh run is cheap (`I0w=0` short-
+circuits `solveEFullB`/`solveEHalfB` to `return 0.0` instantly before
+any bisection runs) — which is exactly the sampling bias that produced
+every earlier "cheap" data point in this file: every prior measurement
+below this line was either a first-step smoke test or a tail-of-run.log
+snippet from a run already deep into its trajectory, never a full
+per-step accounting.
+
+This reconciles cleanly with `electrothermal`'s long-documented
+~116.5s/step native baseline: `fieldAssign+heatSolve+diagnostics` here
+(~118s) closely matches that pre-existing, B-field-unrelated cost (same
+mesh, same FE field assignment — `electrothermal` pays it too, just
+without any B-field/Kim-model work on top), while this workflow adds
+`Bfield` (~6s, the Biot-Savart self-field pass) and the Kim-model-aware
+electrical solve's internal bisection overhead (~49s, present in BOTH
+`solveEFullB`/`solveEHalfB` and their `*BAniso` variants — isotropic vs.
+anisotropic doesn't change this) on top of that shared baseline,
+landing almost exactly at the observed ~170s/step total.
+
+**Corrected cost model**: a run's total cost scales mainly with **how
+many physical timesteps it needs to complete** (set by the ramp/pulse/
+post-pulse `dt` schedule, roughly 100 steps for a below-Ic run; likely
+more for an above-Ic run needing finer adaptive stepping) at a ~170s/
+step baseline, further multiplied on whichever specific steps the
+Picard loop needs >1 iteration (observed up to 4-6x on a handful of
+steps in this same pilot, at phase-boundary transitions) — NOT by
+proximity to `Ic`/`Tc` the way the "Landed 2026-09-29" section above
+assumed. Practical upshot: there is no cheap region of the 0.7-1.5
+sweep — every ratio, heater on or off, costs multiple hours, because
+the ~170s/step floor applies everywhere once real current is flowing.
+Confirmed with the user before proceeding at the originally-requested
+full 0.1%-granularity, 1602-job scale regardless.
+
+**Not investigated**: whether the ~49s/~108s per-call costs are
+reducible (e.g. `solveEFullB`'s doubling-guard search re-bracketing
+`Ehi0` from scratch every call rather than warm-starting from a nearby
+previous solve; whether this specific remote execute node is unusually
+slow vs. pool-typical) — flagged as a real option if sweep cost ever
+needs to come down, not pursued here per the user's explicit choice to
+proceed at full scale first.
