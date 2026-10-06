@@ -178,8 +178,9 @@ payload, same pool, `--heater-power 0` disables the heater pulse
 entirely and `--base-dir runs_noheater` keeps its output from colliding
 with the heater dataset's identically-labeled `runs/<label>` directories.
 See `../CLAUDE.md`'s "Pure-ramp (no-heater) sweep" section for the full
-rationale and what's expected to change in the output. Smoketest first
-(14 ratios, concentrated near the 0.90-0.911 boundary) to check whether
-the unchanged ~1.5s post-ramp observation window is long enough without
-a heater to kick-start instability, before committing to the full
-~800-job batch.
+rationale and what's expected to change in the output.
+
+Smoketest came back clean -- unchanged observation window is long
+enough, no sign any boundary ratio was still trending toward runaway at
+cutoff (see CLAUDE.md for the per-ratio dTmax/dt numbers). Full batch is
+`sweep_noheater.sub`, same `ratios.txt` as the heater sweep.

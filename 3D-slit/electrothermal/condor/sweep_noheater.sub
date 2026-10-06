@@ -1,0 +1,48 @@
+# Full pure-ramp (no-heater) sweep -- see CLAUDE.md's "Pure-ramp
+# (no-heater) sweep" section. Same 801-ratio ratios.txt as the heater
+# sweep (0.7-1.5 @ 0.001, same 900/250 runaway_tmax split) -- ratio/
+# label/threshold selection doesn't depend on the heater at all, so this
+# intentionally reuses that file rather than duplicating it.
+#
+# Promoted from sweep_noheater_smoketest.sub after the smoketest (14
+# ratios, concentrated at the 0.90-0.911 boundary) came back clean: all
+# three boundary ratios showed FLAT-TO-DECREASING dTmax/dt across the
+# post-ramp hold window (not accelerating), total rise ~0.006-0.007K over
+# the full 1.5s window -- no sign any of them were "on the verge" and
+# just needed more time. Unchanged tEnd/observation window carried
+# forward as-is; see CLAUDE.md for the full smoketest writeup.
+#
+# --heater-power 0 / --base-dir runs_noheater: see sweep_noheater_smoketest.sub
+# and CLAUDE.md for why the distinct base-dir matters (structurally
+# prevents collision with the heater dataset's identically-labeled
+# runs/<label> directories once copied back).
+
+universe        = container
+container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal@sha256:8b39db74c15d90180fb623cda03211d434ce619cd3786c3abbd37de930aed37c
+requirements = (Arch == "X86_64")
+
+executable      = condor_run_ratio.sh
+arguments       = $(ratio) $(label) --ramp-rate 20 --ramp-dt 999 --runaway-tmax $(runaway_tmax) --heater-power 0 --base-dir runs_noheater
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files    = payload.tar.gz
+transfer_output_files   = work/runs_noheater/$(label)
+
+request_cpus   = 1
+request_memory = 4096M
+request_disk   = 2048M
+
+output = logs/noheater_$(label).out
+error  = logs/noheater_$(label).err
+log    = logs/noheater_$(label).log
+stream_output = True
+stream_error  = True
+
+# Same auto-retry policy as sweep.sub -- see its comments for the full
+# rationale (node-heterogeneity, RETRY_WORTHY exit codes).
+on_exit_hold        = (ExitCode != 0)
+on_exit_hold_reason  = "run_transient.py reported a RETRY_WORTHY status (see CLAUDE.md) -- auto-releasing to retry, likely on a different execute node"
+periodic_release     = (NumJobStarts < 4) && ((CurrentTime - EnteredCurrentStatus) > 300)
+
+queue ratio,label,runaway_tmax from ratios.txt

@@ -779,13 +779,34 @@ careful copying: the no-heater Condor submit file passes
 so the two datasets can never collide even if copied into the same local
 parent directory.
 
-**Smoketest first (in progress)**: `condor/sweep_noheater_smoketest.sub`
-+ `condor/ratios_noheater_smoketest.txt` (14 ratios: spread across the
-full range, with extra density right at the historically-interesting
-0.90-0.911 boundary) -- exists specifically to answer the open question
-of whether near-boundary ratios need a LONGER post-ramp observation
-window than the heater dataset's ~1.5s to show up as genuinely
-runaway-trending, now that there's no heater to kick-start instability.
-Check whether any boundary ratio's `Tmax` is still visibly climbing at
-cutoff before deciding whether to extend `tEnd` for the real ~800-job
-batch, or ship with the unchanged window.
+**Smoketest (done) -- conclusion: unchanged `tEnd`, no extension needed.**
+`condor/sweep_noheater_smoketest.sub` + `condor/ratios_noheater_smoketest.txt`
+(14 ratios: spread across the full range, extra density right at the
+0.90-0.911 boundary) ran to answer whether near-boundary ratios need a
+LONGER post-ramp observation window than the heater dataset's ~1.5s to
+show up as genuinely runaway-trending, now that there's no heater to
+kick-start instability. Results:
+- **`r0p9`/`r0p905`/`r0p91`** (the exact ratios that needed the heater to
+  trigger a full-tape "falsely recovering" runaway in the heater
+  dataset): `dTmax/dt` computed over three successive sub-windows of the
+  post-ramp hold came back FLAT-TO-SLIGHTLY-DECREASING (e.g. r0p91:
+  0.00500 -> 0.00500 -> 0.00492 K/s), not accelerating -- the signature
+  of approaching equilibrium under a small bounded dissipation source,
+  not a developing instability. Total rise was only ~0.006-0.007K over
+  the full window from a 77.0K baseline. No sign any of them were "on
+  the verge" and just needed more time.
+- **`r1p05`** (`runaway` in the heater dataset): stable without the
+  heater, tiny *linear* (not accelerating) creep, ~0.04 K/s, final
+  Tmax=77.08K -- the heater was doing 100% of the work to trigger this
+  ratio's quench originally.
+- **`r1p35`/`r1p45`/`r1p5`**: still quench without the heater (post-ramp
+  `runaway` / ramp-driven `runaway_before_pulse` respectively), as
+  expected for ratios already well above the recovery boundary.
+  `r1p45`/`r1p5` specifically matched their heater-dataset CSVs row-for-
+  row (modulo the new `prePulse` column) -- exact confirmation
+  `--heater-power 0` has zero side effects on a run the heater was never
+  going to affect anyway (already `runaway_before_pulse`, heater never
+  got a chance to fire either way).
+
+**Full batch**: `condor/sweep_noheater.sub` (promoted from the smoketest
+file, same `ratios.txt`, unchanged `tEnd`) -- ready to submit.
