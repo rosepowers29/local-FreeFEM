@@ -30,14 +30,50 @@ container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal@sha
 requirements = (Arch == "X86_64")
 
 executable      = condor_run_ratio.sh
-# Unlike electrothermal's sweep.sub, no --ramp-rate/--ramp-dt hardcoded
-# here -- that slow-ramp scenario was a collaborator-specific requirement
-# calibrated and validated for electrothermal only (see that track's
-# CLAUDE.md); Bfield hasn't validated it at all. Defaults to the .edp's
-# original fixed 0.5s ramp. Add --ramp-rate/--ramp-dt here (together --
-# see electrothermal/CLAUDE.md for why they must be raised in lockstep)
-# once/if this workflow needs the same slow-ramp scenario.
-arguments       = $(ratio) $(label) --runaway-tmax $(runaway_tmax) --aniso $(aniso) --selfconsistent $(selfconsistent) --heater-power $(heaterpower)
+# ramp_rate/ramp_dt: pool-level constants (not a per-ratio sweep
+# dimension, same class as max_wall_seconds/request_memory below) --
+# 20 A/s matches electrothermal's validated collaborator-requested ramp
+# (electrothermal/CLAUDE.md's "Ramp rate / ramp-dt -- validated") and
+# this workflow's own r1p2/r1p2-sc confirmation runs (CLAUDE.md), which
+# used this exact -ramprate 20.0 -rampdt 999.0 pair. **The 2026-10-06
+# sweep that first used this file omitted both flags entirely**, silently
+# falling through to run_bfield_transient.py's old 0.0 sentinel (the
+# .edp's original fixed 0.5s ramp, implying ~435-933 A/s depending on
+# ratio, not 20) -- a real gap in this submit file, not in the .edp,
+# found while analyzing that sweep's results and fixed here. That
+# already-landed fast-ramp sweep is being kept as its own valid dataset,
+# not discarded -- see CLAUDE.md's "Realistic 20 A/s ramp" section.
+# ramp_dt=999 collapses the sub-Ic ramp phase to a single step
+# (validated safe for currentRatio<=1); it must be raised together with
+# ramp_rate or the slow ramp silently pays a 2.5-4.3x step-count penalty
+# for zero accuracy benefit (see CLAUDE.md).
+ramp_rate = 20.0
+ramp_dt = 999.0
+#
+# pulse_dt/max_picard_iter: also pool-level constants. Found (real
+# landed-diagnostics evidence) that -selfconsistent Picard non-
+# convergence in the 0.70-1.20 ratio band is caused by the heater
+# pulse's abrupt onset within its fixed dt window -- independent of ramp
+# rate. pulse_dt=0.0005 (4x finer than the .edp's own 0.002 unflagged
+# default) shrinks that per-step jump directly; max_picard_iter=40 (was
+# 20) gives headroom for whatever residual stiffness remains. Starting
+# values to confirm via a real smoke test -- see CLAUDE.md's
+# "Heater-pulse Picard non-convergence" -- not final numbers.
+pulse_dt = 0.0005
+max_picard_iter = 40
+#
+# max_wall_seconds: found via a real sweep: some ratios -- almost
+# certainly the ones sitting right at the marginal/slow-to-settle quench
+# threshold -- ran past this pool's own ~20h walltime cap and got
+# forcibly killed mid-run, which our on_exit_hold/periodic_release retry
+# logic then blindly retried up to 4x (burning up to 4x the pool's cap
+# for a DETERMINISTIC timeout that just repeats, unlike the node-
+# dependent UMFPACK failures that policy was built for). 64800s=18h
+# leaves a margin under that observed 20h cap -- adjust to match your
+# pool's actual enforced limit if you've confirmed a different number.
+# See CLAUDE.md's "Large aniso+self-consistent sweep" for the incident.
+max_wall_seconds = 64800
+arguments       = $(ratio) $(label) --runaway-tmax $(runaway_tmax) --aniso $(aniso) --selfconsistent $(selfconsistent) --heater-power $(heaterpower) --ramp-rate $(ramp_rate) --ramp-dt $(ramp_dt) --pulse-dt $(pulse_dt) --max-picard-iter $(max_picard_iter) --max-wall-seconds $(max_wall_seconds)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT

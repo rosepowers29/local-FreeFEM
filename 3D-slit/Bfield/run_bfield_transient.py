@@ -65,17 +65,60 @@ DEFAULT_SETTLE_TMAX_MAX = 90.0
 DEFAULT_MAX_STEPS = 500
 DEFAULT_TREND_WINDOW = 0.3
 DEFAULT_TREND_EPS = 0.001
+# None = no self-imposed wall-clock budget (unchanged prior behavior). Set
+# this below whatever your Condor pool's own walltime/retirement cap is
+# (see CLAUDE.md's "Large aniso+self-consistent sweep" -- jobs genuinely
+# needing >20h, almost certainly the ones sitting right at the marginal/
+# slow-to-settle quench threshold, were getting forcibly killed by the
+# pool mid-run). That pool-level kill is indistinguishable from a crash to
+# our own on_exit_hold/periodic_release retry logic, which then blindly
+# retries up to 4x -- but a walltime timeout is DETERMINISTIC (same ratio
+# needs roughly the same wall-clock again), unlike the node-dependent
+# UMFPACK failures that retry policy was built for, so retrying just burns
+# up to 4x the pool's own cap for nothing. Exiting cleanly BEFORE the pool
+# kills us, with a status Condor sees as a normal (exit 0) completion,
+# avoids that -- same principle already applied to Picard non-convergence
+# (log and proceed/stop, don't blindly retry a deterministic condition).
+DEFAULT_MAX_WALL_SECONDS = None
+
 # Amortizes the mesh-rebuild-per-invocation cost (the mesh is rebuilt from
 # scratch on every FreeFEM process launch) across this many physical
 # timesteps per invocation instead of just 1 -- see CLAUDE.md. Safe
 # regardless of the exact value: the .edp checkpoints after every physical
 # step, not once per invocation.
 DEFAULT_STEPS_PER_INVOCATION = 20
-# 0.0 is a sentinel meaning "use the .edp's original fixed 0.5s ramp
-# duration" -- set >0 (target A/s) to derive Tramp = I0Target/ramp_rate.
-DEFAULT_RAMP_RATE = 0.0
-DEFAULT_RAMP_DT = 0.05
+# 20 A/s: the collaborator-requested realistic ramp rate, same number
+# validated extensively in electrothermal/CLAUDE.md's "Ramp rate /
+# ramp-dt -- validated" section and already used for this workflow's own
+# r1p2/r1p2-sc confirmation runs (Bfield/CLAUDE.md). The big 2026-10-06
+# Condor sweep silently fell through to the OLD 0.0 sentinel ("use the
+# .edp's original fixed 0.5s ramp duration", implying ~435-933 A/s
+# depending on ratio) because sweep.sub never passed --ramp-rate at all
+# -- a gap in the Condor plumbing, not in the underlying .edp, now closed
+# here and in condor/sweep.sub. See CLAUDE.md's "Realistic 20 A/s ramp"
+# section for the full incident. That already-landed fast-ramp sweep is
+# being KEPT as its own valid dataset, not discarded -- this default
+# change only affects runs launched from here on.
+DEFAULT_RAMP_RATE = 20.0
+# 999.0: collapses the sub-Ic ramp phase to a single step, validated safe
+# for currentRatio<=1 in electrothermal/CLAUDE.md (byte-identical
+# ramp-end Tmax/fracLeft vs. a fine-grained rampDt=1.0 run) -- without
+# this, a 20 A/s ramp needs 2.5-4.3x more ramp-phase steps at the old
+# 0.05 default for zero accuracy benefit (nothing resistive happens
+# before Ic is reached). rampDtAboveIc (below) is a SEPARATE, already
+# adaptively-grown dt that covers the one sub-phase where collapsing
+# would be unsafe -- unaffected by this.
+DEFAULT_RAMP_DT = 999.0
 DEFAULT_RAMP_DT_ABOVE_IC = 0.002
+# 0.0005: 4x finer than the .edp's own unflagged default (0.002) for the
+# dt used strictly inside the heater pulse window. See
+# step_3d_slit_transient_bfield.edp's -pulsedt flag comment and
+# CLAUDE.md's "Heater-pulse Picard non-convergence" -- found (real
+# landed-diagnostics evidence, not guessed) to be the actual lever
+# against Picard cap-outs in the 0.70-1.20 ratio band, independent of
+# ramp rate. Starting value, to be confirmed/tuned via a real smoke test
+# before a full resubmit.
+DEFAULT_PULSE_DT = 0.0005
 DEFAULT_MAX_STEP_RISE = 500.0
 DEFAULT_MAX_BISECTIONS = 10
 DEFAULT_MAX_JC_FRAC_CHANGE = 0.05
@@ -87,7 +130,12 @@ DEFAULT_ANISO = 0
 # self-consistent (Picard) coupling -- see step_3d_slit_transient_bfield.edp's
 # -selfconsistent flag comment and Bfield/CLAUDE.md for the full design.
 DEFAULT_SELFCONSISTENT = 0
-DEFAULT_MAX_PICARD_ITER = 20
+# 40 (was 20): headroom for whatever residual stiffness DEFAULT_PULSE_DT
+# doesn't fully resolve on its own -- see that constant's comment and
+# CLAUDE.md's "Heater-pulse Picard non-convergence". Only affects steps
+# that don't already converge within the old cap; a step converging in
+# <20 iterations is unaffected by raising it.
+DEFAULT_MAX_PICARD_ITER = 40
 DEFAULT_PICARD_TOL = 1e-3
 DEFAULT_PICARD_OMEGA = 0.5
 # W. 0.0 disables the heater entirely (isolates pure above-Ic ramp-driven
@@ -218,6 +266,7 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             steps_per_invocation=DEFAULT_STEPS_PER_INVOCATION,
             ramp_rate=DEFAULT_RAMP_RATE, ramp_dt=DEFAULT_RAMP_DT,
             ramp_dt_above_ic=DEFAULT_RAMP_DT_ABOVE_IC,
+            pulse_dt=DEFAULT_PULSE_DT,
             settle_tmax_max=DEFAULT_SETTLE_TMAX_MAX,
             max_step_rise=DEFAULT_MAX_STEP_RISE,
             max_bisections=DEFAULT_MAX_BISECTIONS,
@@ -227,7 +276,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             max_picard_iter=DEFAULT_MAX_PICARD_ITER,
             picard_tol=DEFAULT_PICARD_TOL,
             picard_omega=DEFAULT_PICARD_OMEGA,
-            heater_power=DEFAULT_HEATER_POWER):
+            heater_power=DEFAULT_HEATER_POWER,
+            max_wall_seconds=DEFAULT_MAX_WALL_SECONDS):
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -251,10 +301,21 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                              None, 0, start_time)
 
         while True:
+            # Checked BEFORE starting another invocation, not after -- an
+            # invocation can itself cost up to steps_per_invocation x ~170s
+            # (see CLAUDE.md), so checking only after would let the actual
+            # kill-by-the-pool scenario this exists to avoid still happen on
+            # the invocation that pushes past the budget.
+            if max_wall_seconds is not None and (time.monotonic() - start_time) > max_wall_seconds:
+                row = read_last_row(csv_path)
+                return finalize(status_path, log_fh, label, ratio, "wall_budget_exceeded",
+                                 row, n_steps, start_time)
+
             rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix,
                                             "-steps-per-invocation", str(steps_per_invocation),
                                             "-ramprate", str(ramp_rate), "-rampdt", str(ramp_dt),
                                             "-rampdt-aboveic", str(ramp_dt_above_ic),
+                                            "-pulsedt", str(pulse_dt),
                                             "-tmaxcutoff", str(runaway_tmax),
                                             "-maxsteprise", str(max_step_rise),
                                             "-maxbisections", str(max_bisections),
@@ -387,17 +448,26 @@ def main():
                         f"as --max-steps, which caps total invocations as a "
                         f"safety net. See CLAUDE.md.")
     p.add_argument("--ramp-rate", type=float, default=DEFAULT_RAMP_RATE,
-                   help="Target current ramp rate in A/s (default: "
-                        f"{DEFAULT_RAMP_RATE}, meaning use the .edp's original "
-                        "fixed 0.5s ramp duration). >0 derives the ramp "
-                        "duration as I0Target/ramp-rate instead.")
+                   help=f"Target current ramp rate in A/s (default: "
+                        f"{DEFAULT_RAMP_RATE}, matching electrothermal's validated "
+                        f"collaborator-requested ramp -- see CLAUDE.md). Pass 0.0 "
+                        f"for the .edp's original fixed 0.5s ramp duration instead "
+                        f"(implies ~435-933 A/s depending on ratio).")
     p.add_argument("--ramp-dt", type=float, default=DEFAULT_RAMP_DT,
-                   help=f"Timestep used during the ramp phase specifically "
-                        f"(default: {DEFAULT_RAMP_DT}, today's exact value).")
+                   help=f"Timestep used during the sub-Ic ramp phase specifically "
+                        f"(default: {DEFAULT_RAMP_DT}, collapses it to a single "
+                        f"step -- validated safe for currentRatio<=1, see "
+                        f"CLAUDE.md). Must be raised together with --ramp-rate; "
+                        f"see that flag's own help.")
     p.add_argument("--ramp-dt-above-ic", type=float, default=DEFAULT_RAMP_DT_ABOVE_IC,
                    help=f"Starting dt for whatever portion of the ramp already has "
                         f"I0(t) above Ic (default: {DEFAULT_RAMP_DT_ABOVE_IC}) -- "
                         f"only matters once --ratio>1. See CLAUDE.md.")
+    p.add_argument("--pulse-dt", type=float, default=DEFAULT_PULSE_DT,
+                   help=f"dt used strictly inside the heater pulse window "
+                        f"(default: {DEFAULT_PULSE_DT}) -- see "
+                        f"step_3d_slit_transient_bfield.edp's -pulsedt flag comment "
+                        f"and CLAUDE.md's \"Heater-pulse Picard non-convergence\".")
     p.add_argument("--max-step-rise", type=float, default=DEFAULT_MAX_STEP_RISE,
                    help=f"Max K a single heatStep solve may move Tmax/Tmin from "
                         f"Told before it's retried at half dt (default: "
@@ -435,6 +505,12 @@ def main():
                    help=f"Heater power in W; 0.0 disables the heater entirely, "
                         f"isolating pure above-Ic ramp-driven quench from "
                         f"heater-triggered quench (default: {DEFAULT_HEATER_POWER}).")
+    p.add_argument("--max-wall-seconds", type=float, default=DEFAULT_MAX_WALL_SECONDS,
+                   help="Stop cleanly (status 'wall_budget_exceeded', exit 0, NOT "
+                        "retry-worthy) once this many seconds of wall-clock have "
+                        "elapsed, rather than starting another invocation. Set this "
+                        "below your Condor pool's own walltime cap. Default: no "
+                        "limit (unchanged prior behavior).")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
@@ -442,10 +518,11 @@ def main():
             args.recover_eps, args.recover_hold_time, args.max_steps, args.force,
             args.freefem_bin, args.trend_window, args.trend_eps,
             args.steps_per_invocation, args.ramp_rate, args.ramp_dt,
-            args.ramp_dt_above_ic, args.settle_tmax_max,
+            args.ramp_dt_above_ic, args.pulse_dt, args.settle_tmax_max,
             args.max_step_rise, args.max_bisections, args.max_jc_frac_change,
             args.aniso, args.selfconsistent, args.max_picard_iter,
-            args.picard_tol, args.picard_omega, args.heater_power)
+            args.picard_tol, args.picard_omega, args.heater_power,
+            args.max_wall_seconds)
     if summary["status"] in RETRY_WORTHY_STATUSES:
         sys.exit(1)
 

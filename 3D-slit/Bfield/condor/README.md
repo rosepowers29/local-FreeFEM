@@ -20,11 +20,26 @@ rationale; this file only covers what's different for Bfield.
 - **`payload.tar.gz` carries one extra file**: `bfield_3d_slit.idp`
   (the Biot-Savart self-field / Kim-model code), alongside the same
   `init_*`/`step_*`/wrapper trio electrothermal's payload has.
-- **No `--ramp-rate`/`--ramp-dt` hardcoded in `sweep.sub`'s
-  `arguments`** — that slow-ramp scenario was calibrated and validated
-  for electrothermal specifically (a collaborator requirement); this
-  workflow hasn't validated it at all. Defaults to the `.edp`'s original
-  fixed 0.5s ramp.
+- **`sweep.sub` now hardcodes `ramp_rate = 20.0`/`ramp_dt = 999.0`**
+  (file-level macros, same class as `max_wall_seconds`/`request_memory`
+  below) — the same collaborator-requested rate validated extensively
+  in `electrothermal/CLAUDE.md`'s "Ramp rate / ramp-dt -- validated"
+  section and already used for this workflow's own `r1p2`/`r1p2-sc`
+  confirmation runs. **The original 2026-10-06 sweep omitted these
+  flags entirely**, silently falling through to the `.edp`'s fixed
+  0.5s-ramp default (~435-933 A/s depending on ratio, not 20) — a real
+  gap in this submit file found while analyzing that sweep's landed
+  results, now fixed. That already-landed fast-ramp sweep is being kept
+  as its own valid dataset, not discarded — see `../CLAUDE.md`'s
+  "Realistic 20 A/s ramp" section for the full incident and the
+  resubmission plan.
+- **`sweep.sub` also hardcodes `pulse_dt = 0.0005`/`max_picard_iter = 40`**
+  — found (real landed-diagnostics evidence) that `-selfconsistent`
+  Picard non-convergence in the 0.70-1.20 ratio band is caused by the
+  heater pulse's abrupt onset within its own fixed dt window,
+  independent of ramp rate. See `../CLAUDE.md`'s "Heater-pulse Picard
+  non-convergence" — these are starting values pending a real smoke
+  test, not final numbers.
 - **`run_bfield_transient.py` has no `--resume`** (see `../CLAUDE.md`) —
   doesn't matter for Condor's own "no resume-on-preemption" v1 design
   (below), since a fresh sandbox never has anything to resume from
@@ -176,6 +191,26 @@ mode it's guarding against is shared code, not workflow-specific.
   preemptions on a shared pool — budget for re-runs, or treat building
   real resume support as worth doing before a sweep this size rather
   than after losing the first few jobs to it.
+- **This risk materialized 2026-10-07**: several ratios in the real
+  sweep ran past this pool's own ~20h walltime cap and were forcibly
+  killed mid-run, which `on_exit_hold`/`periodic_release` then blindly
+  retried up to 4x — a DETERMINISTIC timeout just repeats, so this burns
+  up to 4x the pool's own cap for nothing before landing on permanent
+  hold. Fixed going forward via `sweep.sub`'s `max_wall_seconds = 64800`
+  (18h, under the observed 20h cap) → `run_bfield_transient.py`'s new
+  `--max-wall-seconds`, which exits cleanly (status
+  `wall_budget_exceeded`, exit 0, NOT retry-worthy) before the pool would
+  kill it. **Does not rescue jobs already stuck in that retry loop** —
+  those need to be let run out their retries (or `condor_rm`'d) and
+  resubmitted fresh once this fix is in the payload. See `../CLAUDE.md`'s
+  "Large aniso+self-consistent sweep" for the full incident writeup.
+- **This also materialized 2026-10-08**: the same sweep was discovered
+  (while building cross-ratio summary plots) to have run at the `.edp`'s
+  fixed 0.5s-ramp default rather than the intended 20 A/s, because
+  `sweep.sub` never passed `--ramp-rate`/`--ramp-dt` at all. Fixed via
+  the `ramp_rate`/`ramp_dt` macros above. The already-landed fast-ramp
+  data is being kept as its own valid dataset (user's explicit decision),
+  not discarded — see `../CLAUDE.md`'s "Realistic 20 A/s ramp" section.
 - **CPU-only**, same reasoning as electrothermal.
 - `request_memory`/`request_disk`/the container syntax block are
   first-pass guesses **carried over from electrothermal's measurements**,

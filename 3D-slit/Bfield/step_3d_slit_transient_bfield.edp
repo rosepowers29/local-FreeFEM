@@ -70,6 +70,18 @@ real rampRateTarget = getARGV("-ramprate", 0.0);
 real rampDt = getARGV("-rampdt", 0.05);
 real rampDtAboveIc = getARGV("-rampdt-aboveic", 0.002);
 real maxJcFracChange = getARGV("-maxjcfracchange", 0.05);
+// -pulsedt: dt used strictly inside [tPulseStart, tPulseEnd] (default
+// 0.002, today's exact hardcoded value -- unflagged behavior unchanged).
+// The heater's onset is a near-discontinuous local source term switched
+// on within this fixed-duration window regardless of -ramprate/-rampdt
+// -- found (grepping real landed diagnostics, not guessed) to be the
+// actual root cause of -selfconsistent Picard non-convergence in the
+// 0.70-1.20 ratio band, independent of ramp rate. A finer value here
+// shrinks the per-step jump in that abrupt transition directly, rather
+// than just giving the Picard loop a bigger budget to grind through the
+// same stiffness. See Bfield/CLAUDE.md's "Heater-pulse Picard
+// non-convergence" section.
+real pulseDt = getARGV("-pulsedt", 0.002);
 real Tramp = 0.5;
 if (rampRateTarget > 0.0) Tramp = I0Target/rampRateTarget;
 // tCrossIc: when I0(t)=I0Target*(tt/Tramp) first reaches IcRebcoActual.
@@ -88,7 +100,7 @@ real[int] phaseBounds = [tCrossIc, Tramp, tPulseStart, tPulseEnd, tEnd];
 func real dtRaw(real tt){
   if (tt < tCrossIc) return rampDt;
   if (tt < Tramp) return rampDtAboveIc;
-  if (tt < tPulseEnd) return 0.002;
+  if (tt < tPulseEnd) return pulseDt;
   if (tt > tPulseEnd + 0.2) return 0.02;
   return 0.01;
 }

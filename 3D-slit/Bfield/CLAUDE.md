@@ -683,3 +683,177 @@ previous solve; whether this specific remote execute node is unusually
 slow vs. pool-typical) — flagged as a real option if sweep cost ever
 needs to come down, not pursued here per the user's explicit choice to
 proceed at full scale first.
+
+**Incident, 2026-10-07 — pool walltime cap vs. the retry policy.** Once
+the (re-split 900/250, see below) sweeps were actually running, several
+ratios ran past this Condor pool's own ~20h walltime cap and were
+forcibly killed mid-run — almost certainly the ratios sitting right at
+the marginal/slow-to-settle quench threshold (classic critical-slowing-
+down near a bifurcation), which is informative in its own right, not
+just an inconvenience. The real problem: `on_exit_hold`/
+`periodic_release` (designed for the node-dependent UMFPACK failure
+mode, where retrying on a different node can genuinely help) then
+blindly retried these up to 4x — but a walltime timeout is
+DETERMINISTIC (the same ratio needs roughly the same wall-clock again),
+so this burned up to 4x the pool's own cap for zero benefit before
+landing on permanent hold. Same anti-pattern already avoided for Picard
+non-convergence (log-and-proceed instead of assert-and-retry); this
+needed the same treatment.
+
+**Fixed**: `run_bfield_transient.py` gained `--max-wall-seconds`,
+checked at the top of `run_one()`'s invocation loop (before starting
+another FreeFEM invocation, not after — an invocation can itself cost
+up to `steps_per_invocation x ~170s`, so checking only after would let
+the exact kill-by-the-pool scenario this exists to avoid still happen
+on the invocation that pushes past budget). Exceeding it returns a new
+`"wall_budget_exceeded"` status, deliberately kept OUT of
+`RETRY_WORTHY_STATUSES` so `main()` exits 0 — Condor sees a normal
+completion, never entering the retry loop. `sweep.sub` now hardcodes
+`max_wall_seconds = 64800` (18h, a margin under the observed 20h cap)
+as a file-level macro and passes it via `--max-wall-seconds
+$(max_wall_seconds)` — a pool-level constant, not a per-ratio sweep
+dimension, so (like `request_memory`/`request_disk`) it's hardcoded in
+`sweep.sub` rather than a `ratios.txt` column.
+
+**Verified** with a fake fast-exiting `FreeFem++` stub (real
+end-to-end exercise of `run_one()`'s control flow, not just a code
+read): `--max-wall-seconds 0.5` stopped after 0 steps (budget already
+exceeded by the init invocation's own overhead) with status
+`wall_budget_exceeded`; `--max-wall-seconds 2.0` ran 7 steps before
+stopping; both exited 0. **Not verified**: real behavior against actual
+FreeFEM at sweep scale (no reason to expect a difference — the check is
+pure Python control flow around the same `run_freefem()` call already
+exercised everywhere else in this file).
+
+**Does NOT rescue jobs already stuck in the retry loop** — no
+checkpoint-resume exists (`run_bfield_transient.py` still has no
+`--resume`, and even if it did, Condor's own retry re-extracts a fresh
+`payload.tar.gz` sandbox with no path for a prior attempt's partial
+output to feed back in as input). Already-held jobs from the affected
+batch need to exhaust their retries (or be `condor_rm`'d) and get
+resubmitted fresh once `make_payload.sh` has repackaged this fix — which
+is exactly the user's stated plan: let the current batch finish/hold,
+then resubmit the timed-out ratios.
+
+**Also corrected during this incident's investigation**: the sweep's
+`--runaway-tmax` is no longer a flat `250` across the whole `0.7-1.5`
+range. Re-examined and re-split per `make_ratios_list.py`'s own
+docstring convention: `900` (loose, "shouldn't get anywhere near this"
+default) for `0.700-0.999`, `250` (tight, catch real above-Ic runaway
+early) for `1.000-1.500` — a flat `250` risked misclassifying a
+benign, still-recovering heater-driven transient at low ratio as
+`"runaway"` before it had a chance to settle, corrupting exactly the
+quench-threshold curve this sweep exists to produce. (Spot-checked: a
+local `ratio=0.7` heater-on smoke test showed `TmaxLeft` peak at
+`102.274K` then monotonically decline — safely under either threshold
+for that one data point, but the split removes the risk for the rest
+of the sub-Ic range rather than relying on a single spot-check.)
+
+## Realistic 20 A/s ramp — the landed sweep ran a different (fast) protocol than intended
+
+**Found 2026-10-08**, while building cross-ratio summary analysis for
+the landed sweep (597 heater-on + 650 heater-off runs). The user
+expected a ~20 A/s current ramp; the `t`-axis on the summary plots
+didn't match.
+
+**Confirmed from the data**:
+`runs/r0p7-aniso-sc-noheater-pilot/transient_3d_slit.csv` shows `I0`
+climbing from 0 to its 217.672A target over a FIXED `t=0->0.5s` window
+— **~435 A/s**, not 20. Because that window is a fixed 0.5s duration
+regardless of ratio, the implied rate actually scales *with* ratio
+(~435 A/s at ratio=0.7, ~933 A/s at ratio=1.5) rather than being
+constant across the sweep.
+
+**Confirmed from the code**: `condor/sweep.sub`'s `arguments` line
+never passed `-ramprate`/`-rampdt` at all for this sweep, so every job
+silently fell through to `run_bfield_transient.py`'s old `DEFAULT_RAMP_RATE=0.0`
+sentinel ("use the `.edp`'s original fixed 0.5s ramp"). This is a gap
+in the Condor submit file only — **the `.edp` itself already had
+everything needed**, already validated in this exact codebase's
+history: `-ramprate 20.0 -rampdt 999.0` is exactly what the earlier
+one-off `r1p2`/`r1p2-sc` confirmation runs used (see "Landed
+2026-09-29" above), itself ported from `electrothermal/CLAUDE.md`'s
+extensively-validated "Ramp rate / ramp-dt -- validated" section (same
+20 A/s collaborator-requested rate). The big sweep's automation layer
+simply never wired it through.
+
+**User's decision**: keep the already-landed fast-ramp sweep as its own
+valid dataset — it is NOT being discarded or rerun-in-place. **The
+quench-threshold numbers recorded above (~0.87-0.88xIc heater-on,
+~1.16-1.17xIc heater-off) belong to this fast fixed-duration-ramp
+scenario specifically** — they should not be read as "the" quench
+threshold until the realistic-ramp resubmission below lands and either
+confirms or revises them. A slower ramp gives the thermal/current-
+sharing system materially more time to respond during ramp-up, which
+could shift the threshold in either direction; this is an open
+empirical question, not assumed settled by the fast-ramp numbers.
+
+**Fix (implemented)**: `run_bfield_transient.py`'s `DEFAULT_RAMP_RATE`
+is now `20.0` and `DEFAULT_RAMP_DT` is now `999.0` (collapses the
+sub-`Ic` ramp phase to a single step — validated safe for
+`currentRatio<=1` in electrothermal's own ramp-rate validation;
+`DEFAULT_RAMP_DT_ABOVE_IC` stays `0.002`, already correct and
+unaffected). `condor/sweep.sub` now hardcodes `ramp_rate = 20.0`/
+`ramp_dt = 999.0` as explicit file-level macros (same class as
+`max_wall_seconds`), passed via `--ramp-rate $(ramp_rate) --ramp-dt
+$(ramp_dt)`. No `.edp` changes were needed for this part — see
+"Ratio/wrapper parameterization" above for why the existing
+`-ramprate`/`-rampdt`/`-rampdt-aboveic` design already handles both the
+sub-`Ic` collapse and the above-`Ic` adaptive-growth sub-phase safely.
+
+## Heater-pulse Picard non-convergence — root cause found, independent of ramp rate
+
+Found while investigating the same landed sweep's
+`chart_summary_peak_picard_iters.png`, which showed many heater-on runs
+pinned at the `-maxpicarditer 20` cap. The user's own hypothesis was
+that the (then-undiscovered) ramp-rate bug was also responsible
+("sharp transition kinks"). **Checked directly against real landed
+diagnostics CSVs, not assumed:**
+
+- `runs/r0p75-aniso-sc/diagnostics_3d_slit.csv` (ratio=0.75, inside a
+  ratio bucket where every run hit the cap): `picardIters=1` for the
+  entire pre-pulse ramp (expected — ratio<1 never approaches `Ic`, so
+  nothing is stiff yet), then **20 for all 4 steps strictly inside
+  `[tPulseStart, tPulseEnd]=[0.5, 0.51]`** (`picardRelErr` stuck at
+  0.016-0.05, i.e. 16-50x over the `1e-3` tolerance), then immediately
+  back to single digits (4,8,7,6...) the instant the pulse ends.
+- `runs/r1p22-aniso-sc/diagnostics_3d_slit.csv` (ratio=1.22, just past
+  where cap-hitting stops in the ratio-binned breakdown): the SAME
+  pulse-window steps only need 8-12 iterations — confirms this is
+  ratio-dependent (worst in the marginal/near-threshold band roughly
+  0.70-1.20, with the 1.05-1.15 band 100% capped), not a universal
+  property of the pulse itself.
+
+**Conclusion: the ramp-rate fix above will NOT by itself fix this.**
+`dtRaw()`'s pulse-phase branch (`if (tt < tPulseEnd) return pulseDt;`,
+previously a hardcoded `0.002`) is a fixed absolute dt completely
+independent of `Tramp`/ramp rate — the heater's abrupt onset within
+that fixed window is the actual stiffness, not the ramp leading up to
+it. The ramp-rate fix may still help the separate above-`Ic` approach
+into the pulse for ratio>1 (a real, different stiff regime the adaptive
+`rampDtAboveIc` controller already handles), but the pulse itself needs
+its own fix.
+
+**Fix (implemented)**: new `-pulsedt` flag in
+`step_3d_slit_transient_bfield.edp` (default `0.002`, today's exact
+hardcoded value — unflagged/raw-invocation behavior unchanged),
+replacing the literal `0.002` in `dtRaw()`. `run_bfield_transient.py`'s
+own defaults: `DEFAULT_PULSE_DT = 0.0005` (4x finer, shrinks the
+per-step jump in the abrupt heater-driven transition directly) and
+`DEFAULT_MAX_PICARD_ITER` raised `20 -> 40` (headroom for whatever
+residual stiffness the finer dt doesn't fully resolve). `condor/sweep.sub`
+hardcodes matching `pulse_dt = 0.0005`/`max_picard_iter = 40` macros.
+
+**These two values are starting hypotheses, not confirmed numbers** —
+to be validated via a targeted smoke test (one known-100%-capped ratio,
+e.g. 1.10, run just past the pulse window) before committing to a full
+resubmit. Update this section with the real measured result once that
+test lands: does the cap-hitting actually clear, and what's the real
+added wall-clock cost for the pulse window at the finer dt (replacing
+the untested ~20-step estimate this fix was designed around).
+
+**Status**: both fixes implemented and documented 2026-10-08. Not yet
+smoke-tested on real hardware, not yet resubmitted. The already-landed
+1247-run fast-ramp sweep stands as its own dataset per the user's
+explicit decision above — resubmission under the corrected protocol is
+a separate, later batch, not a replacement/overwrite of it.
