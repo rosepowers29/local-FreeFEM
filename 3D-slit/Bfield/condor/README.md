@@ -123,10 +123,10 @@ run isotropic:
 python3 make_ratios_list.py --aniso 0.7 > ratios.txt
 python3 make_ratios_list.py --aniso --runaway-tmax 250 1.2 >> ratios.txt
 # (match runaway_tmax to whatever the isotropic run used, e.g. r1p2's 250 --
-#  make_ratios_list.py doesn't carry ramp-rate/ramp-dt overrides; if the
-#  isotropic run used non-default -ramprate/-rampdt, add
-#  --ramp-rate/--ramp-dt to sweep.sub's `arguments` line to match, or run
-#  that one pair manually via run_bfield_transient.py instead of Condor)
+#  ramp-rate/ramp-dt/pulse-dt/max-picard-iter are now hardcoded macros in
+#  sweep.sub itself (ramp_rate/ramp_dt/pulse_dt/max_picard_iter), applied
+#  to every job regardless of ratios.txt -- edit those macros directly if
+#  a confirmation pair needs to match an older run's non-default values)
 mkdir -p logs
 condor_submit sweep.sub
 ```
@@ -134,16 +134,27 @@ condor_submit sweep.sub
 To launch a **full aniso+self-consistent sweep, heater on vs. off** (two
 separate ratios files, two separate `condor_submit` calls — this is a
 LOT of jobs; see the cost/preemption warnings below before running
-this for real):
+this for real). `--runaway-tmax` is split 900 (loose)/250 (tight) across
+the sub-/above-Ic halves, not a flat value — see `../CLAUDE.md`'s
+"Also corrected during this incident's investigation" for why a flat
+value risks misclassifying a still-recovering low-ratio transient.
+`--label-suffix` distinguishes a given protocol revision's labels from
+any earlier sweep over the same ratios (e.g. `-ramp20` for the
+corrected-ramp resubmission — see `../CLAUDE.md`'s "Realistic 20 A/s
+ramp"):
 
 ```bash
-python3 make_ratios_list.py --aniso --selfconsistent --runaway-tmax 250 \
-    --range 0.700 1.500 0.001 > ratios.txt     # 801 ratios, heater on
+python3 make_ratios_list.py --aniso --selfconsistent --label-suffix=-ramp20 \
+    --runaway-tmax 900 --range 0.700 0.999 0.001 > ratios.txt
+python3 make_ratios_list.py --aniso --selfconsistent --label-suffix=-ramp20 \
+    --runaway-tmax 250 --range 1.000 1.500 0.001 >> ratios.txt    # 801 ratios total, heater on
 mkdir -p logs
 condor_submit sweep.sub
 
-python3 make_ratios_list.py --aniso --selfconsistent --no-heater --runaway-tmax 250 \
-    --range 0.700 1.500 0.001 > ratios.txt     # overwrite -- different labels (-noheater), no collision with the above
+python3 make_ratios_list.py --aniso --selfconsistent --no-heater --label-suffix=-ramp20 \
+    --runaway-tmax 900 --range 0.700 0.999 0.001 > ratios.txt
+python3 make_ratios_list.py --aniso --selfconsistent --no-heater --label-suffix=-ramp20 \
+    --runaway-tmax 250 --range 1.000 1.500 0.001 >> ratios.txt    # overwrite -- different labels (-noheater), no collision with the above
 condor_submit sweep.sub
 ```
 

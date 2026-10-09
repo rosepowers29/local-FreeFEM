@@ -852,8 +852,43 @@ test lands: does the cap-hitting actually clear, and what's the real
 added wall-clock cost for the pulse window at the finer dt (replacing
 the untested ~20-step estimate this fix was designed around).
 
-**Status**: both fixes implemented and documented 2026-10-08. Not yet
-smoke-tested on real hardware, not yet resubmitted. The already-landed
-1247-run fast-ramp sweep stands as its own dataset per the user's
-explicit decision above — resubmission under the corrected protocol is
-a separate, later batch, not a replacement/overwrite of it.
+**Smoke-tested 2026-10-08, real Condor hardware (`runs/r1p1-smoketest`,
+ratio=1.10 — drawn from the old sweep's 1.05-1.15 bucket where 100% of
+runs hit the cap)**: confirms the fix. The newly-traversed above-Ic
+ramp window (`t=15.548->17.1028`, previously almost collapsed to
+nothing under the old fast-ramp protocol) shows `picardIters` climbing
+smoothly `1->3->4->...->11` as the existing adaptive `rampDtAboveIc`
+controller grows the step — no issues in this previously-untested-at-
+this-ratio regime. The heater pulse window (`t=17.1033->17.1128`, now
+20 steps instead of the old ~5) shows **every step converging**:
+`picardIters = 12, 33, 8, 8, 8, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6, 5, 5, 6`,
+`picardRelErr` at or under ~0.001 throughout — vs. the old baseline
+(`runs/r1p1-aniso-sc`) hard-capping at 20 with `relErr=0.00587` (5.9x
+over tolerance) at the same ratio. The hardest step (right at the
+heater's first instant, `Tmax` jumping 92->101K) needed 33 of the 40
+available iterations — real but bounded margin, not wide; some ratio
+in the old 100%-capped band could still occasionally need more than 40,
+not independently checked. Cost: `35083.5s` (~9.75h) vs. the old run's
+`19360.5s` (~5.4h) for this same ratio — ~1.8x, mostly from now
+actually traversing the above-Ic window plus the pulse's 15 extra
+steps; this ratio (needing the full above-Ic traversal) is close to a
+worst case for the relative cost increase, sub-Ic ratios only pick up
+the smaller fixed pulse-window overhead. User reviewed this result and
+chose to proceed directly to the full resubmit rather than test a
+second ratio.
+
+**`make_ratios_list.py` gained `--label-suffix`** (e.g. `-ramp20`) so
+the resubmitted sweep's labels don't collide with the already-landed
+fast-ramp sweep's — verified zero overlap against the real `runs/`
+listing before resubmitting.
+
+**Status**: both fixes implemented, smoke-tested, and resubmission
+commands handed off 2026-10-09 (two full 801-ratio sweeps, heater on/
+off, `--label-suffix=-ramp20`, the corrected 900/250 `--runaway-tmax`
+split). Update this section once the resubmitted sweeps land, with the
+resulting quench-threshold curve under the corrected protocol — compare
+directly against the fast-ramp sweep's ~0.87-0.88xIc/~1.16-1.17xIc
+numbers above. The already-landed 1247-run fast-ramp sweep stands as
+its own dataset per the user's explicit decision above — this
+resubmission is a separate, later batch, not a replacement/overwrite of
+it.

@@ -93,6 +93,14 @@ def main():
                         "above-Ic ramp-driven quench from heater-triggered "
                         "quench. Default: heater on (heaterpower=13.0, no "
                         "label suffix).")
+    p.add_argument("--label-suffix", default="",
+                   help="Extra literal string appended to every label in "
+                        "THIS invocation, after the --aniso/--selfconsistent/"
+                        "--no-heater suffixes -- e.g. '-ramp20' to distinguish "
+                        "a resubmitted sweep under a corrected protocol "
+                        "(different -ramprate/-rampdt/-pulsedt/-maxpicarditer) "
+                        "from an already-landed sweep that used the same "
+                        "aniso/selfconsistent/heater flags. Default: none.")
     args = p.parse_args()
 
     if args.range and args.ratios:
@@ -107,7 +115,7 @@ def main():
 
     ratios = sorted(ratios)
     suffix = ("-aniso" if args.aniso else "") + ("-sc" if args.selfconsistent else "") \
-             + ("-noheater" if args.no_heater else "")
+             + ("-noheater" if args.no_heater else "") + args.label_suffix
     labels = [rt.sanitize_label(r) + suffix for r in ratios]
 
     seen = {}
