@@ -27,7 +27,24 @@ container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal@sha
 # The published image is amd64-only (confirmed: no aarch64 variant) --
 # guarantee it never lands on a non-x86_64 execute node, in case this
 # pool has any in the mix.
-requirements = (Arch == "X86_64")
+#
+# MTState-Tempest-CE1 excluded: found 2026-10-12, real evidence from the
+# -ramp20 resubmission's own Condor job-event logs (logs/*.log) -- this
+# site is 33.5% of all job attempts but 70.3% of jobs that ended up held
+# for "exceeded allowed execute duration of 20:00:00" (104/148 held jobs
+# touched it vs. 536/1602 of all jobs), a ~2.1x over-representation. The
+# real mechanism: this workflow has no resume-on-preemption (see
+# condor/README.md's "Known limitations"), so every eviction --
+# regardless of site -- forces a full restart from t=0 (condor_run_ratio.sh
+# always passes --force); the pool's own duration cap then eventually
+# trips on the CUMULATIVE time across however many from-scratch restarts
+# a job suffers, which our own --max-wall-seconds never sees (it resets
+# every restart too). Excluding the worst offender is a cheap, reversible
+# mitigation -- NOT a complete fix, since ~30% of held jobs never touched
+# this site at all (other backfill/opportunistic sites in this pool carry
+# some baseline eviction rate too). Real resume-on-preemption support
+# would be the durable fix; not yet built.
+requirements = (Arch == "X86_64") && (GLIDEIN_ResourceName =!= "MTState-Tempest-CE1")
 
 executable      = condor_run_ratio.sh
 # ramp_rate/ramp_dt: pool-level constants (not a per-ratio sweep

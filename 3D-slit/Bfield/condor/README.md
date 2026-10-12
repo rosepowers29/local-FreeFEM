@@ -222,6 +222,25 @@ mode it's guarding against is shared code, not workflow-specific.
   the `ramp_rate`/`ramp_dt` macros above. The already-landed fast-ramp
   data is being kept as its own valid dataset (user's explicit decision),
   not discarded — see `../CLAUDE.md`'s "Realistic 20 A/s ramp" section.
+- **This risk (no resume-on-preemption) materialized again 2026-10-12**,
+  a different mechanism than the 2026-10-07 incident: 148 of 1602
+  `-ramp20` jobs held on the SAME "exceeded allowed execute duration of
+  20:00:00" reason, but this time triggered by real Condor job eviction
+  (`Code 1007`, `Failed to receive GoAhead message` — a submit/execute-
+  node connectivity breakdown, not a single over-long run). Every
+  eviction forces a full restart from `t=0` (`--force`, see above), and
+  the CUMULATIVE wall-clock across however many from-scratch restarts a
+  job suffers is what eventually trips the pool's duration cap — our own
+  `--max-wall-seconds` check never sees this, since its own clock resets
+  with every restart too. Investigated via each held job's own
+  `logs/<label>.log` (the Condor job event log, available locally even
+  for a still-held job): `GLIDEIN_ResourceName = "MTState-Tempest-CE1"`
+  was present in 70.3% of held `-ramp20` jobs vs. 33.5% of all of them —
+  a real ~2.1x over-representation, now excluded via `requirements`
+  above. **Confirmed NOT a complete fix**: ~30% of held jobs never
+  touched that site at all, so some baseline eviction rate from other
+  backfill/opportunistic resources in this pool remains. Real
+  resume-on-preemption support would be the durable fix — not yet built.
 - **CPU-only**, same reasoning as electrothermal.
 - `request_memory`/`request_disk`/the container syntax block are
   first-pass guesses **carried over from electrothermal's measurements**,

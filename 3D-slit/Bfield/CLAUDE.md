@@ -892,3 +892,31 @@ numbers above. The already-landed 1247-run fast-ramp sweep stands as
 its own dataset per the user's explicit decision above — this
 resubmission is a separate, later batch, not a replacement/overwrite of
 it.
+
+**Incident, 2026-10-12 — Condor job eviction, not a too-long single run.**
+148 of the 1602 `-ramp20` jobs landed held on the same hold reason as
+the 2026-10-07 incident ("exceeded allowed execute duration of
+20:00:00"), but a genuinely different mechanism this time: real Condor
+job eviction (`Code 1007`, `Failed to receive GoAhead message` — a
+submit/execute-node connectivity breakdown), not one invocation
+genuinely running too long. Diagnosed directly from each held job's own
+`logs/<label>.log` (the Condor job event log, readable locally even for
+a still-held job, no `condor_q` needed): every eviction forces a full
+restart from `t=0` (`condor_run_ratio.sh`'s unconditional `--force`),
+and the cumulative wall-clock across however many from-scratch restarts
+a job suffers is what eventually trips the pool's duration cap — our
+own `--max-wall-seconds` check never sees this, since its clock resets
+with every restart too. `GLIDEIN_ResourceName = "MTState-Tempest-CE1"`
+was present in 70.3% of held `-ramp20` jobs (104/148) vs. 33.5% of all
+of them (536/1602) — a real ~2.1x over-representation, confirmed by
+comparing against the all-jobs baseline rather than assuming the raw
+count meant anything on its own (33.5% MTState-generally is itself a
+large share — the comparison, not the raw count, is what makes this
+evidence). Fixed via `requirements = ... && (GLIDEIN_ResourceName =!=
+"MTState-Tempest-CE1")` in `condor/sweep.sub`, full writeup in
+`condor/README.md`'s "Known limitations". **Confirmed NOT a complete
+fix**: ~30% of held jobs never touched that site at all, so some
+baseline eviction rate from other backfill/opportunistic pool resources
+remains — real resume-on-preemption would be the durable fix, not yet
+built, explicitly deferred (user's choice) in favor of resubmitting the
+148 affected ratios now under the corrected `requirements`.
