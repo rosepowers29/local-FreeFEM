@@ -920,3 +920,25 @@ baseline eviction rate from other backfill/opportunistic pool resources
 remains — real resume-on-preemption would be the durable fix, not yet
 built, explicitly deferred (user's choice) in favor of resubmitting the
 148 affected ratios now under the corrected `requirements`.
+
+**Follow-up, 2026-10-13 — a false alarm on the MTState exclusion, and a
+real second site.** After resubmitting the 148, 47 came back held again.
+First look at the site tally (`MTState-Tempest-CE1` still 4/25, despite
+being "already excluded") suggested the exclusion wasn't actually
+working. Root-caused by checking each held job's `QDate` (submission
+timestamp) rather than assuming: every one of those 4 MTState
+recurrences turned out to be an OLD STRAGGLER from the original
+2026-10-09 submission (`r0p807`/`r0p926`/`r0p958`/`r1p148` etc.) that
+was simply never part of the 148-job cleanup in the first place —
+likely still running (not yet held) at the moment that `condor_rm`
+sweep ran, and only crossing the cumulative duration threshold
+independently afterward, still carrying the OLD pre-fix `Requirements`.
+Confirmed clean once separated by date: **zero** MTState recurrence
+among the 21 genuinely-new (2026-10-12, matching the actual
+resubmission) held jobs — the exclusion works as designed. What IS
+real among those 21: `IU-Jetstream2-Backfill` at 10/21 (~48%), now also
+excluded in `sweep.sub` (see its own comment there). Lesson for next
+time: when checking whether a fix landed, always cross-reference by
+`QDate`/submission time before trusting a raw site tally — a
+population that mixes pre-fix stragglers with genuinely new jobs will
+misattribute the stragglers' failures to the fix not working.

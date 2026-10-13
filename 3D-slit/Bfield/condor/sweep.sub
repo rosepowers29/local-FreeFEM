@@ -44,7 +44,15 @@ container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal@sha
 # this site at all (other backfill/opportunistic sites in this pool carry
 # some baseline eviction rate too). Real resume-on-preemption support
 # would be the durable fix; not yet built.
-requirements = (Arch == "X86_64") && (GLIDEIN_ResourceName =!= "MTState-Tempest-CE1")
+#
+# IU-Jetstream2-Backfill ALSO excluded: found 2026-10-13, after resubmitting
+# the 148 MTState-era held jobs. Confirmed clean (not conflated with old
+# pre-fix stragglers, unlike an initial false alarm on MTState itself --
+# see CLAUDE.md): cross-referencing by QDate, the MTState exclusion above
+# had ZERO recurrence among genuinely-new post-fix jobs; IU-Jetstream2-Backfill
+# was the real, new offender at 10/21 (~48%) of the clean (non-straggler)
+# held sample. Same caveat as above -- a mitigation, not a complete fix.
+requirements = (Arch == "X86_64") && (GLIDEIN_ResourceName =!= "MTState-Tempest-CE1") && (GLIDEIN_ResourceName =!= "IU-Jetstream2-Backfill")
 
 executable      = condor_run_ratio.sh
 # ramp_rate/ramp_dt: pool-level constants (not a per-ratio sweep
