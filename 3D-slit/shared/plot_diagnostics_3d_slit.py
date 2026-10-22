@@ -18,6 +18,13 @@ Produces:
      quench-detection-style signal a real differential readout would show.
   5. anim_diagnostics_voltage.gif / anim_diagnostics_temperature.gif --
      animated 2-strip (left-half / right-half) surface projections.
+  6. anim_diagnostics_segment_voltage.gif -- same surface-projection style,
+     but for tap-to-tap SEGMENT voltage (diff() of the cumulative taps)
+     rather than the raw cumulative reading. The complement to #5's voltage
+     animation: distinguishes "how hot is the single worst patch of tape
+     right now" (segment) from "how much has accumulated end-to-end"
+     (cumulative) -- no RTD equivalent, since RTDs are already local point
+     measurements and need no such transform.
 
      IMPORTANT honesty note on the animations: these interpolate ALONG x
      from the discrete sensor positions on each side. There is no
@@ -178,15 +185,36 @@ def make_multiseries_plot(data, channels_left, channels_right, ylabel, title, ou
     plt.close(fig)
 
 
-def make_bfield_plot(data, outpath, pulse_start, pulse_end, unit_scale, unit_label, xHeater):
+def make_bfield_plot(data, outpath, pulse_start, pulse_end, unit_scale, unit_label, xHeater,
+                      xmin=None):
     """H1/H2 are single-point channels (only ever evaluated at the heater/
     Hall x-location) -- a plain two-line time series, not a multi-series
-    plot like the tap/RTD arrays, since there's exactly one reading per side."""
+    plot like the tap/RTD arrays, since there's exactly one reading per side.
+
+    xmin: if set, crops the x-axis to start here -- e.g. to exclude the
+    lagged zero/"turn-on cliff" preamble a fresh-checkpoint run always
+    shows for its first step or two (the self-field is one-step-lagged,
+    and a collapsed giant ramp step's OWN solve uses its entering, i.e.
+    pre-ramp, current -- see Bfield/CLAUDE.md). Does not filter the
+    underlying data, only the displayed range, so this is purely
+    cosmetic/presentation -- the full-range chart (xmin=None) remains the
+    one to use for diagnosing the lag itself."""
     t = data["t"]
     fig, ax = plt.subplots(figsize=(11, 6))
     ax.plot(t, data["H1"] * unit_scale, color="tab:red", linewidth=1.6, label="H1 (left)")
     ax.plot(t, data["H2"] * unit_scale, color="tab:blue", linewidth=1.6, label="H2 (right)")
     add_pulse_shading(ax, pulse_start, pulse_end, label="heater pulse")
+    if xmin is not None:
+        ax.set_xlim(left=xmin)
+        # set_xlim alone doesn't rescale y -- it stays locked to the full
+        # (untrimmed) data's range, leaving dead space below the visible
+        # curve. Rescale y to just the points actually inside the new
+        # x-window instead.
+        mask = t >= xmin
+        visible = np.concatenate([data["H1"][mask], data["H2"][mask]]) * unit_scale
+        if visible.size:
+            pad = 0.05 * (visible.max() - visible.min() or 1.0)
+            ax.set_ylim(visible.min() - pad, visible.max() + pad)
     ax.set_xlabel("time [s]")
     ax.set_ylabel(f"self-field |B|{unit_label}")
     loc_note = f" (at x={xHeater*1000:.0f}mm)" if xHeater is not None else ""
@@ -247,6 +275,30 @@ def make_lr_comparison_plot(data, taps_left, taps_right, rtd_left, rtd_right, ou
     fig.tight_layout()
     fig.savefig(outpath, dpi=150)
     plt.close(fig)
+
+
+def build_segment_channels(data, channels_left, channels_right, prefix_left, prefix_right):
+    """Derives tap-to-tap segment values (e.g. segment voltage) from a
+    cumulative channel family -- diff() between adjacent sensors, positioned
+    at each segment's x-midpoint (the only sensible location for a quantity
+    that spans two sensors rather than living at one). Returns a (data,
+    channels_left, channels_right) triple in the exact shape make_animation/
+    build_strip_frame already expect, so no changes needed there -- this is
+    purely a channel-list-and-derived-data preprocessing step, same pattern
+    as make_lr_comparison_plot's diff() but reshaped for the animation path.
+    channels_left/right must already be sorted by x (channel_groups()'s
+    output is)."""
+    def _segments(channels, side_prefix):
+        seg_data, seg_channels = {}, []
+        for i in range(len(channels) - 1):
+            (col_a, x_a), (col_b, x_b) = channels[i], channels[i + 1]
+            name = f"{side_prefix}seg_{i+1}"
+            seg_data[name] = data[col_b] - data[col_a]
+            seg_channels.append((name, 0.5 * (x_a + x_b)))
+        return seg_data, seg_channels
+    seg_data_l, seg_left = _segments(channels_left, prefix_left)
+    seg_data_r, seg_right = _segments(channels_right, prefix_right)
+    return {"t": data["t"], **seg_data_l, **seg_data_r}, seg_left, seg_right
 
 
 # -------------------------------------------------------------- animation --
@@ -336,6 +388,12 @@ def main():
     ap.add_argument("--outdir", default=".")
     ap.add_argument("--pulse-start", type=float, default=0.5, help="Heater pulse start time [s]")
     ap.add_argument("--pulse-dur", type=float, default=0.01, help="Heater pulse duration [s]")
+    ap.add_argument("--bfield-xmin", type=float, default=None,
+                     help="If set, additionally writes chart_diagnostics_bfield_trimmed.png "
+                          "with the x-axis cropped to start here [s] -- e.g. to exclude the "
+                          "lagged zero/'turn-on cliff' preamble right after a fresh-checkpoint "
+                          "start, for a less-confusing presentation view. The untrimmed "
+                          "chart_diagnostics_bfield.png is always written too.")
     ap.add_argument("--skip-animation", action="store_true", help="Skip the (slower) animated GIFs")
     ap.add_argument("--max-frames", type=int, default=150, help="Max frames sampled for each animation")
     ap.add_argument("--fps", type=int, default=12)
@@ -378,6 +436,12 @@ def main():
         b_path = os.path.join(args.outdir, "chart_diagnostics_bfield.png")
         make_bfield_plot(data, b_path, pulse_start, pulse_end, bfield_scale, bfield_label, xHeater)
         print(f"Wrote {b_path}")
+
+        if args.bfield_xmin is not None:
+            bt_path = os.path.join(args.outdir, "chart_diagnostics_bfield_trimmed.png")
+            make_bfield_plot(data, bt_path, pulse_start, pulse_end, bfield_scale, bfield_label,
+                             xHeater, xmin=args.bfield_xmin)
+            print(f"Wrote {bt_path}")
     else:
         print("H1/H2 are still the pre-B-field sentinel (-999) throughout -- "
               "skipping chart_diagnostics_bfield.png. This is expected for runs "
@@ -400,6 +464,14 @@ def main():
                        "Voltage [\u00b5V]", va_path, pulse_start, pulse_end,
                        unit_scale=1e6, max_frames=args.max_frames, fps=args.fps, cmap_name="inferno")
         print(f"Wrote {va_path}")
+
+        seg_data, seg_left, seg_right = build_segment_channels(data, taps_left, taps_right, "V1_", "V2_")
+        vs_path = os.path.join(args.outdir, "anim_diagnostics_segment_voltage.gif")
+        make_animation(seg_data, seg_left, seg_right, Lx, width, xHeater,
+                       title_prefix + "Segment Voltage Evolution (surface projection)",
+                       "Segment voltage [\u00b5V]", vs_path, pulse_start, pulse_end,
+                       unit_scale=1e6, max_frames=args.max_frames, fps=args.fps, cmap_name="inferno")
+        print(f"Wrote {vs_path}")
 
         ta_path = os.path.join(args.outdir, "anim_diagnostics_temperature.gif")
         make_animation(data, rtd_left, rtd_right, Lx, width, xHeater,

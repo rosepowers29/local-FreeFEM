@@ -48,25 +48,35 @@ def load_csv(path):
 def make_full_timeline_plot(data, pulse_start, pulse_end, tc, outpath, title):
     t, I0 = data["t"], data["I0"]
     TmaxLeft, TmaxRight, fracLeft = data["TmaxLeft"], data["TmaxRight"], data["fracLeft"]
+    # pulse_start/pulse_end are None when the caller detected no genuine
+    # pulse in this run's recorded data (e.g. a runaway_before_pulse run
+    # cut off mid-ramp, before the heater ever got a chance to fire -- see
+    # analyze_sweep_hdf5.py's detect_pulse_start) -- skip the shading
+    # rather than crash on axvspan(None, None).
+    has_pulse = pulse_start is not None and pulse_end is not None
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
 
     axes[0].plot(t, I0, color="tab:purple")
-    axes[0].axvspan(pulse_start, pulse_end, color="red", alpha=0.12, label="heater pulse")
+    if has_pulse:
+        axes[0].axvspan(pulse_start, pulse_end, color="red", alpha=0.12, label="heater pulse")
     axes[0].set_ylabel("I0 [A]")
-    axes[0].legend(loc="lower right", fontsize=9)
+    if has_pulse:   # only labeled artist on this axes is the pulse span itself
+        axes[0].legend(loc="lower right", fontsize=9)
 
     axes[1].plot(t, TmaxLeft, "o-", color="tab:red", markersize=3, label="Heated side (left)")
     axes[1].plot(t, TmaxRight, "s-", color="tab:blue", markersize=3, label="Unheated side (right)")
     if tc is not None:
         axes[1].axhline(tc, color="gray", linestyle="--", alpha=0.5, label="Tc")
-    axes[1].axvspan(pulse_start, pulse_end, color="red", alpha=0.12)
+    if has_pulse:
+        axes[1].axvspan(pulse_start, pulse_end, color="red", alpha=0.12)
     axes[1].set_ylabel("T [K]")
     axes[1].legend(loc="upper right", fontsize=9)
 
     axes[2].plot(t, fracLeft, "d-", color="tab:green", markersize=3)
     axes[2].axhline(0.5, color="gray", linestyle="--", alpha=0.5, label="symmetric (0.5)")
-    axes[2].axvspan(pulse_start, pulse_end, color="red", alpha=0.12)
+    if has_pulse:
+        axes[2].axvspan(pulse_start, pulse_end, color="red", alpha=0.12)
     axes[2].set_ylabel("Current fraction\non heated side")
     axes[2].set_xlabel("time [s]")
     axes[2].legend(loc="upper left", fontsize=9)

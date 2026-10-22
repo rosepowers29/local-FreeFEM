@@ -12,22 +12,38 @@
 # just needed more time. Unchanged tEnd/observation window carried
 # forward as-is; see CLAUDE.md for the full smoketest writeup.
 #
-# --heater-power 0 / --base-dir runs_noheater: see sweep_noheater_smoketest.sub
-# and CLAUDE.md for why the distinct base-dir matters (structurally
-# prevents collision with the heater dataset's identically-labeled
-# runs/<label> directories once copied back).
+# --heater-power 0 / --base-dir runs_noheater / noheater_$(label) as the
+# actual --label: belt-and-suspenders against colliding with the heater
+# dataset's identically-ratio'd runs/<label> directories once copied back.
+#
+# IMPORTANT Condor gotcha (found live -- the first version of this file
+# only prefixed transfer_output_files, not the label passed to
+# run_transient.py, and every job held on an output-transfer error):
+# transfer_output_files returns only the BASENAME of whatever path you
+# give it to the submit directory -- it does NOT preserve the leading
+# work/runs_noheater/ structure. So this has ALWAYS landed as flat
+# condor/<label>/ directories (sweep.sub's work/runs/$(label) included),
+# never nested under runs/. That was invisible for the heater sweep
+# (nothing else to collide with); it becomes a real collision risk the
+# moment a second sweep reuses the same labels. Fix: the label itself
+# must be unique BEFORE run_transient.py ever creates the directory --
+# prefixing only the transfer path (without also changing `arguments`)
+# just means Condor goes looking for a prefixed directory that was never
+# actually created. The actual execute-side directory is
+# work/<base-dir>/<whatever --label was>, full stop -- transfer_output_files
+# must name that exact path, nothing else.
 
 universe        = container
 container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal@sha256:8b39db74c15d90180fb623cda03211d434ce619cd3786c3abbd37de930aed37c
 requirements = (Arch == "X86_64")
 
 executable      = condor_run_ratio.sh
-arguments       = $(ratio) $(label) --ramp-rate 20 --ramp-dt 999 --runaway-tmax $(runaway_tmax) --heater-power 0 --base-dir runs_noheater
+arguments       = $(ratio) noheater_$(label) --ramp-rate 20 --ramp-dt 999 --runaway-tmax $(runaway_tmax) --heater-power 0 --base-dir runs_noheater
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
 transfer_input_files    = payload.tar.gz
-transfer_output_files   = work/runs_noheater/$(label)
+transfer_output_files   = work/runs_noheater/noheater_$(label)
 
 request_cpus   = 1
 request_memory = 4096M

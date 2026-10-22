@@ -26,6 +26,16 @@ Produces:
        chart_summary_peak_bfield.png  -- NEW, Bfield-specific: peak |B|
          (max of |H1|,|H2| over the whole run, the self-field at the
          heater/Hall x-location) vs ratio, colored by outcome.
+       All outcome-colored scatter plots above (final_state, peak_tmax,
+       peak_voltage, peak_segment_voltage, peak_picard_iters, peak_bfield)
+       additionally ring any point with pre_pulse_runaway=True in black
+       -- see classify_pre_pulse_runaway()/is_pre_pulse_runaway() -- so a
+       pure overcurrent/ramp-driven runaway (heater never had a chance to
+       fire) is visually distinguishable from a heater-triggered one
+       without changing the underlying outcome-color scheme. Not added
+       to the *_vs_t.png timeseries plots -- those color by ratio
+       (continuous colormap), not outcome, and a per-line marker doesn't
+       translate the same way a per-point one does.
        chart_summary_bfield_vs_t.png / _log.png  -- NEW, Bfield-specific:
          max(|H1|,|H2|)(t) across ratios, analogous to the Tmax(t)
          summary pair but sourced from the diagnostics group (not
@@ -160,6 +170,70 @@ OUTCOME_COLORS = {
 # to the live settle-check (see electrothermal/CLAUDE.md's SETTLE_TMAX_SAFE
 # for the original incident this guards against).
 SETTLE_TMAX_SAFE = rt.DEFAULT_SETTLE_TMAX_MAX
+
+
+def classify_pre_pulse_runaway(transient):
+    # run_bfield_transient.py's own live classifier deliberately never
+    # distinguishes a pure overcurrent/ramp-driven runaway from a
+    # heater-triggered one (see that module's docstring and
+    # condor/README.md's "What's different from electrothermal/condor/"
+    # -- the prePulse/runaway_before_pulse split exists there but was
+    # explicitly not ported here). Reconstructed post-hoc instead of
+    # changing `outcome`/`status`: True if Tmax already crossed
+    # SETTLE_TMAX_SAFE (i.e. Tc -- genuinely quenching, not just
+    # baseline-ish noise) before the heater pulse ever started -- this
+    # includes the common case of a high-ratio run whose ramp never even
+    # finished before the runaway threshold tripped, since the pulse
+    # can't have started either -- False if the crossing happened at/
+    # after pulse start (ramp DID complete first) or never happened at
+    # all, None only when I0 itself is missing/degenerate (genuinely
+    # can't locate the ramp at all, not just "still rising"). Works
+    # unchanged for a no-heater run too: heaterpower=0 there means any
+    # crossing is trivially pre-pulse-equivalent (the heater never
+    # contributed energy regardless of timing), so this just always
+    # resolves True whenever that population ran away at all.
+    t, tmax, I0 = transient.get("t"), transient.get("Tmax"), transient.get("I0")
+    if t is None or tmax is None or len(t) == 0:
+        return None
+    crossed = tmax >= SETTLE_TMAX_SAFE
+    if not np.any(crossed):
+        return False
+    first_crossing_t = float(t[np.argmax(crossed)])
+
+    # Can't reuse detect_pulse_start()'s None return directly -- it
+    # collapses two very different cases into one signal: "I0 data
+    # missing/degenerate" (genuinely can't say) vs. "ramp was STILL
+    # RISING when the run ended" (the common pre-pulse-runaway case
+    # itself -- e.g. a high-ratio run whose Tmax crosses the runaway
+    # threshold while I0 is mid-ramp, well before ever reaching the
+    # target plateau where the pulse fires). The second case doesn't
+    # need a pulse-start time at all: if the ramp never completed, the
+    # pulse categorically never started, so any crossing found above is
+    # necessarily pre-pulse. Re-derived here (not called via
+    # detect_pulse_start) so the two cases can be told apart.
+    if I0 is None or len(I0) == 0:
+        return None
+    i0max = np.max(I0)
+    if i0max <= 0:
+        return None
+    idx = int(np.argmax(I0 >= 0.999 * i0max))
+    if idx == len(I0) - 1:
+        return True
+    pulse_start = float(t[idx])
+    return first_crossing_t <= pulse_start
+
+
+def is_pre_pulse_runaway(r):
+    # r["pre_pulse_runaway"] comes straight from the h5 group's attrs
+    # (export_sweep_hdf5.py) -- a numpy bool, or the string "unknown"
+    # sentinel (h5py attrs can't hold None), or absent entirely on an
+    # older export that predates this field. Only a confirmed True
+    # counts as pre-pulse here; "unknown"/missing/False all render the
+    # same (no special marker) -- this is a visual flag for runs we can
+    # positively say were pure overcurrent, not a claim either way about
+    # the ones we can't.
+    v = r.get("pre_pulse_runaway")
+    return v is not None and v != "unknown" and bool(v)
 
 
 def recompute_trend(t, frac_left, trend_window=rt.DEFAULT_TREND_WINDOW, trend_eps=rt.DEFAULT_TREND_EPS):
@@ -383,10 +457,17 @@ def _final_state_values(r):
         return None
 
 
+PRE_PULSE_RUNAWAY_LEGEND_HANDLE = plt.Line2D(
+    [0], [0], marker="o", color="w", markerfacecolor="none",
+    markeredgecolor="black", markeredgewidth=1.4, markersize=8,
+    label="pre-pulse (pure overcurrent) runaway")
+
+
 def make_final_state_plot(runs, outpath):
     fig, axes = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
     labels = {r["label"]: outcome_label(r) for r in runs}
     skipped = []
+    any_pre_pulse = False
     for r in sorted(runs, key=lambda r: r["ratio"]):
         vals = _final_state_values(r)
         if vals is None:
@@ -394,8 +475,11 @@ def make_final_state_plot(runs, outpath):
             continue
         frac, tmax = vals
         c = OUTCOME_COLORS.get(labels[r["label"]], "gray")
-        axes[0].scatter(r["ratio"], abs(frac - 0.5), color=c, s=25, zorder=3, alpha=0.7)
-        axes[1].scatter(r["ratio"], tmax, color=c, s=25, zorder=3, alpha=0.7)
+        pre_pulse = is_pre_pulse_runaway(r)
+        any_pre_pulse = any_pre_pulse or pre_pulse
+        edge = dict(edgecolors="black", linewidths=1.2) if pre_pulse else dict(edgecolors="none")
+        axes[0].scatter(r["ratio"], abs(frac - 0.5), color=c, s=25, zorder=3, alpha=0.7, **edge)
+        axes[1].scatter(r["ratio"], tmax, color=c, s=25, zorder=3, alpha=0.7, **edge)
     if skipped:
         print(f"  chart_summary_final_state.png: skipping {len(skipped)} run(s) with no "
               f"final state recorded (status={{{', '.join(sorted({labels[l] for l in skipped}))}}}): "
@@ -407,6 +491,8 @@ def make_final_state_plot(runs, outpath):
     present_outcomes = sorted(set(labels.values()))
     handles = [plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=OUTCOME_COLORS.get(o, "gray"),
                            markersize=8, label=o) for o in present_outcomes]
+    if any_pre_pulse:
+        handles.append(PRE_PULSE_RUNAWAY_LEGEND_HANDLE)
     axes[0].legend(handles=handles, loc="best", fontsize=8)
     fig.suptitle("Final State vs Transport Current Ratio", fontsize=13)
     fig.tight_layout()
@@ -420,13 +506,17 @@ def _scatter_by_outcome(runs, outpath, value_fn, ylabel, title, skip_note=None):
     fig, ax = plt.subplots(figsize=(9, 6))
     labels = {r["label"]: outcome_label(r) for r in runs}
     skipped = []
+    any_pre_pulse = False
     for r in sorted(runs, key=lambda r: r["ratio"]):
         val = value_fn(r)
         if val is None:
             skipped.append(r["label"])
             continue
         c = OUTCOME_COLORS.get(labels[r["label"]], "gray")
-        ax.scatter(r["ratio"], val, color=c, s=20, zorder=3, alpha=0.7)
+        pre_pulse = is_pre_pulse_runaway(r)
+        any_pre_pulse = any_pre_pulse or pre_pulse
+        edge = dict(edgecolors="black", linewidths=1.0) if pre_pulse else dict(edgecolors="none")
+        ax.scatter(r["ratio"], val, color=c, s=20, zorder=3, alpha=0.7, **edge)
     if skipped:
         skipped_outcomes = sorted({labels[l] for l in skipped})
         note = f" ({skip_note})" if skip_note else ""
@@ -438,6 +528,8 @@ def _scatter_by_outcome(runs, outpath, value_fn, ylabel, title, skip_note=None):
     present_outcomes = sorted({v for k, v in labels.items() if k not in skipped})
     handles = [plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=OUTCOME_COLORS.get(o, "gray"),
                            markersize=8, label=o) for o in present_outcomes]
+    if any_pre_pulse:
+        handles.append(PRE_PULSE_RUNAWAY_LEGEND_HANDLE)
     if handles:
         ax.legend(handles=handles, loc="best", fontsize=8)
     ax.set_title(title, fontsize=13)

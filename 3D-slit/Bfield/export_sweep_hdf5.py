@@ -14,7 +14,32 @@ Structure written to the output file:
                                 final_Tmax, final_fracLeft) PLUS `outcome`:
                                 the already-reconciled human-readable label
                                 (analyze_sweep_hdf5.py's outcome_label()),
-                                not just the raw `status` string.
+                                not just the raw `status` string. PLUS
+                                `incomplete` (bool): True when `status` is
+                                `wall_budget_exceeded` or `max_steps_exceeded`
+                                -- the run was cut off before reaching a
+                                physics verdict (settled/runaway/no
+                                deviation), not a crash and not garbage
+                                physics (see analyze_sweep_hdf5.py's
+                                NO_TRUSTWORTHY_PHYSICS for that separate
+                                concept) -- just unfinished. A downstream
+                                consumer (e.g. a colleague handoff) should
+                                treat `incomplete=True` runs as "no verdict
+                                yet," not silently fold them into whichever
+                                outcome bucket their partial trajectory
+                                happens to resemble. PLUS `pre_pulse_runaway`
+                                (bool, or the string "unknown"): reconstructs
+                                post-hoc the prePulse/runaway_before_pulse
+                                split run_bfield_transient.py's own live
+                                classifier deliberately doesn't make (both a
+                                pure overcurrent/ramp-driven runaway and a
+                                heater-triggered one land in `status`/
+                                `outcome` as indistinguishable "runaway").
+                                True means Tmax crossed Tc before the heater
+                                pulse ever started -- the heater was
+                                irrelevant to that run's outcome. See
+                                analyze_sweep_hdf5.py's
+                                classify_pre_pulse_runaway().
   /<label>/transient/<col>     one dataset per transient_3d_slit.csv column
   /<label>/diagnostics/<col>   one dataset per diagnostics_3d_slit.csv column
                                 (column SET varies across this dataset --
@@ -60,6 +85,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 TRANSIENT_CSV = "transient_3d_slit.csv"
 DIAGNOSTICS_CSV = "diagnostics_3d_slit.csv"
 POSITIONS_CSV = "diagnostics_positions_3d_slit.csv"
+
+# Stopped before producing a physics verdict (settled/runaway/no deviation)
+# -- not a crash, not garbage physics, just unfinished. See the `incomplete`
+# attr this becomes in the output file.
+INCOMPLETE_STATUSES = {"wall_budget_exceeded", "max_steps_exceeded"}
 
 
 def discover_labels(base_dir: Path):
@@ -124,6 +154,19 @@ def compute_outcome(status: dict, transient_columns):
     return ash.outcome_label(run)
 
 
+# h5py attrs can't store Python None -- this sentinel means "pulse start
+# couldn't be located (ramp never reached a plateau), can't classify."
+PRE_PULSE_RUNAWAY_UNKNOWN = "unknown"
+
+
+def compute_pre_pulse_runaway(transient_columns):
+    # See analyze_sweep_hdf5.py's classify_pre_pulse_runaway() -- same
+    # lazy-import reasoning as compute_outcome() above.
+    import analyze_sweep_hdf5 as ash
+    result = ash.classify_pre_pulse_runaway(transient_columns or {})
+    return PRE_PULSE_RUNAWAY_UNKNOWN if result is None else result
+
+
 def export(labels, base_dir: Path, out_path: Path):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(out_path, "w") as hf:
@@ -144,6 +187,8 @@ def export(labels, base_dir: Path, out_path: Path):
             write_csv_group(g, "diagnostics", run_dir / DIAGNOSTICS_CSV)
             write_csv_group(g, "positions", run_dir / POSITIONS_CSV)
             g.attrs["outcome"] = compute_outcome(status, transient_columns)
+            g.attrs["incomplete"] = status.get("status") in INCOMPLETE_STATUSES
+            g.attrs["pre_pulse_runaway"] = compute_pre_pulse_runaway(transient_columns)
     print(f"wrote {out_path}")
 
 

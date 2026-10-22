@@ -149,6 +149,7 @@ OUTCOME_COLORS = {
     "runaway (before pulse)": "darkorange",
     "falsely settled (still runaway)": "darkred",
     "falsely recovering (still runaway)": "firebrick",
+    "falsely stable (quenched)": "maroon",
     "no deviation": "tab:blue",
     "crashed": "black",
     "init failed": "black",
@@ -220,6 +221,20 @@ def outcome_label(run):
     status = run["status"]
     if status == "settled" and run.get("final_Tmax", 0.0) >= SETTLE_TMAX_SAFE:
         return "falsely settled (still runaway)"
+    # Third instance of the same confound (see SETTLE_TMAX_SAFE and
+    # recompute_tmax_trend above): "reached_end_no_deviation" means
+    # |fracLeft-0.5| never crossed deviation_eps, which run_transient.py's
+    # classifier treats as "nothing happened." That's a reliable signal
+    # for the heater dataset (fracLeft only moves because the heater
+    # pulse breaks left/right symmetry), but for the no-heater sweep a
+    # full, perfectly symmetric thermal runaway looks IDENTICAL to a
+    # genuinely stable run on fracLeft alone -- there's no asymmetry
+    # signal for this classifier to ever catch. Found live: no-heater
+    # ratios 1.265-1.268 all report reached_end_no_deviation / "no
+    # deviation" despite final_Tmax of 92.65/120.41/157.12/198.08K --
+    # already well past Tc=90K, mid-runaway, not remotely stable.
+    if status == "reached_end_no_deviation" and (run.get("final_Tmax") or 0.0) >= SETTLE_TMAX_SAFE:
+        return "falsely stable (quenched)"
     if status in OUTCOME_LABELS:
         return OUTCOME_LABELS[status]
     if status in ("reached_end_deviated", "plateaued_off_parity"):
@@ -294,23 +309,37 @@ def ratio_color(ratio, ratios):
 MANY_RUNS_LEGEND_CUTOFF = 20
 
 
-def compute_zoom_xlim(runs, pre_margin=0.5, post_margin=0.5):
-    # The flat pre-pulse soak (everything sitting at ~77-80K) can eat most
-    # of a fixed-width time axis once ratios span a wide range (pulse start
-    # itself varies by ratio once --ramp-rate is used, e.g. 10.9s-23.3s
-    # across the 0.7-1.5xIc granular sweep) -- cropping to just before the
-    # earliest pulse through just after the latest run's last recorded row
-    # stretches the actual rise/fall dynamics across the full plot width
-    # instead of squeezing them into a corner. Computed from the data
-    # rather than hardcoded so this stays correct for any sweep's actual
-    # ramp/pulse timing, not just this one.
-    # Filter out None (no pulse detected -- e.g. a runaway_before_pulse run
-    # cut off mid-ramp, see detect_pulse_start) before min(): mixing None
-    # with floats raises TypeError, and a never-fired pulse shouldn't be
-    # allowed to pull the zoom window's start time anyway.
-    pulse_starts = [p for p in (detect_pulse_start(r["transient"]) for r in runs) if p is not None]
+ZOOM_DIVERGENCE_TMAX = 78.0  # just above the ~77K baseline soak -- see compute_zoom_xlim
+
+
+def compute_zoom_xlim(runs, pre_margin=0.5, post_margin=0.5, divergence_tmax=ZOOM_DIVERGENCE_TMAX):
+    # The flat pre-divergence soak (everything sitting at ~77-80K) can eat
+    # most of a fixed-width time axis once ratios span a wide range --
+    # cropping to just before the earliest real Tmax rise through just
+    # after the latest run's last recorded row stretches the actual
+    # rise/fall dynamics across the full plot width instead of squeezing
+    # them into a corner.
+    #
+    # Originally anchored on min(detect_pulse_start(...)) -- correct for
+    # the heater dataset (the heater spike IS the earliest real dynamics,
+    # by design), but wrong for the no-heater sweep: there, pulse_start
+    # just marks ramp completion, which happens ~9s before anything
+    # thermally interesting occurs. Confirmed empirically on
+    # runs/noheater_sweep: min(pulse_starts) ~ 10.9-11s, but the earliest
+    # any run's Tmax actually exceeds 78K is t=20.29s -- the real
+    # dynamics were living in the last ~1s of a ~21.7s-wide crop. Anchoring
+    # on the data itself (earliest t, across ALL runs, where Tmax crosses
+    # divergence_tmax) generalizes correctly to both cases instead of
+    # relying on a per-dataset proxy for "when does it get interesting."
+    divergence_ts = []
+    for r in runs:
+        t = r["transient"]["t"]
+        tmax = r["transient"]["Tmax"]
+        above = tmax > divergence_tmax
+        if above.any():
+            divergence_ts.append(t[above][0])
     final_ts = [r["transient"]["t"][-1] for r in runs]
-    start = min(pulse_starts) - pre_margin if pulse_starts else 0.0
+    start = min(divergence_ts) - pre_margin if divergence_ts else 0.0
     return max(0.0, start), max(final_ts) + post_margin
 
 
