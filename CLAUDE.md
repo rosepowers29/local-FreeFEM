@@ -1,10 +1,12 @@
 # CLAUDE.md — repo orientation for agents
 
-HTS tape quench/self-field simulation in FreeFEM. Three model tracks:
-`2D/`, `3D/`, `3D-slit/` (most active; adds a laser slit + B-field self-field
-modeling). Human-facing history/rationale: `PROJECT_CONTEXT_SUMMARY.md`
-(root). Per-track usage: `<track>/README.md`. Track-specific agent notes:
-`3D-slit/CLAUDE.md` — read it before touching that directory.
+HTS tape quench/self-field simulation in FreeFEM. Four model tracks:
+`2D/`, `3D/`, `3D-slit/` (adds a laser slit + B-field self-field modeling),
+`strain-defect/` (single tape, no slit, quench triggered by a strain-induced
+Jc defect from real ANSYS strain data). Human-facing history/rationale:
+`PROJECT_CONTEXT_SUMMARY.md` (root). Per-track usage: `<track>/README.md`.
+Track-specific agent notes: `3D-slit/CLAUDE.md`, `strain-defect/CLAUDE.md`
+— read the relevant one before touching that directory.
 
 ## FreeFEM environment gotchas (verified by direct testing, not assumed)
 
@@ -23,6 +25,17 @@ modeling). Human-facing history/rationale: `PROJECT_CONTEXT_SUMMARY.md`
   `apt-get install libfreefem++ libfreefem0`, then symlink —
   `mkdir -p /usr/lib/ff++/<ver>/lib && ln -sf /usr/lib/freefem++/*.so /usr/lib/ff++/<ver>/lib/`
   (FreeFEM looks in the second path, plugins install to the first).
+- **No FreeFEM package for macOS** (no Homebrew formula/cask). Verified
+  working alternative on this machine: `colima start` (boots the Docker VM
+  backend if it isn't already running — check first with `colima status`),
+  then `docker run --rm -v "$(pwd)":/work -w /work freefem/freefem
+  FreeFem++ -nw <script>.edp [args...]` from inside the track directory
+  (mounts it at `/work` so relative `include`/`ifstream`/`ofstream` paths
+  work unchanged). `msh3` and every plugin these tracks use are already
+  present in this image — no separate apt/symlink step needed, unlike the
+  Linux case above. Confirmed end-to-end against `strain-defect/`: mesh
+  build, region/boundary-area verification, and a chained
+  init+step+checkpoint-resume sequence all ran clean inside the container.
 - **`ifstream >>` past EOF throws a fatal, unrecoverable error** — it
   does NOT silently leave the target at 0. If a checkpoint file is
   shorter than what a script tries to read, it crashes immediately, it

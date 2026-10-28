@@ -1,0 +1,106 @@
+// ============================================================
+// mesh_report_strain_tape.edp
+// Pure geometry/mesh verification, no physics -- run this BEFORE trusting
+// the BC/region setup in step_strain_tape_transient.edp. Per root
+// CLAUDE.md's "verify by area, don't assume" (boundary label assumptions
+// have been wrong once before in this repo's history, and this is a brand
+// new mesh): computes each region's volume and each cube()-label's
+// boundary area BOTH by direct FreeFEM integration AND by the hand-derived
+// expected formula from the layer thicknesses in hts_mesh_module_tape.idp,
+// and reports the relative error for each -- this is NOT just a visual
+// mesh dump.
+// ============================================================
+
+include "hts_mesh_module_tape.idp"
+
+cout << "Tape mesh: nv=" << Th3.nv << " nt=" << Th3.nt << " nbe=" << Th3.nbe << endl;
+cout << "Lx=" << Lx << " width=" << width << " total thickness yB6=" << yB6 << endl;
+
+fespace Ph3(Th3, P0);
+Ph3 reg = region;
+
+// ---- region volumes ----
+real volCu   = int3d(Th3)(reg==1);
+real volHast = int3d(Th3)(reg==2);
+real volBuf  = int3d(Th3)(reg==3);
+real volSc   = int3d(Th3)(reg==4);
+real volAgT  = int3d(Th3)(reg==5);
+
+real volCuExp   = Lx*width*yB6 - Lx*coreWidth*(yB5-yB1);
+real volHastExp = Lx*coreWidth*tHast;
+real volBufExp  = Lx*coreWidth*tBuf;
+real volScExp   = Lx*coreWidth*tSc;
+real volAgTExp  = Lx*coreWidth*tAgT;
+
+func real relErr(real a, real b){ return abs(a-b)/max(abs(b),1e-30); }
+
+cout << "\n-- region volumes (m^3) --" << endl;
+cout << "region1 Cu    : computed=" << volCu   << " expected=" << volCuExp
+     << " relErr=" << relErr(volCu,volCuExp) << endl;
+cout << "region2 Hast  : computed=" << volHast << " expected=" << volHastExp
+     << " relErr=" << relErr(volHast,volHastExp) << endl;
+cout << "region3 Buf   : computed=" << volBuf  << " expected=" << volBufExp
+     << " relErr=" << relErr(volBuf,volBufExp) << endl;
+cout << "region4 REBCO : computed=" << volSc   << " expected=" << volScExp
+     << " relErr=" << relErr(volSc,volScExp) << endl;
+cout << "region5 AgTop : computed=" << volAgT  << " expected=" << volAgTExp
+     << " relErr=" << relErr(volAgT,volAgTExp) << endl;
+
+real volTotal = volCu+volHast+volBuf+volSc+volAgT;
+real volTotalExp = Lx*width*yB6;
+cout << "sum of regions: computed=" << volTotal << " expected (Lx*width*yB6)="
+     << volTotalExp << " relErr=" << relErr(volTotal,volTotalExp) << endl;
+
+// ---- boundary label areas: cube()'s native convention, 1/3=y-walls
+// (bottom/top), 2/4=x-end faces (current leads), 5/6=z-walls (sides) --
+// DO NOT assume this holds without checking; verify every label here. ----
+real areaL1 = int2d(Th3,1)(1.0);
+real areaL2 = int2d(Th3,2)(1.0);
+real areaL3 = int2d(Th3,3)(1.0);
+real areaL4 = int2d(Th3,4)(1.0);
+real areaL5 = int2d(Th3,5)(1.0);
+real areaL6 = int2d(Th3,6)(1.0);
+
+real areaYWallExp = Lx*width;
+real areaXEndExp  = width*yB6;
+real areaZWallExp = Lx*yB6;
+
+cout << "\n-- boundary label areas (m^2) --" << endl;
+cout << "label1 (expect y-wall, Lx*width=" << areaYWallExp << "): computed="
+     << areaL1 << " relErr=" << relErr(areaL1,areaYWallExp) << endl;
+cout << "label3 (expect y-wall, Lx*width=" << areaYWallExp << "): computed="
+     << areaL3 << " relErr=" << relErr(areaL3,areaYWallExp) << endl;
+cout << "label2 (expect x-end, width*yB6=" << areaXEndExp << "): computed="
+     << areaL2 << " relErr=" << relErr(areaL2,areaXEndExp) << endl;
+cout << "label4 (expect x-end, width*yB6=" << areaXEndExp << "): computed="
+     << areaL4 << " relErr=" << relErr(areaL4,areaXEndExp) << endl;
+cout << "label5 (expect z-wall, Lx*yB6=" << areaZWallExp << "): computed="
+     << areaL5 << " relErr=" << relErr(areaL5,areaZWallExp) << endl;
+cout << "label6 (expect z-wall, Lx*yB6=" << areaZWallExp << "): computed="
+     << areaL6 << " relErr=" << relErr(areaL6,areaZWallExp) << endl;
+
+real totalBoundaryArea = areaL1+areaL2+areaL3+areaL4+areaL5+areaL6;
+real totalBoundaryAreaExp = 2*areaYWallExp + 2*areaXEndExp + 2*areaZWallExp;
+cout << "\ntotal boundary area: computed=" << totalBoundaryArea << " expected="
+     << totalBoundaryAreaExp << " relErr=" << relErr(totalBoundaryArea,totalBoundaryAreaExp) << endl;
+
+cout << "\nIf every relErr above is not small (<1e-6 or so), do NOT trust "
+     << "step_strain_tape_transient.edp's on(1,2,3,4,5,6,T=Tcold) full-"
+     << "immersion BC or sourceOfDefect's region dispatch until this is "
+     << "resolved." << endl;
+
+// ---- cross-section slice export for visual sanity check ----
+{
+  ofstream fs("strain_tape_crosssection.csv");
+  fs << "y,z,region\n";
+  int ny2=80, nz2=40;
+  for (int i=0;i<=ny2;i++){
+    for (int j=0;j<=nz2;j++){
+      real yy = yB6*i/ny2, zz = width*j/nz2;
+      real yq = (yy<=0)?1e-9:(yy>=yB6?yB6-1e-9:yy);
+      real zq = (zz<=0)?1e-9:(zz>=width?width-1e-9:zz);
+      fs << yy << "," << zz << "," << reg(Lx/2,yq,zq) << "\n";
+    }
+  }
+}
+cout << "Wrote strain_tape_crosssection.csv" << endl;

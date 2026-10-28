@@ -1,0 +1,67 @@
+// ============================================================
+// diagnostics_strain_tape.idp
+// Minimal voltage-tap diagnostics for the strain-defect single-tape model:
+// 2 pairs (4 taps total), ALL on the tape's centerline (z=width/2) -- no
+// left/right split, since there's no slit to sever the conductor.
+//
+//   - Pair 1: straddles the defect location (xDefectUp/xDefectDown,
+//     upstream/downstream by `tapOffset`) -- differential voltage local to
+//     the defect.
+//   - Pair 2: V_CL_plus (x=0) / V_CL_minus (x=Lx) -- total end-to-end tape
+//     voltage, same current-lead-reference concept as 3D-slit's diagnostics.
+//
+// No RTDs, no Hall probes, no B-field -- this scenario has none of those.
+//
+// IMPORTANT -- scope/inclusion requirements (same convention as
+// 3D-slit/shared/diagnostics_3d_slit.idp): the including script must
+// already define, with exactly these names:
+//   real Lx, width
+//   real defectX        -- from strain_jc_meta.idp (via strain_to_jc.py)
+//   real tapOffset       -- distance from the defect to each tap (m)
+//   func real Efun(real xx)   -- single-channel E(x), valid everywhere
+// Include this file AFTER Efun is defined for the current timestep, same
+// reasoning as the slit diagnostics file: tap voltages must reflect the
+// CURRENT timestep's field, so voltage evaluation (diagAllTapVoltages) must
+// be called freshly every step even though the tap positions themselves are
+// static and computed once.
+// ============================================================
+
+real zDiagCenter = width/2;
+
+real xDefectUp   = defectX - tapOffset;
+real xDefectDown = defectX + tapOffset;
+if (xDefectUp < 0.0)  xDefectUp  = 0.0;
+if (xDefectDown > Lx) xDefectDown = Lx;
+
+// Cumulative voltage from x=0 (V_CL+ reference) out to xx -- midpoint-rule
+// integration, same cheap pattern as diagVcum in the slit diagnostics file.
+func real diagVcum(real xx){
+  int nSub = 400;
+  real h = xx/nSub;
+  real sum = 0.0;
+  for (int j=0; j<nSub; j++){
+    real xm = (j+0.5)*h;
+    sum += Efun(xm)*h;
+  }
+  return sum;
+}
+
+// Fills the 3 non-trivial cumulative voltages for the current timestep
+// (V_CL_plus is always 0 by construction, the reference point).
+func int diagAllTapVoltages(real &vDefectUp, real &vDefectDown, real &vClMinus){
+  vDefectUp   = diagVcum(xDefectUp);
+  vDefectDown = diagVcum(xDefectDown);
+  vClMinus    = diagVcum(Lx);
+  return 0;
+}
+
+// One-time metadata export: physical location + type of every channel.
+func int writeDiagnosticsMetadata(string fname, real yRef){
+  ofstream fmeta(fname);
+  fmeta << "channel,type,x_m,y_m,z_m,notes\n";
+  fmeta << "V_defect_up,voltage_tap," << xDefectUp << "," << yRef << "," << zDiagCenter << ",cumulative from V_CL+, upstream of defect\n";
+  fmeta << "V_defect_down,voltage_tap," << xDefectDown << "," << yRef << "," << zDiagCenter << ",cumulative from V_CL+, downstream of defect\n";
+  fmeta << "V_CL_plus,current_lead_voltage,0," << yRef << ",n/a,reference (=0 by construction)\n";
+  fmeta << "V_CL_minus,current_lead_voltage," << Lx << "," << yRef << ",n/a,far current lead (total tape voltage)\n";
+  return 0;
+}

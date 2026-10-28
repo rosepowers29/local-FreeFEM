@@ -1,0 +1,78 @@
+// ============================================================
+// hts_mesh_module_tape.idp
+// 3D shell mesh for the strain-defect single-tape model: NO slit, 6mm wide,
+// 80mm long. 5-layer cross-section (down from the 6-7 layers in 3D/3D-slit):
+// a single merged Cu conductor wraps the full perimeter (bottom 1um + top
+// 21um [1um electroplate + 20um stabilizer, merged into one region since
+// they're electrically/thermally identical copper] + both side edges 1um),
+// then Hastelloy/Buffer/REBCO/Ag-top as inner-stack-only layers, same
+// "inner stack only" pattern as 3D/3D-slit's non-Cu layers. No bottom Ag
+// (removed per design discussion) -- see strain-defect/CLAUDE.md.
+//
+// Region numbering (bottom to top):
+//   1 = Cu (merged wrap: bottom + top + both side edges, ONE conductor)
+//   2 = Hastelloy (20um, diminished from the 3D/3D-slit tracks' 50um)
+//   3 = Buffer (0.2um)
+//   4 = REBCO (1um)
+//   5 = Ag top (2um)
+//
+// cube()'s native boundary labels (UNCHANGED convention from 3D/3D-slit,
+// confirmed by area in mesh_report_strain_tape.edp, not assumed): 1/3 =
+// y-lateral walls (bottom/top), 2/4 = x-end faces (current leads), 5/6 =
+// z-lateral walls (side edges). Unlike every existing track, THIS model's
+// step script applies the LN-bath Dirichlet condition to ALL SIX labels
+// (full immersion), not just 2/4 -- see step_strain_tape_transient.edp.
+// ============================================================
+
+load "msh3"
+
+real Lx    = 0.080;
+real tCuBot = 1e-6, tHast = 20e-6, tBuf = 0.2e-6, tSc = 1e-6, tAgT = 2e-6,
+     tCuTop = 21e-6;   // 21um = merged 20um stabilizer + 1um electroplate
+real yB0=0, yB1=yB0+tCuBot, yB2=yB1+tHast, yB3=yB2+tBuf, yB4=yB3+tSc,
+     yB5=yB4+tAgT, yB6=yB5+tCuTop;
+
+real width   = 0.006;
+real tSideCu = 1e-6;   // side-edge electroplate thickness (matches top/bottom)
+real zB0 = 0, zB1 = tSideCu, zB2 = width - tSideCu, zB3 = width;
+real coreWidth = zB2 - zB1;
+
+int nx = 60;    // dx ~ 1.3mm over the 80mm length
+int nHast=4, nBuf=1, nSc=2, nAgT=2, nCuBot=2, nCuTop=6;
+int ny = nCuBot+nHast+nBuf+nSc+nAgT+nCuTop;
+
+int nzSide=2, nzCore=16;   // dz(core) ~ 0.37mm
+int nz = 2*nzSide + nzCore;
+
+func real yphys(real s){
+  real fCuBot=nCuBot*1.0/ny, fHast=nHast*1.0/ny, fBuf=nBuf*1.0/ny,
+       fSc=nSc*1.0/ny, fAgT=nAgT*1.0/ny, fCuTop=nCuTop*1.0/ny;
+  real c0=0, c1=c0+fCuBot, c2=c1+fHast, c3=c2+fBuf, c4=c3+fSc, c5=c4+fAgT, c6=c5+fCuTop;
+  if (s<=c1) return yB0 + (yB1-yB0)*(s-c0)/(c1-c0);
+  if (s<=c2) return yB1 + (yB2-yB1)*(s-c1)/(c2-c1);
+  if (s<=c3) return yB2 + (yB3-yB2)*(s-c2)/(c3-c2);
+  if (s<=c4) return yB3 + (yB4-yB3)*(s-c3)/(c4-c3);
+  if (s<=c5) return yB4 + (yB5-yB4)*(s-c4)/(c5-c4);
+  return yB5 + (yB6-yB5)*(s-c5)/(c6-c5);
+}
+
+func real zphys(real s){
+  real fS = nzSide*1.0/nz, fC = nzCore*1.0/nz;
+  real c0=0, c1=c0+fS, c2=c1+fC, c3=c2+fS;
+  if (s<=c1) return zB0 + (zB1-zB0)*(s-c0)/(c1-c0);
+  if (s<=c2) return zB1 + (zB2-zB1)*(s-c1)/(c2-c1);
+  return zB2 + (zB3-zB2)*(s-c2)/(c3-c2);
+}
+
+mesh3 Th3 = cube(nx, ny, nz, [Lx*x, yphys(y), zphys(z)]);
+
+// region 1 (Cu) = bottom slab (y<=yB1) OR top slab (y>yB5) OR either side
+// edge (z<=zB1 || z>=zB2) -- a single merged conductor, same indicator-
+// function pattern as 3D/3D-slit's region-1 shell, just different y-extents.
+fespace Ph3region(Th3, P0);
+Ph3region region0 = (y<=yB1 || y>yB5 || z<=zB1 || z>=zB2)*1
+                   + (y>yB1 && y<=yB2 && z>zB1 && z<zB2)*2
+                   + (y>yB2 && y<=yB3 && z>zB1 && z<zB2)*3
+                   + (y>yB3 && y<=yB4 && z>zB1 && z<zB2)*4
+                   + (y>yB4 && y<=yB5 && z>zB1 && z<zB2)*5;
+Th3 = change(Th3, fregion=region0(x,y,z));

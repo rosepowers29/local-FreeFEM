@@ -1,0 +1,285 @@
+// ============================================================
+// step_strain_tape_transient.edp
+// Strain-defect single-tape transient scenario: NO slit, NO heater. Current
+// is ramped to just above the tape's NOMINAL (undamaged) critical current,
+// and the ONLY quench trigger is a strain-induced Jc defect (from real
+// ANSYS strain data via strain_to_jc.py's Ekin-Weibull pipeline). Full LN
+// bath immersion -- Dirichlet 77K on EVERY boundary face, not just the two
+// current-lead ends (unlike every other track in this repo).
+//
+// Electrical model: ONE equipotential channel along x (no slit to split
+// it), following 3D/step_3d_shell_transient.edp's single-representative-
+// z-sample pattern. The per-x bisection scales Jc0 by the width-averaged
+// icRatioOfX(x) (same level of z-approximation the existing no-slit model
+// already accepts by sampling T at one z point per x); the volumetric
+// Joule-heating source term instead uses the full 2D jcRatioOfXZ(x,z)
+// field, evaluated pointwise over the true FE temperature field, so
+// defect-localized heating is spatially resolved even though the driving
+// E(x) is width-averaged. See strain-defect/CLAUDE.md for the full
+// rationale (validated during planning, not assumed).
+// ============================================================
+
+real tInvocationStart = clock();
+
+real tMeshStart = clock();
+include "hts_mesh_module_tape.idp"
+real tMeshDone = clock();
+include "strain_jc_meta.idp"
+include "hts_materials.idp"
+real tMaterialsDone = clock();
+include "getARGV.idp"
+
+real currentRatio = getARGV("-ratio", 1.05);
+string outPrefix  = getARGV("-outprefix", "");
+real tapOffset    = getARGV("-tapoffset", 2e-3);
+cout << "[profile] meshBuild=" << (tMeshDone-tMeshStart) << "s materialsLoad="
+     << (tMaterialsDone-tMeshDone) << "s" << endl;
+cout << "[defect] x=" << defectX << "m" << endl;
+
+real Tcold = 77.0;
+// NOMINAL (undamaged) critical current -- intentionally UNSCALED by the
+// defect, since "ratio" is meant to express how far above the undamaged
+// tape's own Ic the transport current is pushed. The defect is what makes
+// the tape quench before reaching this nominal target, not a redefinition
+// of the target itself.
+real IcRebcoActual = JcT(77.0)*tSc*coreWidth;
+real I0Target = currentRatio * IcRebcoActual;
+
+real shellArea = width*yB6 - coreWidth*(yB5-yB1);
+
+// rampRateTarget/rampDt: same slow-ramp machinery already validated in
+// 3D-slit/electrothermal (see that track's CLAUDE.md) -- below-Ic ramp is
+// thermally quasi-static regardless of duration, so a coarse rampDt there
+// is safe. Default ratio here is >1 (this scenario's whole point is
+// pushing past nominal Ic), so tCrossIc is meaningfully BEFORE Tramp.
+real rampRateTarget = getARGV("-ramprate", 0.0);
+real rampDt = getARGV("-rampdt", 0.05);
+real rampDtAboveIc = getARGV("-rampdt-aboveic", 0.002);
+real maxJcFracChange = getARGV("-maxjcfracchange", 0.05);
+real Tramp = 0.5;
+if (rampRateTarget > 0.0) Tramp = I0Target/rampRateTarget;
+real tCrossIc = (currentRatio > 1.0) ? Tramp/currentRatio : Tramp;
+// No heater pulse in this scenario -- tEnd is just Tramp plus a
+// configurable post-ramp hold window to observe the defect-triggered
+// quench (or its absence) develop.
+real postRampHold = getARGV("-postramphold", 3.0);
+real tEnd = Tramp + postRampHold;
+
+func real I0ofT(real tt){
+  if (tt < Tramp) return I0Target*(tt/Tramp);
+  return I0Target;
+}
+real[int] phaseBounds = [tCrossIc, Tramp, tEnd];
+real postRampDt = getARGV("-postrampdt", 0.01);
+func real dtRaw(real tt){
+  if (tt < tCrossIc) return rampDt;
+  if (tt < Tramp) return rampDtAboveIc;
+  return postRampDt;
+}
+func real dtCapped(real tt){
+  real d = dtRaw(tt);
+  for (int i=0;i<3;i++) if (tt < phaseBounds[i]-1e-9 && tt+d > phaseBounds[i]) d = phaseBounds[i]-tt;
+  return d;
+}
+
+func real kOf(int rg, real Tl){
+  if (rg==1) return kCu(Tl);
+  if (rg==2) return kHast(Tl);
+  if (rg==3) return kBuf(Tl);
+  if (rg==4) return kSc(Tl);
+  if (rg==5) return kAg(Tl);
+  return 1.0;
+}
+// sourceOfDefect: identical dispatch to the existing tracks' sourceOf(),
+// except region 4 (REBCO) scales Jc0 by the FULL 2D jcRatioOfXZ(xx,zz)
+// field at this point's own coordinates -- the one new piece this model
+// adds on top of the existing pattern (xx/zz resolve to the current
+// quadrature/mesh-point coordinates when this is called from inside a
+// `source = ...` field assignment, same mechanism already used for
+// Efun(x) and the slit model's inSlitRange).
+func real sourceOfDefect(int rg, real Ef, real Tl, real xx, real zz){
+  if (rg==1) return Ef^2/rhoCu(Tl);
+  if (rg==2) return Ef^2/rhoHast(Tl);
+  if (rg==4) return sigmaScDefect(Ef, Tl, jcRatioOfXZ(xx,zz))*Ef^2;
+  if (rg==5) return Ef^2/rhoAg(Tl);
+  return 0.0;   // region 3 = buffer, insulating
+}
+func real rhoCpOf(int rg, real Tl){
+  if (rg==1) return rhomCu*cpCu(Tl);
+  if (rg==2) return rhomHast*cpHast(Tl);
+  if (rg==3) return rhomBuf*cpBuf(Tl);
+  if (rg==4) return rhomSc*cpSc(Tl);
+  if (rg==5) return rhomAg*cpAg(Tl);
+  return 1.0;
+}
+
+// 1D per-x electrical bisection: scales Jc0 by the WIDTH-AVERAGED
+// icRatioOfX(xx) (consistent with sampling T at one representative z per x,
+// same level of approximation the existing no-slit model already accepts).
+func real Itot(real E, real TcuShell, real THast, real Tsc, real TagT, real xx){
+  real jcScale = icRatioOfX(xx);
+  return shellArea*(E/rhoCu(TcuShell))
+       + tHast*coreWidth*(E/rhoHast(THast))
+       + tSc*coreWidth*sigmaScDefect(E,Tsc,jcScale)*E
+       + tAgT*coreWidth*(E/rhoAg(TagT));
+}
+real maxRelErrThisStep = 0.0;
+func real solveE(real TcuShell, real THast, real Tsc, real TagT, real Itarget, real xx){
+  if (Itarget <= 0.0) return 0.0;
+  real Ehi0 = 4.0; int guard = 0;
+  while (Itot(Ehi0,TcuShell,THast,Tsc,TagT,xx) < Itarget && guard<40){ Ehi0 *= 2.0; guard++; }
+  real logElo = log(1e-30), logEhi = log(Ehi0);
+  for (int it=0; it<50; it++){
+    real logEmid = 0.5*(logElo+logEhi);
+    real Emid = exp(logEmid);
+    if (Itot(Emid,TcuShell,THast,Tsc,TagT,xx) < Itarget) logElo = logEmid; else logEhi = logEmid;
+  }
+  real Efinal = exp(0.5*(logElo+logEhi));
+  real relErr = abs(Itot(Efinal,TcuShell,THast,Tsc,TagT,xx)-Itarget)/max(Itarget,1e-30);
+  if (relErr > maxRelErrThisStep) maxRelErrThisStep = relErr;
+  assert(relErr <= 1e-3);
+  return Efinal;
+}
+
+int nxs = 80;   // matches strain_to_jc.py's default --n-x-sample=81 (indices
+                // 0..80), so icRatioOfX's own table resolution lines up
+                // with the electrical solve's x-sampling grid.
+real[int] xSample(nxs+1), Earr(nxs+1);
+for (int i=0;i<=nxs;i++) xSample[i] = Lx*i/nxs;
+func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
+
+// Diagnostics (2 voltage-tap pairs, centerline only) -- must be included
+// after Efun is defined, per that file's header comment.
+include "diagnostics_strain_tape.idp"
+
+fespace Vh3(Th3, P1);
+fespace Ph3(Th3, P0);
+Ph3 reg = region;
+Vh3 T, Told, w;
+Ph3 kfun, source, rhocpfun;
+
+real yCuRep = yB6-1e-9, yHastMid=0.5*(yB1+yB2), yScMid=0.5*(yB3+yB4), yAgTMid=0.5*(yB4+yB5);
+real zCenter = width/2;
+
+int maxStepsThisRun = getARGV("-steps-per-invocation", 1);
+real tmaxCutoff = getARGV("-tmaxcutoff", 900.0);
+real maxStepRise = getARGV("-maxsteprise", 500.0);
+int maxBisections = getARGV("-maxbisections", 10);
+
+real t = 0.0;
+{
+  ifstream fchk(outPrefix+"ckpt_strain_tape.txt");
+  fchk >> t;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+  cout << "Resumed at t="<<t<<"s Tmax="<<T[].max << endl;
+}
+
+{
+  ofstream fout(outPrefix+"transient_strain_tape.csv", append);
+  if (t <= 1e-12) fout << "t,I0,Tmax,TmaxAtDefect,maxCurrentConservationRelErr\n";
+
+  ofstream fdiag(outPrefix+"diagnostics_strain_tape.csv", append);
+  int diagFileCheck = exec("test -s "+outPrefix+"diagnostics_strain_tape.csv");
+  bool diagCsvHasHeader = (diagFileCheck == 0);
+  writeDiagnosticsMetadata(outPrefix+"diagnostics_positions_strain_tape.csv", yCuRep);
+  if (!diagCsvHasHeader) {
+    fdiag << "t,I0,Tmax,V_CL_plus,V_CL_minus,V_defect_up,V_defect_down\n";
+  }
+
+  int step = 0;
+  while (t < tEnd-1e-12 && step < maxStepsThisRun && T[].max < tmaxCutoff){
+    real I0w = I0ofT(t);
+    maxRelErrThisStep = 0.0;
+
+    for (int i=0;i<=nxs;i++){
+      real xx = xSample[i];
+      real TcuShell=T(xx,yCuRep,zCenter), THast=T(xx,yHastMid,zCenter),
+           Tsc=T(xx,yScMid,zCenter), TagT=T(xx,yAgTMid,zCenter);
+      Earr[i] = solveE(TcuShell,THast,Tsc,TagT, I0w, xx);
+    }
+
+    real dt = dtCapped(t);
+    if (dt <= 1e-9) break;
+
+    bool inAboveIcPhase = (currentRatio > 1.0 && t >= tCrossIc-1e-9 && t < Tramp-1e-9);
+
+    source = sourceOfDefect(region, Efun(x), T, x, z);
+    Told = T;
+    kfun = kOf(region, Told);
+    rhocpfun = rhoCpOf(region, Told);
+
+    // Adaptive step bisection -- identical mechanism/rationale to
+    // 3D-slit/electrothermal's step_3d_slit_transient_diag.edp (see that
+    // file's comments for the full history: catches UMFPACK ill-
+    // conditioning at large collapsed dt, found live via r1p36/r1p83/r1p474).
+    // jcBefore/jcRef deliberately use the NOMINAL (unscaled) JcT(T), not the
+    // defect-scaled version -- this controller is a numerical step-size
+    // heuristic (how fast is the current-sharing physics changing with T),
+    // not a defect-specific physical quantity, so no change was needed here.
+    real TmaxBefore = Told[].max, TminBefore = Told[].min;
+    real jcBefore = JcT(TmaxBefore);
+    real jcRef = JcT(Tcold);
+    real dtTry = dt;
+    int bisectCount = 0;
+    real jcFrac = 0.0;
+    bool solveOk = false;
+    while (!solveOk){
+      solve heatStep(T, w) =
+          int3d(Th3)( rhocpfun*T*w/dtTry + kfun*(dx(T)*dx(w) + dy(T)*dy(w) + dz(T)*dz(w)) )
+        - int3d(Th3)( rhocpfun*Told*w/dtTry + source*w )
+        + on(1, 2, 3, 4, 5, 6, T=Tcold);   // full LN-bath immersion: every face cooled
+      bool isNan = (T[].max != T[].max) || (T[].min != T[].min);
+      bool blewUp = isNan || (T[].max-TmaxBefore > maxStepRise) || (TminBefore-T[].min > maxStepRise);
+      bool jcTooFast = false;
+      if (inAboveIcPhase && !blewUp){
+        jcFrac = abs(JcT(T[].max)-jcBefore)/max(jcRef, 1e-30);
+        jcTooFast = jcFrac > maxJcFracChange;
+      }
+      if (!blewUp && !jcTooFast) solveOk = true;
+      else {
+        bisectCount++;
+        cout << "[bisect] step=" << step << " t=" << t << " dtTry=" << dtTry
+             << " jcFrac=" << jcFrac << " Tmax=" << T[].max << " Tmin=" << T[].min
+             << " -- halving (attempt " << bisectCount << "/" << maxBisections << ")" << endl;
+        if (bisectCount > maxBisections){
+          cout << "FATAL: heatStep did not stabilize after " << maxBisections
+               << " bisections at t=" << t << " (started from dt=" << dt << ")" << endl;
+          assert(false);
+        }
+        dtTry = dtTry/2.0;
+      }
+    }
+    dt = dtTry;
+    if (inAboveIcPhase){
+      if (jcFrac < 0.5*maxJcFracChange) rampDtAboveIc = dtTry*2.0;
+      else rampDtAboveIc = dtTry;
+    }
+
+    t += dt;
+    for (int i=0;i<3;i++) if (abs(t-phaseBounds[i])<1e-9) t = phaseBounds[i];
+    step++;
+
+    real I0Now = I0ofT(t);
+    real TmaxAtDefect = T(defectX, yCuRep, zCenter);
+    cout << "t="<<t<<"s I0="<<I0Now<<" Tmax="<<T[].max<<" TmaxAtDefect="<<TmaxAtDefect
+         << " maxConservErr="<<maxRelErrThisStep << endl;
+    fout << t << "," << I0Now << "," << T[].max << "," << TmaxAtDefect << "," << maxRelErrThisStep << "\n";
+
+    real vDefectUp, vDefectDown, vClMinus;
+    diagAllTapVoltages(vDefectUp, vDefectDown, vClMinus);
+    fdiag << t << "," << I0Now << "," << T[].max << "," << 0.0 << "," << vClMinus
+          << "," << vDefectUp << "," << vDefectDown << "\n";
+
+    {
+      ofstream fchkOut(outPrefix+"ckpt_strain_tape.txt");
+      fchkOut.precision(12);
+      fchkOut << t << "\n";
+      for (int i=0;i<T.n;i++) fchkOut << T[][i] << "\n";
+    }
+  }
+  if (T[].max >= tmaxCutoff) cout << "Tmax cutoff " << tmaxCutoff << "K reached (Tmax="
+       << T[].max << "K) -- stopping early, " << (maxStepsThisRun-step)
+       << " step(s) skipped this invocation" << endl;
+}
+cout << "Saved checkpoint at t="<<t<<"s" << endl;
+cout << "[profile] totalInvocation=" << (clock()-tInvocationStart) << "s" << endl;
