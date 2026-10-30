@@ -121,6 +121,13 @@ def build_grid(df, coord_precision=None, drop_incomplete_columns=False):
                   f"{'...' if len(sparse_x) > 10 else ''}")
             df = df[~df["x"].isin(sparse_x)]
 
+    n_unique_x = df["x"].nunique()
+    n_unique_y = df["y"].nunique()
+    print(f"Diagnostics: {n_unique_x} unique x (width) values, {n_unique_y} "
+          f"unique y (length) values in the native ANSYS grid -- compare "
+          f"against --n-z-sample/--n-x-sample to judge whether the FreeFEM "
+          f"resampling resolution is coarser than the native data.")
+
     pivot = df.pivot_table(index="y", columns="x", values="strain")
     x_vals = pivot.columns.to_numpy(dtype=float)
     y_vals = pivot.index.to_numpy(dtype=float)
@@ -230,23 +237,28 @@ def check_decomposition_consistency(x_sample_m, z_sample_m, jc_grid_xz, ic_ratio
 
 def check_defect_severity(x_sample_m, z_sample_m, jc_grid_xz, ic_ratio_x, defect_x_m):
     """At the defect x, compare the pointwise minimum of jc_grid_xz against
-    the width-averaged ic_ratio_x. If a width-strip would need a local
-    current-sharing fraction > 1 to carry its 'fair share' of the
-    width-averaged current, the width-averaged electrical approximation is
-    unconservative -- flag it rather than silently trust the hybrid model."""
+    the width-averaged ic_ratio_x -- a descriptive measure of how locally
+    severe/narrow the defect is (e.g. a width-edge strain concentration vs.
+    a broad, gentle dip). step_strain_tape_transient.edp's electrical solve
+    is z-resolved (as of the real-data defect this check first caught being
+    this severe), so this is informational, NOT a correctness gate the way
+    it was under the earlier width-averaged electrical-solve design --
+    still worth looking at, since a very high implied fraction means the
+    defect is concentrated in a small z-extent, which is useful context for
+    interpreting results even though the solve itself now handles it."""
     ix = int(np.argmin(np.abs(x_sample_m - defect_x_m)))
     local_min = float(np.nanmin(jc_grid_xz[ix, :]))
     width_avg = float(ic_ratio_x[ix])
     implied_fraction = width_avg / max(local_min, 1e-12)
     if implied_fraction > 1.0:
-        print(f"WARNING: defect severity check FAILED at x={x_sample_m[ix]:.4f}m -- "
+        print(f"NOTE: defect is locally severe at x={x_sample_m[ix]:.4f}m -- "
               f"local min Jc/Jc0={local_min:.4f} vs width-avg Ic/Ic0={width_avg:.4f} "
-              f"implies a local current-sharing fraction of {implied_fraction:.2f} "
-              f"(>1). The width-averaged 1D electrical solve is unconservative here "
-              f"-- a fully z-resolved electrical model may be needed for this defect.")
+              f"(implied local current-sharing fraction {implied_fraction:.2f}, >1). "
+              f"Informational only -- the electrical model is z-resolved and handles "
+              f"this directly; this just describes how narrow/severe the defect is.")
     else:
-        print(f"Defect severity check OK at x={x_sample_m[ix]:.4f}m: implied local "
-              f"current-sharing fraction {implied_fraction:.4f} (<=1).")
+        print(f"Defect severity: implied local current-sharing fraction "
+              f"{implied_fraction:.4f} at x={x_sample_m[ix]:.4f}m (broad/mild defect).")
     return implied_fraction
 
 
@@ -302,7 +314,7 @@ def run_pipeline(strain_csv, x_csv, y_csv, out_dir,
                   x_col="LOCX (mm)", y_col="LOCY (mm)",
                   strain_sep="\t", x_sep="\t", y_sep="\t",
                   coord_precision=None, drop_incomplete_columns=False,
-                  ekin_params=None):
+                  ekin_params=None, surface=None):
     if ekin_params is None:
         ekin_params = dict(NOMINAL_EKIN_PARAMS)
 
@@ -310,10 +322,25 @@ def run_pipeline(strain_csv, x_csv, y_csv, out_dir,
                          strain_col=strain_col, x_col=x_col, y_col=y_col,
                          strain_sep=strain_sep, x_sep=x_sep, y_sep=y_sep)
     surfaces = sorted(df["surface"].unique())
-    if len(surfaces) > 1:
-        print(f"Multiple surfaces detected ({surfaces}); using the first "
-              f"('{surfaces[0]}') -- rerun per-surface if both matter.")
-    df_surface = df[df["surface"] == surfaces[0]]
+    # Which shell surface (top/bottom) to use is a physically meaningful
+    # choice, not a default to guess at -- an earlier version of this
+    # pipeline silently picked the alphabetically-first surface ("bottom"),
+    # which happened to disagree with a "top" result the user expected
+    # elsewhere. Require it explicitly once there's more than one option.
+    if len(surfaces) == 1:
+        chosen_surface = surfaces[0]
+    elif surface is not None:
+        if surface not in surfaces:
+            raise ValueError(f"--surface {surface!r} not found in this data; "
+                              f"available surfaces: {surfaces}")
+        chosen_surface = surface
+    else:
+        raise ValueError(f"Multiple surfaces detected ({surfaces}) and no --surface "
+                          f"given. Which shell surface to use is a physically meaningful "
+                          f"choice (see strain-defect/CLAUDE.md) -- pass --surface "
+                          f"explicitly rather than let this default silently.")
+    print(f"Using surface: {chosen_surface}")
+    df_surface = df[df["surface"] == chosen_surface]
 
     x_vals, y_vals, strain_grid = build_grid(
         df_surface, coord_precision=coord_precision,
@@ -353,11 +380,17 @@ def main():
     parser.add_argument("x_csv")
     parser.add_argument("y_csv")
     parser.add_argument("--out-dir", default=".")
-    parser.add_argument("--tape-length-m", type=float, default=0.080)
+    parser.add_argument("--tape-length-m", type=float, default=0.115,
+                         help="Must match hts_mesh_module_tape.idp's Lx exactly.")
     parser.add_argument("--tape-width-m", type=float, default=0.006)
     parser.add_argument("--core-width-m", type=float, default=0.006 - 2e-6)
-    parser.add_argument("--n-x-sample", type=int, default=81)
-    parser.add_argument("--n-z-sample", type=int, default=21)
+    parser.add_argument("--n-x-sample", type=int, default=116,
+                         help="Must match step_strain_tape_transient.edp's nxs+1.")
+    parser.add_argument("--n-z-sample", type=int, default=33,
+                         help="Must match step_strain_tape_transient.edp's nzElec "
+                              "(the electrical solve's own z-resolution) -- keeping "
+                              "these equal means the table isn't coarser than what "
+                              "the solve reads from it.")
 
     parser.add_argument("--node-col", default="Node Number")
     parser.add_argument("--strain-col", default="EPTOX ()")
@@ -368,6 +401,10 @@ def main():
     parser.add_argument("--y-sep", default="\t")
     parser.add_argument("--coord-precision", type=int, default=None)
     parser.add_argument("--drop-incomplete-columns", action="store_true")
+    parser.add_argument("--surface", default=None,
+                         help="Which shell surface to use when the strain export has "
+                              "2 rows/node (e.g. 'top'/'bottom'). Required if more than "
+                              "one surface is present -- not inferred, see CLAUDE.md.")
 
     for p, d in NOMINAL_EKIN_PARAMS.items():
         parser.add_argument(f"--{p}", type=float, default=d)
@@ -383,7 +420,7 @@ def main():
                  strain_sep=args.strain_sep, x_sep=args.x_sep, y_sep=args.y_sep,
                  coord_precision=args.coord_precision,
                  drop_incomplete_columns=args.drop_incomplete_columns,
-                 ekin_params=ekin_params)
+                 ekin_params=ekin_params, surface=args.surface)
 
 
 if __name__ == "__main__":

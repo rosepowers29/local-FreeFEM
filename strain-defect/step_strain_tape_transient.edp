@@ -8,15 +8,19 @@
 // current-lead ends (unlike every other track in this repo).
 //
 // Electrical model: ONE equipotential channel along x (no slit to split
-// it), following 3D/step_3d_shell_transient.edp's single-representative-
-// z-sample pattern. The per-x bisection scales Jc0 by the width-averaged
-// icRatioOfX(x) (same level of z-approximation the existing no-slit model
-// already accepts by sampling T at one z point per x); the volumetric
-// Joule-heating source term instead uses the full 2D jcRatioOfXZ(x,z)
-// field, evaluated pointwise over the true FE temperature field, so
-// defect-localized heating is spatially resolved even though the driving
-// E(x) is width-averaged. See strain-defect/CLAUDE.md for the full
-// rationale (validated during planning, not assumed).
+// it, and no slit-style voltage-matching bisection needed either -- there's
+// only one continuous REBCO sheet here, not two physically severed
+// conductors, so E(x) is genuinely a single shared value across z at each
+// x). The per-x bisection is Z-RESOLVED: the REBCO current-sharing term is
+// a proper integral over z of sigmaScDefect(E, T(x,z), jcRatioOfXZ(x,z)),
+// not a single width-averaged scalar -- so current redistribution away
+// from a narrow, severe width-edge defect (found in real strain data, see
+// strain-defect/CLAUDE.md) is represented directly, at the SAME E(x) every
+// z-strip shares. This replaced an earlier width-averaged hybrid design
+// once real data showed a defect severe/narrow enough that averaging was
+// unconservative. The volumetric Joule-heating source term is unaffected
+// by this change -- it already used the full 2D jcRatioOfXZ(x,z) field
+// pointwise (see sourceOfDefect below).
 // ============================================================
 
 real tInvocationStart = clock();
@@ -113,37 +117,59 @@ func real rhoCpOf(int rg, real Tl){
   return 1.0;
 }
 
-// 1D per-x electrical bisection: scales Jc0 by the WIDTH-AVERAGED
-// icRatioOfX(xx) (consistent with sampling T at one representative z per x,
-// same level of approximation the existing no-slit model already accepts).
-func real Itot(real E, real TcuShell, real THast, real Tsc, real TagT, real xx){
-  real jcScale = icRatioOfX(xx);
+// nzElec: number of z-sample points used to resolve the REBCO current-
+// sharing integral at each x. T and jcRatioOfXZ don't depend on E, so
+// they're precomputed once per x per timestep (same optimization the slit
+// model already uses for its per-x temperature snapshots) and reused across
+// every bisection iteration below.
+int nzElec = 33;   // matches strain_to_jc.py's --n-z-sample=33 recommended
+                   // resolution, so the electrical solve's own z-sampling
+                   // isn't coarser than the table it's reading from.
+real[int] zElecSample(nzElec);
+for (int k=0;k<nzElec;k++) zElecSample[k] = zB1 + (zB2-zB1)*k/(nzElec-1);
+
+// zIntegralSigmaSc: trapezoidal integral over z of sigmaScDefect(E,T(z),
+// jc(z)) -- replaces the old width-averaged "coreWidth*sigmaScDefect(E,Tsc,
+// jcScale)" scalar term with a proper per-z-resolved sum, at the SAME E
+// (there's one shared equipotential cross-section at this x, current
+// density simply varies with z because Jc does).
+func real zIntegralSigmaSc(real E, real[int] &TscZ, real[int] &jcRzZ, int nk){
+  real h = (zB2-zB1)/(nk-1);
+  real sum = 0.0;
+  for (int k=0;k<nk-1;k++){
+    real sA = sigmaScDefect(E, TscZ[k],   jcRzZ[k]);
+    real sB = sigmaScDefect(E, TscZ[k+1], jcRzZ[k+1]);
+    sum += 0.5*(sA+sB)*h;
+  }
+  return sum;
+}
+
+func real Itot(real E, real TcuShell, real THast, real[int] &TscZ, real[int] &jcRzZ, int nk, real TagT){
   return shellArea*(E/rhoCu(TcuShell))
        + tHast*coreWidth*(E/rhoHast(THast))
-       + tSc*coreWidth*sigmaScDefect(E,Tsc,jcScale)*E
+       + tSc*E*zIntegralSigmaSc(E,TscZ,jcRzZ,nk)
        + tAgT*coreWidth*(E/rhoAg(TagT));
 }
 real maxRelErrThisStep = 0.0;
-func real solveE(real TcuShell, real THast, real Tsc, real TagT, real Itarget, real xx){
+func real solveE(real TcuShell, real THast, real[int] &TscZ, real[int] &jcRzZ, int nk, real TagT, real Itarget){
   if (Itarget <= 0.0) return 0.0;
   real Ehi0 = 4.0; int guard = 0;
-  while (Itot(Ehi0,TcuShell,THast,Tsc,TagT,xx) < Itarget && guard<40){ Ehi0 *= 2.0; guard++; }
+  while (Itot(Ehi0,TcuShell,THast,TscZ,jcRzZ,nk,TagT) < Itarget && guard<40){ Ehi0 *= 2.0; guard++; }
   real logElo = log(1e-30), logEhi = log(Ehi0);
   for (int it=0; it<50; it++){
     real logEmid = 0.5*(logElo+logEhi);
     real Emid = exp(logEmid);
-    if (Itot(Emid,TcuShell,THast,Tsc,TagT,xx) < Itarget) logElo = logEmid; else logEhi = logEmid;
+    if (Itot(Emid,TcuShell,THast,TscZ,jcRzZ,nk,TagT) < Itarget) logElo = logEmid; else logEhi = logEmid;
   }
   real Efinal = exp(0.5*(logElo+logEhi));
-  real relErr = abs(Itot(Efinal,TcuShell,THast,Tsc,TagT,xx)-Itarget)/max(Itarget,1e-30);
+  real relErr = abs(Itot(Efinal,TcuShell,THast,TscZ,jcRzZ,nk,TagT)-Itarget)/max(Itarget,1e-30);
   if (relErr > maxRelErrThisStep) maxRelErrThisStep = relErr;
   assert(relErr <= 1e-3);
   return Efinal;
 }
 
-int nxs = 80;   // matches strain_to_jc.py's default --n-x-sample=81 (indices
-                // 0..80), so icRatioOfX's own table resolution lines up
-                // with the electrical solve's x-sampling grid.
+int nxs = 115;  // dx=1mm over the new 115mm length; matches
+                // strain_to_jc.py's --n-x-sample=116 recommended default.
 real[int] xSample(nxs+1), Earr(nxs+1);
 for (int i=0;i<=nxs;i++) xSample[i] = Lx*i/nxs;
 func real Efun(real xx){ return interp1(xSample, Earr, nxs+1, xx); }
@@ -191,11 +217,16 @@ real t = 0.0;
     real I0w = I0ofT(t);
     maxRelErrThisStep = 0.0;
 
+    real[int] TscZ(nzElec), jcRzZ(nzElec);
     for (int i=0;i<=nxs;i++){
       real xx = xSample[i];
       real TcuShell=T(xx,yCuRep,zCenter), THast=T(xx,yHastMid,zCenter),
-           Tsc=T(xx,yScMid,zCenter), TagT=T(xx,yAgTMid,zCenter);
-      Earr[i] = solveE(TcuShell,THast,Tsc,TagT, I0w, xx);
+           TagT=T(xx,yAgTMid,zCenter);
+      for (int k=0;k<nzElec;k++){
+        TscZ[k]  = T(xx, yScMid, zElecSample[k]);
+        jcRzZ[k] = jcRatioOfXZ(xx, zElecSample[k]);
+      }
+      Earr[i] = solveE(TcuShell,THast,TscZ,jcRzZ,nzElec,TagT, I0w);
     }
 
     real dt = dtCapped(t);

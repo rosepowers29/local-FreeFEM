@@ -29,6 +29,12 @@ is deltas/gotchas specific to this directory, same role as
   region's historical "upper copper layer" origin) rather than solved for
   exact centering once bottom Ag was removed; this is a known, accepted
   ~4% asymmetry, not a bug.
+- **Tape length is 115mm, not 80mm.** Started as an 80mm placeholder;
+  resized once the user's real ANSYS strain export (`7turns_6mm_45_30mm`,
+  a 7-turn coil's local bend-strain analysis) showed the actual specimen's
+  LOCZ (length) axis spans 0-115mm. `nx`/`nxs` were bumped proportionally
+  (86/115) so physical resolution didn't silently coarsen when `Lx` grew —
+  if `Lx` ever changes again, rescale both the same way.
 - **Jc is spatially resolved from real strain data**, not uniform. See
   "Electrical/thermal coupling" below — this is the architecturally new
   piece this track adds on top of the existing patterns.
@@ -51,11 +57,43 @@ linear extrapolation could invent an artificially better/worse Jc/Jc0
 outside the measured range and silently relocate the quench trigger.
 
 The pipeline exports **two** tables that MUST be resampled from the same
-underlying field onto the **same** FreeFEM x-sample grid (currently 81
-points, 0 to `Lx`, matching `step_strain_tape_transient.edp`'s `nxs=80`):
+underlying field onto the **same** FreeFEM x-sample grid (currently 116
+points, 0 to `Lx`, matching `step_strain_tape_transient.edp`'s `nxs=115`):
 - `strain_jc_icratio_x.txt`: 1D width-averaged Ic/Ic0(x) (reuses
-  `ic_retention_along_length` unchanged, then resampled).
-- `strain_jc_grid_xz.txt`: 2D regular-grid Jc/Jc0(x,z), un-averaged.
+  `ic_retention_along_length` unchanged, then resampled). Loaded but no
+  longer load-bearing for the electrical solve (see "Electrical/thermal
+  coupling" below) — kept for diagnostic/comparison purposes.
+- `strain_jc_grid_xz.txt`: 2D regular-grid Jc/Jc0(x,z), un-averaged. The
+  load-bearing table — feeds both the volumetric heating source AND the
+  z-resolved electrical solve. `--n-z-sample` (default 33) MUST match
+  `step_strain_tape_transient.edp`'s `nzElec` — keeping them equal means the
+  electrical solve's own z-sampling isn't coarser than the table it reads.
+
+**Real ANSYS data needs two flags the synthetic test doesn't exercise**,
+found by running against the user's actual `7turns_6mm_45_30mm` export:
+- `--surface top`/`--surface bottom`: **required**, not inferred, whenever
+  the strain file has 2 rows/node (top/bottom shell surface). An earlier
+  version silently picked the alphabetically-first surface ("bottom") —
+  this disagreed with a "top" result the user already trusted from their
+  own prior `ic_retention_analysis_new.py` runs. Now `run_pipeline` raises
+  an error rather than guess once more than one surface is present. Which
+  surface is physically correct is a modeling question about the ANSYS
+  setup (does top/bottom mean the whole composite shell's extreme fibers,
+  or specifically the REBCO/substrate layer's own two faces?) that only the
+  user can answer — for the `7turns_6mm_45_30mm` data it's "top" (REBCO's
+  own faces, confirmed by the user).
+- `--coord-precision 3 --drop-incomplete-columns`: needed for quadratic
+  shell-element meshes. Found live on this data: "corner" width positions
+  (0.5mm spacing) had full length-density (461 points), "midside" width
+  positions (0.25mm offsets) had only half (231) — `--drop-incomplete-
+  columns` removes those. Separately, the true z=0 edge was fragmented into
+  8 near-zero floating-point variants (e.g. `-1.9665e-06`, `5.6572e-08`,
+  summing to exactly 461 nodes combined) by ANSYS export noise —
+  `--coord-precision 3` collapses them back into one real column. Without
+  both flags, `build_grid`'s pivot produces thousands of NaN gaps and
+  `find_global_minimum` fails outright (every row NaN) — this is not a
+  silent-wrong-answer failure mode, it's a hard crash, but still worth
+  recognizing on sight rather than being surprised by it.
 
 Plus `strain_jc_meta.idp` (array-size constants + `defectX`, auto-generated,
 **do not hand-edit** — included directly by `hts_materials.idp` before its
@@ -67,20 +105,28 @@ Python consumers).
    must reproduce the 1D profile at the same x (repo's standard
    "decomposition must sum back to the aggregate" discipline, root
    `CLAUDE.md`). Printed as a WARNING if it fails, not silently ignored.
+   Real-data note: an initial run against `7turns_6mm_45_30mm` data failed
+   this check (9.4% error) at the default resolution (`--n-z-sample 21`
+   against a native 32-column grid); bumping to `--n-z-sample 33` (now the
+   default, matching `nzElec` below) plus the quadratic-mesh flags above
+   brought it to 0.74% — resampling resolution was the actual cause, not a
+   data problem.
 2. Defect severity check — compares the pointwise minimum of the 2D grid
-   against the width-averaged profile at the defect location; flags when
-   the width-averaged electrical approximation (see below) would be
-   unconservative for a given defect's severity/sharpness.
+   against the width-averaged profile at the defect location. **No longer a
+   correctness gate** (see "Electrical/thermal coupling" below) — it's
+   informational, describing how locally severe/narrow a defect is. It
+   fired loudly on the real `7turns_6mm_45_30mm` data (local min effectively
+   0 vs. width-avg 0.356) and that NOTE is accurate: the real defect is a
+   genuine width-edge strain concentration (bend-induced, both tape edges,
+   up to 9% strain — a known failure mode for tightly-wound coated
+   conductor, not a meshing artifact) narrow enough that a width-averaged
+   electrical model would have been unconservative. This is WHY the
+   electrical model is z-resolved now instead of width-averaged.
 
-**Currently committed data is SYNTHETIC placeholder**
-(`strain_jc_icratio_x.txt`, `strain_jc_grid_xz.txt`, `strain_jc_meta.*`),
-generated by running the pipeline against a synthetic Gaussian-strain-dip
-test case (see `test_strain_to_jc_synthetic.py`) purely so the `.edp`
-scripts have something to load. **Re-run `strain_to_jc.py` against real
-ANSYS exports before trusting any physics result** — this is the repo's
-own checkpoint-format discipline applied to a new kind of input file: the
-scripts will run happily against stale/placeholder tables with no error,
-same hazard class as resuming a mismatched checkpoint.
+**Currently committed data is from the real `7turns_6mm_45_30mm` "top"
+surface** (not synthetic placeholder — see the exact command in "Running"
+below). `test_strain_to_jc_synthetic.py` remains the no-FreeFEM-needed
+correctness check for the pipeline itself; it doesn't touch these files.
 
 Run the synthetic test (no FreeFEM needed) with:
 ```bash
@@ -88,31 +134,47 @@ cd strain-defect
 python3 test_strain_to_jc_synthetic.py
 ```
 
-## Electrical/thermal coupling (validated during planning, not assumed)
+## Electrical/thermal coupling (z-resolved, not width-averaged)
 
-No slit means genuinely one electrical channel — unlike
+No slit means genuinely one electrical channel at each x — unlike
 `3D-slit/electrothermal`'s coupled two-channel voltage-matching bisection
 (which only exists because the slit is a real geometric discontinuity
-severing current paths), nothing here justifies that extra per-timestep
-nonlinear solve.
+severing current paths into two separate conductors), nothing here
+justifies that kind of extra per-timestep nonlinear solve. That's the key
+fact that makes z-resolution cheap here: it's NOT "N independent channels
+needing cross-matching," it's one continuous equipotential REBCO sheet
+whose local current density varies with z because Jc does — so E(x) is
+still a single shared value at each x, and resolving z just means replacing
+a width-averaged scalar with a proper integral over z, at that same E.
 
-- **1D per-x electrical bisection** (`solveE`/`Itot`, one representative
-  z-sample per x — same approximation level `3D/step_3d_shell_transient.edp`
-  already accepts): scales `Jc0` by the WIDTH-AVERAGED `icRatioOfX(x)`.
+- **1D per-x electrical bisection** (`solveE`/`Itot` in
+  `step_strain_tape_transient.edp`): the REBCO current-sharing term is
+  `tSc*E*zIntegralSigmaSc(E, TscZ, jcRzZ, nzElec)` — a trapezoidal integral
+  over `nzElec` (33) z-sample points of `sigmaScDefect(E, T(x,z),
+  jcRatioOfXZ(x,z))`, not a single width-averaged scalar. `T` and
+  `jcRatioOfXZ` are precomputed once per x per timestep into `TscZ`/`jcRzZ`
+  arrays (same "snapshot before the bisection loop" optimization
+  `3D-slit/electrothermal`'s per-x T precompute already uses) since neither
+  depends on the trial `E` being bisected over.
 - **Volumetric 3D Joule-heating source term** (`sourceOfDefect`, evaluated
-  pointwise over the true FE temperature field): scales `Jc0` by the FULL
-  2D `jcRatioOfXZ(x,z)` field at each point's own coordinates — so
-  defect-localized heating is spatially resolved even though the driving
-  E(x) came from the width-averaged 1D solve.
-- This is sound as long as the defect isn't so severe/sharp in z that a
-  width-strip would need a local current-sharing fraction >1 to carry its
-  "fair share" — exactly what `check_defect_severity()` in the pipeline
-  checks before you trust a given defect's result. If that check fails for
-  your real strain data, this hybrid model is not appropriate and the
-  electrical solve would need genuine z-resolution (not yet implemented —
-  see the Plan-agent review that validated this architecture for why that
-  would require an (N-1)-D nonlinear voltage-matching solve, not N
-  independent bisections, i.e. real added complexity, not a small tweak).
+  pointwise over the true FE temperature field) is unchanged by this —
+  it already used the full 2D `jcRatioOfXZ(x,z)` field pointwise.
+- **Cost**: adds ~33x more `sigmaScDefect` evaluations to the electrical
+  sub-solve specifically, but that sub-solve was never the bottleneck —
+  `3D-slit/electrothermal/CLAUDE.md`'s own profiling shows `elecSplit`
+  (~0.0025s) is ~4 orders of magnitude cheaper than `pdeSolve` (~116s).
+  Confirmed in practice: a local Docker smoke test's `totalInvocation` only
+  grew from ~208s to ~263s after this change, and most of that difference
+  is the 44%-larger mesh (115mm vs 80mm), not the z-integral itself.
+- **This replaced an earlier width-averaged hybrid design** (scale `Jc0` by
+  `icRatioOfX(x)` in the electrical solve, keep the full 2D field only in
+  the heating source) that was planned and smoke-tested first. That design
+  was explicitly conditional on `check_defect_severity()` passing; once real
+  `7turns_6mm_45_30mm` data showed a severe, width-edge-localized defect
+  that check was designed to catch, the electrical model was upgraded
+  rather than proceeding with a known-unconservative approximation. If you
+  see references to "width-averaged" coupling in older commit history or
+  docs, this section supersedes them.
 
 **Verified against a real FreeFEM parser** (FreeFEM has no Homebrew/macOS
 package; got it running locally via `colima start` + `docker run
@@ -121,23 +183,25 @@ this is the same `freefem/freefem` Docker image this repo's own history
 already used for syntax verification, see `3D-slit/electrothermal/
 CLAUDE.md`'s FreeFEM-source-diving section):
 1. `mesh_report_strain_tape.edp` — every region-volume and boundary-label-
-   area `relErr` came back at machine precision (~1e-12 to 1e-14). The
+   area `relErr` came back at machine precision (~1e-12 to 1e-14), both at
+   the original 80mm length and re-verified after the 115mm resize. The
    full-immersion BC's `on(1,2,3,4,5,6,...)` label assumption (1/3=y-walls,
    2/4=x-ends, 5/6=z-walls, same as 3D/3D-slit's convention) and
    `sourceOfDefect`'s region dispatch are both confirmed correct for this
-   new mesh, not assumed.
+   mesh, not assumed.
 2. `sourceOfDefect(region, Efun(x), T, x, z)`'s `source = ...` field
-   assignment — the one genuinely new mechanism this track adds (2
-   point-dependent coordinate args passed alongside `T`/`region` into one
-   dispatch function calling the 2D `jcRatioOfXZ` table lookup) — ran clean
-   through `init_strain_tape_checkpoint.edp` + two chained invocations of
-   `step_strain_tape_transient.edp` (`-ratio 1.05 -steps-per-invocation 1`),
-   including a checkpoint-resume between them: `t` advanced 0→0.05→0.1s
-   correctly, `I0` scaled linearly with the ramp as expected, current-
-   conservation error stayed at ~3e-14, and the diagnostic tap
-   positions/values matched the expected defect location (x=0.039m from the
-   placeholder synthetic data, taps at 0.037/0.041m) exactly. "Ok: Normal
-   End" on every invocation, no `[bisect]`/`FATAL` lines.
+   assignment — passing 2 point-dependent coordinate args alongside
+   `T`/`region` into one dispatch function calling the 2D `jcRatioOfXZ`
+   table lookup — ran clean through `init_strain_tape_checkpoint.edp` +
+   chained invocations of `step_strain_tape_transient.edp`, including a
+   checkpoint-resume, with the earlier (80mm, width-averaged) design.
+3. The z-resolved electrical model (`Itot`/`solveE` taking `TscZ`/`jcRzZ`
+   arrays, `zIntegralSigmaSc`) was smoke-tested after the upgrade, at the
+   new 115mm length, against the REAL `7turns_6mm_45_30mm` data: `[defect]
+   x=0.00875m` printed correctly (matches `strain_jc_meta.idp`'s real
+   `defectX`), current-conservation error was exactly 0, diagnostic tap
+   positions matched (`0.00675`/`0.01075` = `defectX` ± 2mm, `V_CL_minus` at
+   `x=0.115`). "Ok: Normal End", no `[bisect]`/`FATAL` lines.
 
 Each single timestep currently costs **~170-210s wall-clock inside the
 Docker container** on this machine (mesh build ~7s, solve dominates) — fine
@@ -150,8 +214,23 @@ off to the remote machine for the real run.
 
 ## Running
 
+Regenerate the strain tables from real ANSYS data (exact command used for
+the currently-committed `7turns_6mm_45_30mm` tables — adjust paths/column
+names for different data, but keep `--surface` explicit and check whether
+`--coord-precision`/`--drop-incomplete-columns` are needed per the
+quadratic-mesh note above):
 ```bash
 cd strain-defect
+python3 strain_to_jc.py \
+  path/to/EPTOX_file.txt path/to/LOCY_file.txt path/to/LOCZ_file.txt \
+  --out-dir . \
+  --node-col "Node Number" --strain-col "EPTOX ()" \
+  --x-col "LOCY (mm)" --y-col "LOCZ ()" \
+  --strain-sep "\t" --x-sep "\t" --y-sep "\t" \
+  --coord-precision 3 --drop-incomplete-columns --surface top
+```
+Then the FreeFEM side:
+```bash
 FreeFem++ -nw mesh_report_strain_tape.edp          # verify region volumes/
                                                      # boundary areas FIRST
 FreeFem++ -nw init_strain_tape_checkpoint.edp       # once

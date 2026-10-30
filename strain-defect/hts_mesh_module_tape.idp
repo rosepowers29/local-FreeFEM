@@ -1,7 +1,10 @@
 // ============================================================
 // hts_mesh_module_tape.idp
 // 3D shell mesh for the strain-defect single-tape model: NO slit, 6mm wide,
-// 80mm long. 5-layer cross-section (down from the 6-7 layers in 3D/3D-slit):
+// 115mm long (matches the real ANSYS strain export's LOCZ span, 0-115mm --
+// resized from an initial 80mm placeholder once real data showed the actual
+// specimen is longer; see strain-defect/CLAUDE.md). 5-layer cross-section
+// (down from the 6-7 layers in 3D/3D-slit):
 // a single merged Cu conductor wraps the full perimeter (bottom 1um + top
 // 21um [1um electroplate + 20um stabilizer, merged into one region since
 // they're electrically/thermally identical copper] + both side edges 1um),
@@ -26,7 +29,7 @@
 
 load "msh3"
 
-real Lx    = 0.080;
+real Lx    = 0.115;
 real tCuBot = 1e-6, tHast = 20e-6, tBuf = 0.2e-6, tSc = 1e-6, tAgT = 2e-6,
      tCuTop = 21e-6;   // 21um = merged 20um stabilizer + 1um electroplate
 real yB0=0, yB1=yB0+tCuBot, yB2=yB1+tHast, yB3=yB2+tBuf, yB4=yB3+tSc,
@@ -37,7 +40,9 @@ real tSideCu = 1e-6;   // side-edge electroplate thickness (matches top/bottom)
 real zB0 = 0, zB1 = tSideCu, zB2 = width - tSideCu, zB3 = width;
 real coreWidth = zB2 - zB1;
 
-int nx = 60;    // dx ~ 1.3mm over the 80mm length
+int nx = 86;    // dx ~ 1.3mm over the (now 115mm) length -- bumped
+                // proportionally from the original 60/80mm so physical
+                // resolution doesn't silently coarsen when Lx grew
 int nHast=4, nBuf=1, nSc=2, nAgT=2, nCuBot=2, nCuTop=6;
 int ny = nCuBot+nHast+nBuf+nSc+nAgT+nCuTop;
 
