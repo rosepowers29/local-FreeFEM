@@ -249,6 +249,15 @@ does NOT drive an early-exit decision; no real run data exists yet to
 calibrate a threshold against (same "first-pass, not yet calibrated"
 caveat this repo already applies elsewhere to unvalidated thresholds).
 
+**For a real run, use Condor** (`condor/README.md`) rather than running
+`run_transient.py` directly on whatever machine has FreeFEM — one job per
+ratio, modeled on `3D-slit/electrothermal/condor/` but simpler (no
+`shared/` dependency, so the payload is a single flat directory). The
+Condor job executable itself was validated locally (container build + the
+actual `condor_run_ratio.sh` run end-to-end against the real strain data,
+see `condor/README.md`'s verification section) — only the real
+`condor_submit`/pool-specific resource numbers remain unverified.
+
 ## Diagnostics
 
 Only 2 voltage-tap pairs (4 taps total), all on the tape centerline

@@ -1,0 +1,68 @@
+# Condor submit file: one job per current ratio, ratio-level parallelism
+# (embarrassingly parallel -- each ratio is fully independent, isolated
+# into its own runs/<label>/ by run_transient.py already). Modeled on
+# 3D-slit/electrothermal/condor/sweep.sub -- read that track's
+# condor/README.md too, most of its caveats (container syntax unverified
+# against this pool, resource requests are first-pass guesses, no
+# resume-on-preemption) apply here unchanged. See README.md in this
+# directory for what's different and what's been locally verified.
+
+universe        = container
+# Unified container syntax (HTCondor 9.0+) -- UNVERIFIED against this
+# pool's actual HTCondor version, same caveat as electrothermal's sweep.
+#
+# Reuses electrothermal's ALREADY-PUBLISHED image rather than building a
+# new one: the Dockerfile is byte-identical (FreeFEM + python3, nothing
+# track-specific baked in -- all strain-defect code/data travels via
+# payload.tar.gz, same as electrothermal). Zero reason to duplicate a
+# publish step for an identical image. If you'd rather have a dedicated
+# image name for this track, build+push Dockerfile in this directory
+# (see README.md) and update this line to the new digest.
+container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal@sha256:8b39db74c15d90180fb623cda03211d434ce619cd3786c3abbd37de930aed37c
+
+requirements = (Arch == "X86_64")
+
+executable      = condor_run_ratio.sh
+# --ramp-rate/--ramp-dt: reuses 3D-slit/electrothermal's validated-safe
+# pairing (see that track's CLAUDE.md -- never raise --ramp-rate without
+# also raising --ramp-dt, or every job pays the ramp-phase step-count
+# penalty this combination exists to avoid). The underlying mechanism
+# (rampDtAboveIc's adaptive Jc-based step growth) is the SAME code this
+# track's step_strain_tape_transient.edp carried over unchanged from the
+# slit model, so the pairing's validity transfers even though this is a
+# different tape/scenario.
+arguments       = $(ratio) $(label) --ramp-rate 20 --ramp-dt 999 --runaway-tmax $(runaway_tmax)
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files    = payload.tar.gz
+transfer_output_files   = work/runs/$(label)
+
+# First-pass guesses, NOT measured against a real job on this pool. This
+# track's mesh (nv=32886 at the real 115mm length, per mesh_report_strain_
+# tape.edp) is SMALLER than electrothermal's slit mesh (nv=87870) that
+# these numbers were originally guessed for, so if anything they're
+# generous here -- still worth checking actual usage after one real job
+# (condor_q -long, or the job's .log) before trusting a full sweep.
+request_cpus   = 1
+request_memory = 4096M
+request_disk   = 2048M
+
+output = logs/$(label).out
+error  = logs/$(label).err
+log    = logs/$(label).log
+stream_output = True
+stream_error  = True
+
+# Auto-retry on a RETRY_WORTHY exit code (run_transient.py exits 1 for
+# crashed/init_failed/numerical_divergence/no_data) -- same policy and
+# same rationale as electrothermal's sweep.sub (a bad UMFPACK pivot on one
+# execute node's hardware is plausibly not reproducible on another). Not
+# yet tested against a real RETRY_WORTHY failure on this track specifically
+# -- carried over as a reasonable default, not because this track has its
+# own node-heterogeneity evidence yet.
+on_exit_hold        = (ExitCode != 0)
+on_exit_hold_reason  = "run_transient.py reported a RETRY_WORTHY status -- auto-releasing to retry, likely on a different execute node"
+periodic_release     = (NumJobStarts < 4) && ((CurrentTime - EnteredCurrentStatus) > 300)
+
+queue ratio,label,runaway_tmax from ratios.txt

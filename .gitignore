@@ -17,3 +17,9 @@
 3D-slit/Bfield/condor/work/
 3D-slit/Bfield/condor/shared/
 3D-slit/Bfield/condor/logs/
+strain-defect/runs/
+strain-defect/condor/payload.tar.gz
+strain-defect/condor/_payload_build/
+strain-defect/condor/ratios.txt
+strain-defect/condor/work/
+strain-defect/condor/logs/
