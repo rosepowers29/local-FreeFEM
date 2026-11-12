@@ -91,6 +91,17 @@ DEFAULT_MAX_JC_FRAC_CHANGE = 0.05
 # 0.0 disables the heater pulse entirely for a pure-ramp sweep -- see
 # step_3d_slit_transient_diag.edp's heaterPower comment / CLAUDE.md.
 DEFAULT_HEATER_POWER = 13.0
+# K. Bath / cold-end temperature, forwarded as -tzero to BOTH the init and
+# step scripts (they must agree; the step script asserts it at t=0). Ic --
+# and therefore what --ratio means -- is evaluated at this temperature.
+# Ported from Bfield/run_bfield_transient.py for the I* surrogate sweep.
+DEFAULT_T0 = 77.0
+# None = no limit (prior behavior). Ported from Bfield/run_bfield_transient.py:
+# a run past this wall-clock budget stops cleanly with the non-retry-worthy
+# status "wall_budget_exceeded" (exit 0) instead of being killed by the
+# pool's own ~20h cap and then blindly retried by sweep.sub's hold/release
+# policy -- see Bfield/CLAUDE.md's 2026-10-07 incident.
+DEFAULT_MAX_WALL_SECONDS = None
 
 
 def ts():
@@ -176,7 +187,7 @@ def classify_trend(trend_buffer, trend_eps):
 
 
 def finalize(status_path, log_fh, label, ratio, status, row, n_steps, start_time,
-             trend=None):
+             trend=None, meta=None):
     elapsed = time.monotonic() - start_time
     summary = {
         "label": label,
@@ -189,6 +200,10 @@ def finalize(status_path, log_fh, label, ratio, status, row, n_steps, start_time
         "final_fracLeft": float(row["fracLeft"]) if row else None,
         "trend": trend,
     }
+    # Run inputs (t0, ramp_rate, heater_power, ...) so every status.json is
+    # a self-describing training row for the I* surrogate dataset.
+    if meta:
+        summary["inputs"] = meta
     log_fh.write(f"{ts()} FINISHED status={status} n_steps={n_steps} elapsed={elapsed:.1f}s\n")
     status_path.write_text(json.dumps(summary, indent=2))
     print(f"[run_transient] label={label} ratio={ratio} -> {status} "
@@ -229,7 +244,15 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             max_step_rise=DEFAULT_MAX_STEP_RISE,
             max_bisections=DEFAULT_MAX_BISECTIONS,
             max_jc_frac_change=DEFAULT_MAX_JC_FRAC_CHANGE,
-            heater_power=DEFAULT_HEATER_POWER):
+            heater_power=DEFAULT_HEATER_POWER,
+            t0=DEFAULT_T0, max_wall_seconds=DEFAULT_MAX_WALL_SECONDS):
+    meta = {"t0": t0, "ratio": ratio, "ramp_rate": ramp_rate,
+            "heater_power": heater_power, "runaway_tmax": runaway_tmax,
+            "settle_tmax_max": settle_tmax_max}
+
+    def fin(*a, **k):
+        return finalize(*a, meta=meta, **k)
+
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -262,12 +285,21 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                       f"ratio={ratio} label={label}\n")
 
         if not resume:
-            rc = run_freefem(INIT_SCRIPT, ["-outprefix", out_prefix], log_fh, freefem_bin)
+            rc = run_freefem(INIT_SCRIPT, ["-outprefix", out_prefix, "-tzero", str(t0)],
+                             log_fh, freefem_bin)
             if rc != 0:
-                return finalize(status_path, log_fh, label, ratio, "init_failed",
+                return fin(status_path, log_fh, label, ratio, "init_failed",
                                  None, 0, start_time)
 
         while True:
+            # Checked BEFORE starting another invocation (one invocation can
+            # itself take steps_per_invocation x ~116s) -- same placement and
+            # reasoning as Bfield/run_bfield_transient.py.
+            if max_wall_seconds is not None and (time.monotonic() - start_time) > max_wall_seconds:
+                row = read_last_row(csv_path)
+                return fin(status_path, log_fh, label, ratio, "wall_budget_exceeded",
+                           row, n_steps, start_time)
+
             rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix,
                                             "-steps-per-invocation", str(steps_per_invocation),
                                             "-ramprate", str(ramp_rate), "-rampdt", str(ramp_dt),
@@ -276,7 +308,8 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                                             "-maxsteprise", str(max_step_rise),
                                             "-maxbisections", str(max_bisections),
                                             "-maxjcfracchange", str(max_jc_frac_change),
-                                            "-heaterpower", str(heater_power)],
+                                            "-heaterpower", str(heater_power),
+                                            "-tzero", str(t0)],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
             # once steps_per_invocation > 1 -- each invocation now advances up
@@ -285,12 +318,12 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             # timestep regardless; only this counter's meaning changes.
             n_steps += 1
             if rc != 0:
-                return finalize(status_path, log_fh, label, ratio, "crashed",
+                return fin(status_path, log_fh, label, ratio, "crashed",
                                  None, n_steps, start_time)
 
             row = read_last_row(csv_path)
             if row is None:
-                return finalize(status_path, log_fh, label, ratio, "no_data",
+                return fin(status_path, log_fh, label, ratio, "no_data",
                                  None, n_steps, start_time)
 
             t = float(row["t"])
@@ -305,7 +338,7 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             # else), so a diverged-to-NaN run would otherwise never trip the
             # runaway check and would just spin to max_steps writing garbage.
             if any(math.isnan(v) or math.isinf(v) for v in (tmax, frac_left)):
-                return finalize(status_path, log_fh, label, ratio,
+                return fin(status_path, log_fh, label, ratio,
                                  "numerical_divergence", row, n_steps, start_time)
 
             if tmax > runaway_tmax:
@@ -320,7 +353,7 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                 # this status's pre-existing (undifferentiated) behavior.
                 pre_pulse = float(row.get("prePulse", 0.0)) >= 0.5
                 status = "runaway_before_pulse" if pre_pulse else "runaway"
-                return finalize(status_path, log_fh, label, ratio, status,
+                return fin(status_path, log_fh, label, ratio, status,
                                  row, n_steps, start_time)
 
             deviation = abs(frac_left - 0.5)
@@ -335,7 +368,7 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                 if recover_since is None:
                     recover_since = t
                 elif t - recover_since >= recover_hold_time:
-                    return finalize(status_path, log_fh, label, ratio, "settled",
+                    return fin(status_path, log_fh, label, ratio, "settled",
                                      row, n_steps, start_time)
             else:
                 recover_since = None
@@ -359,17 +392,17 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             # "converging") never hits this; it keeps running.
             if (has_deviated and deviation >= recover_eps and trend == "plateaued"
                     and t - trend_buffer[0][0] >= trend_window):
-                return finalize(status_path, log_fh, label, ratio,
+                return fin(status_path, log_fh, label, ratio,
                                  "plateaued_off_parity", row, n_steps, start_time, trend)
 
             if prev_t is not None and t <= prev_t + 1e-12:
                 status = "reached_end_deviated" if has_deviated else "reached_end_no_deviation"
-                return finalize(status_path, log_fh, label, ratio, status,
+                return fin(status_path, log_fh, label, ratio, status,
                                  row, n_steps, start_time, trend)
             prev_t = t
 
             if n_steps >= max_steps:
-                return finalize(status_path, log_fh, label, ratio,
+                return fin(status_path, log_fh, label, ratio,
                                  "max_steps_exceeded", row, n_steps, start_time, trend)
 
 
@@ -468,6 +501,17 @@ def main():
                    help=f"Heater pulse power in W (default: {DEFAULT_HEATER_POWER}). 0 "
                         f"disables the heater pulse entirely -- a pure-ramp run with no "
                         f"localized perturbation at all. See CLAUDE.md.")
+    p.add_argument("--t0", type=float, default=DEFAULT_T0,
+                   help=f"Bath/cold-end temperature in K, forwarded as -tzero to both "
+                        f"the init and step scripts; --ratio is relative to Ic(t0) "
+                        f"(default: {DEFAULT_T0}). With --resume, pass the SAME value "
+                        f"the run started with -- the .edp's mismatch check only "
+                        f"fires at t=0.")
+    p.add_argument("--max-wall-seconds", type=float, default=DEFAULT_MAX_WALL_SECONDS,
+                   help="Stop cleanly (status 'wall_budget_exceeded', exit 0, NOT "
+                        "retry-worthy) once this many seconds of wall-clock have "
+                        "elapsed, rather than starting another invocation. Set this "
+                        "below your Condor pool's own walltime cap. Default: no limit.")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
@@ -477,7 +521,7 @@ def main():
             args.steps_per_invocation, args.ramp_rate, args.ramp_dt,
             args.ramp_dt_above_ic, args.settle_tmax_max,
             args.max_step_rise, args.max_bisections, args.max_jc_frac_change,
-            args.heater_power)
+            args.heater_power, args.t0, args.max_wall_seconds)
     # Exit code drives Condor's on_exit_hold/periodic_release retry policy
     # (see condor/sweep.sub) -- without this, the process always exited 0
     # regardless of status, so no exit-code-based retry could ever have

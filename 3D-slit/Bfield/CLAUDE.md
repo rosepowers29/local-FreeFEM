@@ -942,3 +942,41 @@ time: when checking whether a fix landed, always cross-reference by
 `QDate`/submission time before trusting a raw site tally — a
 population that mixes pre-fix stragglers with genuinely new jobs will
 misattribute the stragglers' failures to the fix not working.
+
+## I* surrogate sweep — `-tzero` + adaptive ratio bracketing (2026-11-12)
+
+Goal: a dataset for surrogate models predicting I* (stable/runaway
+transport-current boundary) as a function of bath temperature T0 and
+ramp rate. Heater OFF, `-aniso 1 -selfconsistent 1` (user's choice —
+heater power/pulse duration deliberately NOT varied).
+
+- **`-tzero`** (K, default `77.0`, unchanged behavior unflagged) added to
+  BOTH `init_3d_slit_transient_checkpoint.edp` (initial uniform T) and the
+  step script (`Tcold` BC, `jcRef`, AND `IcRebcoActual = JcT(Tcold)*...` —
+  so `-ratio` is relative to **Ic(T0)**, not Ic(77K)). The step script
+  `assert`s at `t=0` that the checkpoint's T equals its own `Tcold`
+  (greppable `TZERO-MISMATCH` line first) — guards init/step mismatch.
+  `run_bfield_transient.py --t0` forwards it to both; `status.json` now
+  has an `inputs` dict (t0, ratio, ramp_rate, heater_power, ...).
+- **Not yet parse-verified against real FreeFEM** (no Docker in the
+  session that added it) — run one init + one step invocation with
+  `-tzero 70` before submitting.
+- Driver: `../shared/istar_sweep.py` (track-agnostic, shared with
+  `electrothermal/`; `conditions` → `round1` →
+  `refine` ×N → `istar`/`points`), submit file `condor/sweep_istar.sub`
+  (reads `istar_queue.txt`). Labels `is-cNNN-r<ratio>`. Design: 32
+  scrambled-Sobol (T0 65–85 K, log ramp 10–300 A/s) + the (77 K, 20 A/s)
+  anchor, which should reproduce the ramp20 no-heater I*≈1.13–1.14.
+  Closed-loop tested against synthetic outcomes (incl. 50% wall-budget
+  unknowns near threshold): ~37 runs/condition, 4 rounds, |I* err|<0.002.
+- Outcome rule: `runaway` status, or final_Tmax ≥ Tc(90) under a
+  "stable" status (symmetric no-heater quench blind spot) → runaway;
+  stable status with final_Tmax < Tc → stable; anything else (incl.
+  `wall_budget_exceeded`) → unknown, never moves a bracket edge.
+- **Open risks**: (1) low-T0/slow-ramp conditions have up to ~2.7x the
+  anchor's above-Ic dwell — may exceed the 18h budget (the anchor's
+  near-threshold runs already took ~10h); `round1` prints which cids.
+  (2) T0 near 85 K leaves only ~5 K to Tc — the Tc-based stable/runaway
+  rule and `settle_tmax_max=90` get tight there. (3) I* is defined over
+  the script's fixed post-ramp hold (`tEnd = tPulseEnd + 1.5s`) — a slow
+  runaway that would develop after 1.5 s counts as stable.

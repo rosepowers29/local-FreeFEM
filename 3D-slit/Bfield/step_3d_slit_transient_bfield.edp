@@ -33,8 +33,15 @@ string outPrefix  = getARGV("-outprefix", "");
 cout << "[profile] meshBuild=" << (tMeshDone-tMeshStart) << "s materialsLoad="
      << (tMaterialsDone-tMeshDone) << "s" << endl;
 
-real Tcold = 77.0;
-real IcRebcoActual = JcT(77.0)*tSc*coreWidth;
+// -tzero (K, default 77.0 = prior hardcoded value): bath/cold-end
+// temperature. Sets the x-end-face Dirichlet BC, the jcRef normalization,
+// AND Ic -- so -ratio is always relative to Ic(T0), not Ic(77K). Must
+// match the -tzero init_3d_slit_transient_checkpoint.edp was run with
+// (asserted at t=0 below, after the checkpoint is read).
+real tZero = getARGV("-tzero", 77.0);
+real Tcold = tZero;
+real IcRebcoActual = JcT(Tcold)*tSc*coreWidth;
+cout << "[tzero] Tcold=" << Tcold << " IcRebcoActual=" << IcRebcoActual << endl;
 real I0Target = currentRatio * IcRebcoActual;
 
 real shellAreaFull = width*yB7 - coreWidth*(yB6-yB1);
@@ -257,6 +264,15 @@ real t = 0.0;
   for (int i=0;i<=nxs;i++) fchk >> ElArr[i];
   for (int i=0;i<=nxs;i++) fchk >> ErArr[i];
   cout << "Resumed at t="<<t<<"s Tmax="<<T[].max << endl;
+}
+// Init/step -tzero mismatch guard: a fresh checkpoint is uniform at the
+// init script's tZero, so at t=0 it must equal this script's Tcold. Without
+// this, a mismatch would run silently with the wrong initial state.
+if (t <= 1e-12) {
+  if (abs(T[].max-Tcold) > 1e-6 || abs(T[].min-Tcold) > 1e-6)
+    cout << "TZERO-MISMATCH checkpoint T=[" << T[].min << "," << T[].max
+         << "] vs -tzero " << Tcold << endl;
+  assert(abs(T[].max-Tcold) <= 1e-6 && abs(T[].min-Tcold) <= 1e-6);
 }
 
 {

@@ -5,8 +5,15 @@ include "getARGV.idp"
 // editing this file: default "" reproduces today's exact behavior.
 string outPrefix = getARGV("-outprefix", "");
 
+// -tzero (K, default 77.0 = prior hardcoded value): initial uniform
+// temperature AND (in step_3d_slit_transient_diag.edp) the x-end-face bath
+// temperature Tcold that Ic is evaluated at. MUST be passed identically to
+// this script and the step script -- the step script asserts on it at t=0.
+// Added for the I* (T0, ramp-rate) surrogate sweep.
+real tZero = getARGV("-tzero", 77.0);
+
 fespace Vh3(Th3, P1);
-Vh3 T = 77.0;
+Vh3 T = tZero;
 // nxs must match the value used in the step scripts (60) -- this writes
 // zero-initialized E-field arrays alongside t and T, matching the
 // checkpoint format step_3d_slit_transient_bfield.edp now expects (see

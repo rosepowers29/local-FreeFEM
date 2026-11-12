@@ -810,3 +810,28 @@ kick-start instability. Results:
 
 **Full batch**: `condor/sweep_noheater.sub` (promoted from the smoketest
 file, same `ratios.txt`, unchanged `tEnd`) -- ready to submit.
+
+## I* surrogate sweep — `-tzero` + adaptive ratio bracketing (2026-11-12)
+
+Electrothermal (no-self-field) half of the I* sweep documented in
+`Bfield/CLAUDE.md` ("I* surrogate sweep") — same design, same driver,
+run with the SAME `conditions.csv` so every (T0, ramp) condition gets a
+paired I* with and without B-field feedback.
+
+- **`-tzero`** (K, default `77.0`, unchanged behavior unflagged) added to
+  `init_3d_slit_transient_checkpoint.edp` and `step_3d_slit_transient_diag.edp`
+  only (the canonical pair). Sets the initial T, `Tcold` (BC + `jcRef`),
+  and `IcRebcoActual = JcT(Tcold)*...`, so `-ratio` is relative to
+  Ic(T0). Step script asserts at `t=0` that the checkpoint matches its
+  `Tcold` (`TZERO-MISMATCH` line first). **Not touched**: the legacy
+  `steady_verify`/`heater_onesided`/`symtest` scripts — still hardcoded 77 K.
+- `run_transient.py` gained `--t0` (forwarded to both scripts), an
+  `inputs` dict in `status.json`, and **`--max-wall-seconds`**, ported from
+  `Bfield/run_bfield_transient.py` (status `wall_budget_exceeded`, exit 0,
+  not retry-worthy). Verified with a fake FreeFem++ stub (args forwarded,
+  budget stop exits 0); **not yet parse-verified against real FreeFEM**.
+  With `--resume`, pass the same `--t0` — the `.edp` guard only fires at t=0.
+- Driver: `../shared/istar_sweep.py`; submit file `condor/sweep_istar.sub`
+  (heater 0, ramp_dt 999, flat runaway_tmax 250, 18h wall budget, Bfield's
+  OSPool site exclusions, outputs under `runs_istar/`). The driver counts
+  `runaway_before_pulse` as runaway.

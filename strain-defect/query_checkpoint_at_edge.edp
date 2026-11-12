@@ -1,0 +1,36 @@
+include "hts_mesh_module_tape.idp"
+include "strain_jc_meta.idp"
+include "hts_materials.idp"
+
+fespace Vh3(Th3, P1);
+Vh3 T;
+{
+  ifstream fchk("r2/ckpt_strain_tape.txt");
+  real t;
+  fchk >> t;
+  for (int i=0;i<T.n;i++) fchk >> T[][i];
+  cout << "checkpoint t=" << t << endl;
+}
+
+real yScMid = 0.5*(yB3+yB4);
+real zCenter = width/2;
+real zTrueWorst = 0.0015;
+
+cout << "jcRatioOfXZ(defectX, zCenter)    = " << jcRatioOfXZ(defectX, zCenter) << endl;
+cout << "jcRatioOfXZ(defectX, zTrueWorst) = " << jcRatioOfXZ(defectX, zTrueWorst) << endl;
+cout << "Global Tmax (whole mesh): " << T[].max << endl;
+cout << "T at (defectX, REBCO-mid, centerline z=0.003):    " << T(defectX, yScMid, zCenter) << endl;
+cout << "T at (defectX, REBCO-mid, TRUE worst z=0.0015):   " << T(defectX, yScMid, zTrueWorst) << endl;
+
+real bestT = -1e30, bestX = 0, bestZ = 0;
+int nxp = 116, nzp = 60;
+for (int i=0; i<=nxp; i++){
+  real xx = Lx*i/nxp;
+  for (int j=0; j<=nzp; j++){
+    real zz = 1e-6 + (width-2e-6)*j/nzp;
+    real Tq = T(xx, yScMid, zz);
+    if (Tq > bestT){ bestT = Tq; bestX = xx; bestZ = zz; }
+  }
+}
+cout << "Hottest REBCO-layer point found by scan: T=" << bestT << " at x=" << bestX << " z=" << bestZ << endl;
+cout << "jcRatioOfXZ at that scanned hottest point: " << jcRatioOfXZ(bestX, bestZ) << endl;

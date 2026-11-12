@@ -1,0 +1,11 @@
+{
+  "label": "r2",
+  "ratio": 2.0,
+  "status": "reached_end",
+  "n_steps": 17,
+  "wall_clock_seconds": 9820.6,
+  "final_t": 18.5948,
+  "final_Tmax": 77.0203,
+  "final_TmaxAtDefect": 77.0,
+  "trend": "plateaued"
+}

@@ -1,0 +1,57 @@
+# Condor submit file for the I* surrogate-training sweep (see
+# ../../shared/istar_sweep.py's docstring for the full round-by-round workflow).
+# Derived from sweep.sub -- same container, site exclusions, retry policy,
+# wall budget, and resource requests; read sweep.sub's comments for the
+# history behind each of those, they apply unchanged here.
+#
+# Differences from sweep.sub:
+#   - t0 and ramp_rate are PER-JOB queue columns (the surrogate's inputs),
+#     not file-level constants.
+#   - Physics fixed for the whole sweep: heater OFF, -aniso 1,
+#     -selfconsistent 1, runaway_tmax 250 (flat -- the 900/250 split in
+#     sweep.sub existed to avoid misclassifying a recovering HEATER
+#     transient at low ratio; with the heater off there is none).
+#   - pulse_dt 0.0005 kept identical to the ramp20 no-heater sweep, so the
+#     (77 K, 20 A/s) anchor condition is directly comparable to it.
+#
+# Each round: write the round's rows into istar_queue.txt, then submit:
+#   python3 ../../shared/istar_sweep.py round1 conditions.csv > istar_queue.txt
+#   ./make_payload.sh && condor_submit sweep_istar.sub
+
+universe        = container
+container_image = docker://ghcr.io/rosepowers29/local-freefem-electrothermal@sha256:8b39db74c15d90180fb623cda03211d434ce619cd3786c3abbd37de930aed37c
+requirements = (Arch == "X86_64") && (GLIDEIN_ResourceName =!= "MTState-Tempest-CE1") && (GLIDEIN_ResourceName =!= "IU-Jetstream2-Backfill")
+
+executable      = condor_run_ratio.sh
+
+heaterpower      = 0.0
+aniso            = 1
+selfconsistent   = 1
+runaway_tmax     = 250
+ramp_dt          = 999.0
+pulse_dt         = 0.0005
+max_picard_iter  = 40
+max_wall_seconds = 64800
+
+arguments       = $(ratio) $(label) --t0 $(t0) --ramp-rate $(ramp_rate) --runaway-tmax $(runaway_tmax) --aniso $(aniso) --selfconsistent $(selfconsistent) --heater-power $(heaterpower) --ramp-dt $(ramp_dt) --pulse-dt $(pulse_dt) --max-picard-iter $(max_picard_iter) --max-wall-seconds $(max_wall_seconds)
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files    = payload.tar.gz
+transfer_output_files   = work/runs/$(label)
+
+request_cpus   = 1
+request_memory = 4096M
+request_disk   = 2048M
+
+output = logs/$(label).out
+error  = logs/$(label).err
+log    = logs/$(label).log
+stream_output = True
+stream_error  = True
+
+on_exit_hold        = (ExitCode != 0)
+on_exit_hold_reason  = "run_bfield_transient.py reported a RETRY_WORTHY status (see CLAUDE.md) -- auto-releasing to retry, likely on a different execute node"
+periodic_release     = (NumJobStarts < 4) && ((CurrentTime - EnteredCurrentStatus) > 300)
+
+queue ratio,label,t0,ramp_rate from istar_queue.txt

@@ -142,6 +142,10 @@ DEFAULT_PICARD_OMEGA = 0.5
 # quench from heater-triggered quench) -- see step_3d_slit_transient_bfield.edp's
 # -heaterpower flag comment. Default matches that script's original hardcoded value.
 DEFAULT_HEATER_POWER = 13.0
+# K. Bath / cold-end temperature, forwarded as -tzero to BOTH the init and
+# step scripts (they must agree; the step script asserts it at t=0). Ic --
+# and therefore what --ratio means -- is evaluated at this temperature.
+DEFAULT_T0 = 77.0
 
 
 def ts():
@@ -238,7 +242,7 @@ def classify_trend(trend_buffer, trend_eps):
 
 
 def finalize(status_path, log_fh, label, ratio, status, row, n_steps, start_time,
-             trend=None):
+             trend=None, meta=None):
     elapsed = time.monotonic() - start_time
     summary = {
         "label": label,
@@ -251,6 +255,10 @@ def finalize(status_path, log_fh, label, ratio, status, row, n_steps, start_time
         "final_fracLeft": float(row["fracLeft"]) if row else None,
         "trend": trend,
     }
+    # Run inputs (t0, ramp_rate, heater_power, ...) so every status.json is
+    # a self-describing training row for the I* surrogate dataset.
+    if meta:
+        summary["inputs"] = meta
     log_fh.write(f"{ts()} FINISHED status={status} n_steps={n_steps} elapsed={elapsed:.1f}s\n")
     status_path.write_text(json.dumps(summary, indent=2))
     print(f"[run_bfield_transient] label={label} ratio={ratio} -> {status} "
@@ -277,7 +285,16 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             picard_tol=DEFAULT_PICARD_TOL,
             picard_omega=DEFAULT_PICARD_OMEGA,
             heater_power=DEFAULT_HEATER_POWER,
-            max_wall_seconds=DEFAULT_MAX_WALL_SECONDS):
+            max_wall_seconds=DEFAULT_MAX_WALL_SECONDS,
+            t0=DEFAULT_T0):
+    meta = {"t0": t0, "ratio": ratio, "ramp_rate": ramp_rate,
+            "heater_power": heater_power, "aniso": int(aniso),
+            "selfconsistent": int(selfconsistent), "pulse_dt": pulse_dt,
+            "runaway_tmax": runaway_tmax, "settle_tmax_max": settle_tmax_max}
+
+    def fin(*a, **k):
+        return finalize(*a, meta=meta, **k)
+
     run_dir = SCRIPT_DIR / base_dir / label
     # Forward slashes: this is a string handed to FreeFEM's ofstream/ifstream,
     # not a Python path, and this repo's target machine is Linux/remote.
@@ -295,9 +312,10 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
     with log_path.open("w") as log_fh:
         log_fh.write(f"{ts()} starting ratio={ratio} label={label}\n")
 
-        rc = run_freefem(INIT_SCRIPT, ["-outprefix", out_prefix], log_fh, freefem_bin)
+        rc = run_freefem(INIT_SCRIPT, ["-outprefix", out_prefix, "-tzero", str(t0)],
+                         log_fh, freefem_bin)
         if rc != 0:
-            return finalize(status_path, log_fh, label, ratio, "init_failed",
+            return fin(status_path, log_fh, label, ratio, "init_failed",
                              None, 0, start_time)
 
         while True:
@@ -308,7 +326,7 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             # the invocation that pushes past the budget.
             if max_wall_seconds is not None and (time.monotonic() - start_time) > max_wall_seconds:
                 row = read_last_row(csv_path)
-                return finalize(status_path, log_fh, label, ratio, "wall_budget_exceeded",
+                return fin(status_path, log_fh, label, ratio, "wall_budget_exceeded",
                                  row, n_steps, start_time)
 
             rc = run_freefem(STEP_SCRIPT, ["-ratio", str(ratio), "-outprefix", out_prefix,
@@ -325,18 +343,19 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                                             "-maxpicarditer", str(max_picard_iter),
                                             "-picardtol", str(picard_tol),
                                             "-picardomega", str(picard_omega),
-                                            "-heaterpower", str(heater_power)],
+                                            "-heaterpower", str(heater_power),
+                                            "-tzero", str(t0)],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
             # once steps_per_invocation > 1 -- see CLAUDE.md.
             n_steps += 1
             if rc != 0:
-                return finalize(status_path, log_fh, label, ratio, "crashed",
+                return fin(status_path, log_fh, label, ratio, "crashed",
                                  None, n_steps, start_time)
 
             row = read_last_row(csv_path)
             if row is None:
-                return finalize(status_path, log_fh, label, ratio, "no_data",
+                return fin(status_path, log_fh, label, ratio, "no_data",
                                  None, n_steps, start_time)
 
             t = float(row["t"])
@@ -351,14 +370,14 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             # diverged-to-NaN run would otherwise never trip the runaway
             # check and would just spin to max_steps writing garbage.
             if any(math.isnan(v) or math.isinf(v) for v in (tmax, frac_left)):
-                return finalize(status_path, log_fh, label, ratio,
+                return fin(status_path, log_fh, label, ratio,
                                  "numerical_divergence", row, n_steps, start_time)
 
             if tmax > runaway_tmax:
                 # No prePulse column here (see module docstring) -- unlike
                 # electrothermal, this workflow doesn't distinguish a pure
                 # overcurrent/ramp-driven runaway from a heater-triggered one.
-                return finalize(status_path, log_fh, label, ratio, "runaway",
+                return fin(status_path, log_fh, label, ratio, "runaway",
                                  row, n_steps, start_time)
 
             deviation = abs(frac_left - 0.5)
@@ -372,7 +391,7 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                 if recover_since is None:
                     recover_since = t
                 elif t - recover_since >= recover_hold_time:
-                    return finalize(status_path, log_fh, label, ratio, "settled",
+                    return fin(status_path, log_fh, label, ratio, "settled",
                                      row, n_steps, start_time)
             else:
                 recover_since = None
@@ -384,17 +403,17 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
 
             if (has_deviated and deviation >= recover_eps and trend == "plateaued"
                     and t - trend_buffer[0][0] >= trend_window):
-                return finalize(status_path, log_fh, label, ratio,
+                return fin(status_path, log_fh, label, ratio,
                                  "plateaued_off_parity", row, n_steps, start_time, trend)
 
             if prev_t is not None and t <= prev_t + 1e-12:
                 status = "reached_end_deviated" if has_deviated else "reached_end_no_deviation"
-                return finalize(status_path, log_fh, label, ratio, status,
+                return fin(status_path, log_fh, label, ratio, status,
                                  row, n_steps, start_time, trend)
             prev_t = t
 
             if n_steps >= max_steps:
-                return finalize(status_path, log_fh, label, ratio,
+                return fin(status_path, log_fh, label, ratio,
                                  "max_steps_exceeded", row, n_steps, start_time, trend)
 
 
@@ -511,6 +530,10 @@ def main():
                         "elapsed, rather than starting another invocation. Set this "
                         "below your Condor pool's own walltime cap. Default: no "
                         "limit (unchanged prior behavior).")
+    p.add_argument("--t0", type=float, default=DEFAULT_T0,
+                   help=f"Bath/cold-end temperature in K, forwarded as -tzero to both "
+                        f"the init and step scripts; --ratio is relative to Ic(t0) "
+                        f"(default: {DEFAULT_T0}).")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
@@ -522,7 +545,7 @@ def main():
             args.max_step_rise, args.max_bisections, args.max_jc_frac_change,
             args.aniso, args.selfconsistent, args.max_picard_iter,
             args.picard_tol, args.picard_omega, args.heater_power,
-            args.max_wall_seconds)
+            args.max_wall_seconds, args.t0)
     if summary["status"] in RETRY_WORTHY_STATUSES:
         sys.exit(1)
 
