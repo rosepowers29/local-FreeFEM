@@ -11,7 +11,11 @@ Panels (one PNG):
   (b) I*/Ic(T0) vs ramp rate (log x), colored by T0
   (c) I* in amps vs T0, with Ic(T0) for reference (colored by ramp)
   (d) design space (T0, ramp) colored by I*/Ic -- coverage + surface shape
-With --points, a second PNG (<out>_points.png) shows every run's
+Also <out>_margin.png: absolute margin I*-Ic(T0) in A (right axis: the
+equivalent temperature margin, (I*-Ic)/(dIc/dT)) vs T0 and vs ramp, the
+normalized margin (I*-Ic)/I*, and the design space colored by margin --
+the absolute margin shrinks toward Tc even where I*/Ic grows.
+With --points, a further PNG (<out>_points.png) shows every run's
 stable/runaway/unknown label in (T0, ratio) space, with the I* estimates
 overlaid -- what a classifier-style surrogate would be trained on.
 
@@ -197,6 +201,98 @@ def points_plot(rows, pts, out, title):
     print(f"wrote {out}")
 
 
+def margin_plot(rows, out, title):
+    """Margin of I* above Ic(T0). Absolute margin I*-Ic (A) shrinks toward Tc
+    even where I*/Ic grows, since it's (I*/Ic - 1)*Ic(T0) and Ic -> 0 at Tc.
+    With JcT linear, it's also a temperature margin: dIc/dT = IC77/(Tc-77)
+    A/K, so (I*-Ic)/(dIc/dT) = how far T0 would have to DROP for Ic to reach
+    I* (shown as the right-hand axis -- same quantity, unit conversion only).
+    Normalized margin (I*-Ic)/I* = 1 - Ic/I* is monotone in I*/Ic, shown for
+    completeness; it carries the same trend as the ratio."""
+    t0, ramp = fnum(rows, "t0"), fnum(rows, "ramp_rate")
+    ist, lo, hi = fnum(rows, "istar_ratio"), fnum(rows, "ratio_lo"), fnum(rows, "ratio_hi")
+    ok = np.isfinite(ist)
+    ic = ic_at(t0)
+    mA = (ist - 1.0) * ic
+    mA_err = np.vstack([(ist - lo) * ic, (hi - ist) * ic])
+    mN = 1.0 - 1.0 / ist
+    dicdt = IC77 / (TC - 77.0)
+    cids = np.array([int(r["cid"]) for r in rows])
+    anc = ok & (cids == 0)
+
+    print(f"absolute margin I*-Ic: {np.nanmin(mA):.1f} .. {np.nanmax(mA):.1f} A "
+          f"(= {np.nanmin(mA) / dicdt:.2f} .. {np.nanmax(mA) / dicdt:.2f} K at "
+          f"{dicdt:.2f} A/K); normalized (I*-Ic)/I*: {np.nanmin(mN):.4f} .. {np.nanmax(mN):.4f}")
+    if anc.any():
+        i = np.flatnonzero(anc)[0]
+        print(f"anchor margin: {mA[i]:.1f} A = {mA[i] / dicdt:.2f} K, normalized {mN[i]:.4f}")
+
+    rnorm = LogNorm(vmin=np.nanmin(ramp), vmax=np.nanmax(ramp))
+    tnorm = Normalize(vmin=np.nanmin(t0), vmax=np.nanmax(t0))
+    cmap = plt.get_cmap("viridis")
+    fig, axs = plt.subplots(2, 2, figsize=(12, 9.5), constrained_layout=True)
+    (a, b), (c, d) = axs
+
+    def kaxis(ax):
+        sec = ax.secondary_yaxis("right", functions=(lambda y: y / dicdt, lambda k: k * dicdt))
+        sec.set_ylabel("equivalent temperature margin (K)")
+
+    a.errorbar(t0[ok], mA[ok], yerr=mA_err[:, ok], fmt="none", ecolor="0.6",
+               elinewidth=1, capsize=2, zorder=1)
+    sc = a.scatter(t0[ok], mA[ok], c=ramp[ok], cmap=cmap, norm=rnorm, s=46,
+                   edgecolors="white", linewidths=0.8, zorder=2)
+    a.scatter(t0[anc], mA[anc], s=170, facecolors="none", edgecolors="black",
+              linewidths=1.4, zorder=3, label="anchor (77 K, 20 A/s)")
+    a.set_xlabel("T0 (K)")
+    a.set_ylabel("I* - Ic(T0) (A)")
+    a.set_title("(a) absolute margin vs bath temperature", loc="left")
+    a.legend(loc="best", frameon=False, fontsize=9)
+    kaxis(a)
+    fig.colorbar(sc, ax=a, label="ramp rate (A/s)", pad=0.02)
+    style(a)
+
+    b.errorbar(ramp[ok], mA[ok], yerr=mA_err[:, ok], fmt="none", ecolor="0.6",
+               elinewidth=1, capsize=2, zorder=1)
+    sc = b.scatter(ramp[ok], mA[ok], c=t0[ok], cmap=cmap, norm=tnorm, s=46,
+                   edgecolors="white", linewidths=0.8, zorder=2)
+    b.scatter(ramp[anc], mA[anc], s=170, facecolors="none", edgecolors="black",
+              linewidths=1.4, zorder=3)
+    b.set_xscale("log")
+    b.set_xlabel("ramp rate (A/s)")
+    b.set_ylabel("I* - Ic(T0) (A)")
+    b.set_title("(b) absolute margin vs ramp rate", loc="left")
+    kaxis(b)
+    fig.colorbar(sc, ax=b, label="T0 (K)", pad=0.02)
+    style(b)
+
+    sc = c.scatter(t0[ok], mN[ok], c=ramp[ok], cmap=cmap, norm=rnorm, s=46,
+                   edgecolors="white", linewidths=0.8, zorder=2)
+    c.scatter(t0[anc], mN[anc], s=170, facecolors="none", edgecolors="black",
+              linewidths=1.4, zorder=3)
+    c.set_xlabel("T0 (K)")
+    c.set_ylabel("(I* - Ic) / I*")
+    c.set_title("(c) normalized margin (= 1 - Ic/I*, same trend as I*/Ic)", loc="left")
+    fig.colorbar(sc, ax=c, label="ramp rate (A/s)")
+    style(c)
+
+    sc = d.scatter(t0[ok], ramp[ok], c=mA[ok], cmap=cmap, s=90,
+                   edgecolors="white", linewidths=0.8, zorder=2)
+    for x, y, cid in zip(t0, ramp, cids):
+        d.annotate(f"{cid}", (x, y), xytext=(5, 4), textcoords="offset points",
+                   fontsize=7, color="0.35")
+    d.set_yscale("log")
+    d.set_xlabel("T0 (K)")
+    d.set_ylabel("ramp rate (A/s)")
+    d.set_title("(d) design points, colored by I* - Ic (A)", loc="left")
+    fig.colorbar(sc, ax=d, label="I* - Ic(T0) (A)")
+    style(d)
+
+    if title:
+        fig.suptitle(title + " -- margin above Ic(T0)", fontsize=13)
+    fig.savefig(out, dpi=150)
+    print(f"wrote {out}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -207,8 +303,9 @@ def main():
     a = p.parse_args()
     rows = read_csv(a.table)
     overview(rows, a.out, a.title)
+    o = Path(a.out)
+    margin_plot(rows, str(o.with_name(o.stem + "_margin" + o.suffix)), a.title)
     if a.points:
-        o = Path(a.out)
         points_plot(rows, read_csv(a.points), str(o.with_name(o.stem + "_points" + o.suffix)),
                     a.title)
 

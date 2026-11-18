@@ -865,4 +865,6 @@ stretched from 1.5 s to 30-60 s (long-term fate of overcurrents).
   `Ok: Normal End`. ratio 1.3 (cold start above Ic): Tmax 77.20 -> 77.45 ->
   77.78, no bisections (dTmax and Jc swing both under bounds), `Ok: Normal End`.
   `[hold]` line prints `tEnd` correctly. Wrapper flag forwarding/defaults
-  checked with a stub binary.
+  checked with a stub binary. Rejection path forced with `-holdmaxrise 0.1`
+  (ratio 1.3, same jump): dt 0.25 gave dTmax 0.198 > 0.1 -> `[bisect]` ->
+  dt 0.125 accepted (dTmax 0.099), `Ok: Normal End`.
