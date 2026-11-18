@@ -835,3 +835,34 @@ paired I* with and without B-field feedback.
   (heater 0, ramp_dt 999, flat runaway_tmax 250, 18h wall budget, Bfield's
   OSPool site exclusions, outputs under `runs_istar/`). The driver counts
   `runaway_before_pulse` as runaway.
+
+## Extended post-ramp hold (`-holdtime`/`-holddtfrac`/`-holddtmax`/`-holdmaxrise`, 2026-11-17)
+
+For a repeat of the 801-ratio no-heater sweep with the post-ramp hold
+stretched from 1.5 s to 30-60 s (long-term fate of overcurrents).
+`condor/sweep_noheater_hold.sub` (30 s, labels `hold30_<label>`, outputs
+`runs_hold30/`).
+
+- `tEnd = tPulseEnd + holdTime` (default 1.5 = original). Past
+  `tPulseEnd+0.2`, with `holdDtFrac>0`, hold dt = `holdDtFrac*(t-tPulseEnd)`
+  clamped to `[0.02, holdDtMax]` -- log-spaced; ~121 steps for 30 s, ~151 for
+  60 s (vs ~85 for the old 1.5 s at fixed 0.02). Each hold step joins the
+  existing bisection loop: rejected if Jc swings > `maxJcFracChange` (same
+  check as the above-Ic ramp) OR `|dTmax| > holdMaxRise` (the Jc check is
+  blind above Tc, where JcT floors at 1). `holdDtNext` caps the next step at
+  2x what last worked. **Not checkpointed** -- resets to the schedule each
+  invocation (no checkpoint-format change).
+- `holdDtFrac=0` (default) = fixed 0.02 schedule and controller off, i.e.
+  unchanged behavior when unflagged (the I* sweep's jobs rely on this).
+- `run_transient.py --hold-time/--hold-dt-frac/--hold-dt-max/--hold-max-rise`,
+  forwarded every invocation and recorded in `status.json` `inputs`.
+- The sweep ships its own `payload_hold.tar.gz` (`./make_payload.sh
+  payload_hold.tar.gz`; `condor_run_ratio.sh` extracts `${PAYLOAD:-payload.tar.gz}`)
+  so building it never swaps the tarball under queued jobs of another sweep.
+- **Verified (real FreeFEM, sweep image, Docker amd64 emulation, ~27 min/step)**:
+  checkpoint jumped to `tPulseEnd+5 s`, 3 steps each. ratio 0.9: dt
+  0.25 -> 0.2625 -> 0.2756 (exactly 0.05x elapsed), Tmax 77.001-77.003,
+  `Ok: Normal End`. ratio 1.3 (cold start above Ic): Tmax 77.20 -> 77.45 ->
+  77.78, no bisections (dTmax and Jc swing both under bounds), `Ok: Normal End`.
+  `[hold]` line prints `tEnd` correctly. Wrapper flag forwarding/defaults
+  checked with a stub binary.

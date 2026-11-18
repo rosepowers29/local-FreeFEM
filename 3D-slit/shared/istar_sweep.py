@@ -130,6 +130,13 @@ def load_results(conds, runs_dir, suffix):
             by_cid[cid].append((float(st["ratio"]), classify(st), st))
     for v in by_cid.values():
         v.sort(key=lambda x: x[0])
+    if not any(by_cid.values()):
+        # Almost always a wrong --runs-dir (e.g. Condor dropped outputs
+        # somewhere else), not "nothing landed" -- fail loudly rather than
+        # print "0 new jobs", which reads like convergence.
+        sys.exit(f"ERROR: no is-cNNN-r*{suffix}/status.json found under "
+                 f"{runs_dir.resolve()} for any condition -- check --runs-dir "
+                 f"(try: find . -path '*is-c*' -name status.json | head)")
     return by_cid
 
 

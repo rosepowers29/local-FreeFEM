@@ -16,6 +16,8 @@ RATIO="$1"
 LABEL="$2"
 shift 2
 
-tar xzf payload.tar.gz
+# PAYLOAD (set via the submit file's `environment`) lets a sweep ship its
+# own tarball name (see make_payload.sh); unset = payload.tar.gz as before.
+tar xzf "${PAYLOAD:-payload.tar.gz}"
 cd work
 python3 run_transient.py --ratio "$RATIO" --label "$LABEL" --force "$@"

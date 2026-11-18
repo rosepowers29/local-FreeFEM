@@ -184,3 +184,19 @@ Smoketest came back clean -- unchanged observation window is long
 enough, no sign any boundary ratio was still trending toward runaway at
 cutoff (see CLAUDE.md for the per-ratio dTmax/dt numbers). Full batch is
 `sweep_noheater.sub`, same `ratios.txt` as the heater sweep.
+
+## Extended-hold no-heater sweep (`sweep_noheater_hold.sub`)
+
+Same 801 ratios (`ratios.txt`) as `sweep_noheater.sub`, post-ramp hold 30 s
+with log-growing dt (see `../CLAUDE.md`, "Extended post-ramp hold").
+Uses its own tarball so it can be built while other sweeps are queued:
+
+```bash
+./make_payload.sh payload_hold.tar.gz
+mkdir -p logs
+condor_submit sweep_noheater_hold.sub
+```
+Outputs land in this directory as `hold30_<label>/` (Condor keeps only the
+last path component) -- `mkdir -p ../runs_hold30 && mv hold30_*/ ../runs_hold30/`.
+For a 60 s hold, set `hold_time = 60` and `tag = hold60` in the .sub
+(~30 more steps/job).

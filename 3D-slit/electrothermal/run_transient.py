@@ -102,6 +102,15 @@ DEFAULT_T0 = 77.0
 # pool's own ~20h cap and then blindly retried by sweep.sub's hold/release
 # policy -- see Bfield/CLAUDE.md's 2026-10-07 incident.
 DEFAULT_MAX_WALL_SECONDS = None
+# Post-ramp hold, forwarded as -holdtime/-holddtfrac/-holddtmax/-holdmaxrise.
+# Defaults reproduce the .edp's original fixed 1.5 s hold at dt=0.02 (the
+# hold controller is off when hold_dt_frac=0) -- see the .edp's holdTime
+# comment. For long holds: e.g. --hold-time 30 --hold-dt-frac 0.05
+# --hold-dt-max 1.0 (log-spaced steps, ~100 hold steps instead of ~1500).
+DEFAULT_HOLD_TIME = 1.5
+DEFAULT_HOLD_DT_FRAC = 0.0
+DEFAULT_HOLD_DT_MAX = 0.02
+DEFAULT_HOLD_MAX_RISE = 5.0
 
 
 def ts():
@@ -245,10 +254,14 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
             max_bisections=DEFAULT_MAX_BISECTIONS,
             max_jc_frac_change=DEFAULT_MAX_JC_FRAC_CHANGE,
             heater_power=DEFAULT_HEATER_POWER,
-            t0=DEFAULT_T0, max_wall_seconds=DEFAULT_MAX_WALL_SECONDS):
+            t0=DEFAULT_T0, max_wall_seconds=DEFAULT_MAX_WALL_SECONDS,
+            hold_time=DEFAULT_HOLD_TIME, hold_dt_frac=DEFAULT_HOLD_DT_FRAC,
+            hold_dt_max=DEFAULT_HOLD_DT_MAX, hold_max_rise=DEFAULT_HOLD_MAX_RISE):
     meta = {"t0": t0, "ratio": ratio, "ramp_rate": ramp_rate,
             "heater_power": heater_power, "runaway_tmax": runaway_tmax,
-            "settle_tmax_max": settle_tmax_max}
+            "settle_tmax_max": settle_tmax_max, "hold_time": hold_time,
+            "hold_dt_frac": hold_dt_frac, "hold_dt_max": hold_dt_max,
+            "hold_max_rise": hold_max_rise}
 
     def fin(*a, **k):
         return finalize(*a, meta=meta, **k)
@@ -309,7 +322,11 @@ def run_one(ratio, label, base_dir="runs", runaway_tmax=DEFAULT_RUNAWAY_TMAX,
                                             "-maxbisections", str(max_bisections),
                                             "-maxjcfracchange", str(max_jc_frac_change),
                                             "-heaterpower", str(heater_power),
-                                            "-tzero", str(t0)],
+                                            "-tzero", str(t0),
+                                            "-holdtime", str(hold_time),
+                                            "-holddtfrac", str(hold_dt_frac),
+                                            "-holddtmax", str(hold_dt_max),
+                                            "-holdmaxrise", str(hold_max_rise)],
                               log_fh, freefem_bin)
             # NOTE: n_steps counts FreeFEM invocations, not physical timesteps,
             # once steps_per_invocation > 1 -- each invocation now advances up
@@ -512,6 +529,18 @@ def main():
                         "retry-worthy) once this many seconds of wall-clock have "
                         "elapsed, rather than starting another invocation. Set this "
                         "below your Condor pool's own walltime cap. Default: no limit.")
+    p.add_argument("--hold-time", type=float, default=DEFAULT_HOLD_TIME,
+                   help=f"Post-ramp hold length in s after the (possibly disabled) "
+                        f"heater-pulse window (default: {DEFAULT_HOLD_TIME}).")
+    p.add_argument("--hold-dt-frac", type=float, default=DEFAULT_HOLD_DT_FRAC,
+                   help=f"Hold dt = this x time since ramp end, past the first 0.2 s "
+                        f"(default: {DEFAULT_HOLD_DT_FRAC} = fixed 0.02 s, original "
+                        f"behavior). >0 also enables the hold accuracy controller.")
+    p.add_argument("--hold-dt-max", type=float, default=DEFAULT_HOLD_DT_MAX,
+                   help=f"Cap on the growing hold dt in s (default: {DEFAULT_HOLD_DT_MAX}).")
+    p.add_argument("--hold-max-rise", type=float, default=DEFAULT_HOLD_MAX_RISE,
+                   help=f"Hold steps moving Tmax more than this (K) are bisected "
+                        f"(default: {DEFAULT_HOLD_MAX_RISE}); only with --hold-dt-frac>0.")
     args = p.parse_args()
 
     label = args.label or sanitize_label(args.ratio)
@@ -521,7 +550,8 @@ def main():
             args.steps_per_invocation, args.ramp_rate, args.ramp_dt,
             args.ramp_dt_above_ic, args.settle_tmax_max,
             args.max_step_rise, args.max_bisections, args.max_jc_frac_change,
-            args.heater_power, args.t0, args.max_wall_seconds)
+            args.heater_power, args.t0, args.max_wall_seconds,
+            args.hold_time, args.hold_dt_frac, args.hold_dt_max, args.hold_max_rise)
     # Exit code drives Condor's on_exit_hold/periodic_release retry policy
     # (see condor/sweep.sub) -- without this, the process always exited 0
     # regardless of status, so no exit-code-based retry could ever have

@@ -108,7 +108,32 @@ if (rampRateTarget > 0.0) Tramp = I0Target/rampRateTarget;
 // behavior (tt<tCrossIc covers the whole ramp, same as tt<Tramp did).
 real tCrossIc = (currentRatio > 1.0) ? Tramp/currentRatio : Tramp;
 real tPulseStart = Tramp, tPulseDur = 0.01, tPulseEnd = tPulseStart+tPulseDur;
-real tEnd = tPulseEnd + 1.5;
+// Extended post-ramp hold (long-term stability of overcurrents).
+// holdTime (-holdtime, s): hold length after tPulseEnd (default 1.5, the
+// original fixed window). holdDtFrac (-holddtfrac): past tPulseEnd+0.2 the
+// hold dt grows as holdDtFrac*(t-tPulseEnd) -- log-spaced in time, so a
+// 30-60s hold costs ~100 steps instead of ~1500 at the old fixed 0.02 --
+// capped at holdDtMax (-holddtmax, s), floored at the old 0.02. Default
+// holdDtFrac=0 keeps the fixed 0.02 schedule and disables the hold
+// controller below, i.e. byte-identical behavior when unflagged.
+// With holdDtFrac>0, a hold step is also accuracy-checked (same Jc-swing
+// bound as the above-Ic ramp, maxJcFracChange) and bisected if T moves too
+// fast; holdDtNext then caps the following step at 2x what last worked, so
+// a slowly-developing runaway is resolved with small steps while a
+// settled state coasts at holdDtMax. holdDtNext is NOT checkpointed: each
+// invocation restarts from the schedule (at most one bisection chain per
+// invocation -- no checkpoint format change).
+real holdTime = getARGV("-holdtime", 1.5);
+real holdDtFrac = getARGV("-holddtfrac", 0.0);
+real holdDtMax = getARGV("-holddtmax", 0.02);
+// holdMaxRise (-holdmaxrise, K): hold steps are also bisected if Tmax
+// moves more than this in one step -- the Jc-swing check is blind above
+// Tc (JcT floors at 1 there), so this is the guard for a hot spot above Tc.
+real holdMaxRise = getARGV("-holdmaxrise", 5.0);
+real holdDtNext = -1.0;
+real tEnd = tPulseEnd + holdTime;
+cout << "[hold] holdTime=" << holdTime << " holdDtFrac=" << holdDtFrac
+     << " holdDtMax=" << holdDtMax << " tEnd=" << tEnd << endl;
 
 func real I0ofT(real tt){
   if (tt < Tramp) return I0Target*(tt/Tramp);
@@ -119,7 +144,12 @@ func real dtRaw(real tt){
   if (tt < tCrossIc) return rampDt;
   if (tt < Tramp) return rampDtAboveIc;
   if (tt < tPulseEnd) return 0.002;
-  if (tt > tPulseEnd + 0.2) return 0.02;
+  if (tt > tPulseEnd + 0.2){
+    if (holdDtFrac <= 0.0) return 0.02;
+    real dh = min(holdDtMax, max(0.02, holdDtFrac*(tt-tPulseEnd)));
+    if (holdDtNext > 0.0) dh = min(dh, holdDtNext);
+    return dh;
+  }
   return 0.01;
 }
 func real dtCapped(real tt){
@@ -381,6 +411,7 @@ if (t <= 1e-12) {
     // right guard there) and the pulse/post-pulse phases already have
     // independently-validated fixed dt.
     bool inAboveIcPhase = (currentRatio > 1.0 && t >= tCrossIc-1e-9 && t < Tramp-1e-9);
+    bool inHoldPhase = (holdDtFrac > 0.0 && t > tPulseEnd + 0.2);
 
     real qHeaterNow = 0.0;
     if (t >= tPulseStart && t < tPulseEnd) qHeaterNow = qHeater;
@@ -440,10 +471,11 @@ if (t <= 1e-12) {
       // definition above. Skipped once blewUp is already true: no point
       // computing Jc off a catastrophically garbage T[].max.
       bool jcTooFast = false;
-      if (inAboveIcPhase && !blewUp){
+      if ((inAboveIcPhase || inHoldPhase) && !blewUp){
         jcFrac = abs(JcT(T[].max)-jcBefore)/max(jcRef, 1e-30);
         jcTooFast = jcFrac > maxJcFracChange;
       }
+      if (inHoldPhase && !blewUp && abs(T[].max-TmaxBefore) > holdMaxRise) jcTooFast = true;
       if (!blewUp && !jcTooFast) solveOk = true;
       else {
         bisectCount++;
@@ -465,6 +497,10 @@ if (t <= 1e-12) {
     if (inAboveIcPhase){
       if (jcFrac < 0.5*maxJcFracChange) rampDtAboveIc = dtTry*2.0;
       else rampDtAboveIc = dtTry;
+    }
+    if (inHoldPhase){
+      if (jcFrac < 0.5*maxJcFracChange && abs(T[].max-TmaxBefore) < 0.5*holdMaxRise) holdDtNext = dtTry*2.0;
+      else holdDtNext = dtTry;
     }
     real tSolveDone = clock();
     cout << "[profile] step=" << step << " elecSplit=" << (tElecDone-tElecStart)
